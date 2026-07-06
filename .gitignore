@@ -1,0 +1,38 @@
+# 环境变量
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Streamlit
+.streamlit/
+
+# 运行时生成的文件
+uploads/
+outputs/
+vector_store/
+memory/
+skills/*.md
+*.xlsx
+*.xls
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Mac
+.DS_Store
+
+# 临时文件
+*.tmp
+*.log
