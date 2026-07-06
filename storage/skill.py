@@ -1,9 +1,9 @@
-"""技能存储 - 技能 = 方法论 + 处理流程 + 代码"""
+"""技能存储"""
 import json
 import re
 import uuid
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -11,37 +11,42 @@ from datetime import datetime
 @dataclass
 class Skill:
     """
-    技能定义
+    技能 = 方法论 + 步骤 + 代码（可选）
     
-    技能不只是代码，而是一套完成任务的方法论：
-    - method: 分析问题的方法
-    - steps: 处理步骤/流程
-    - code: 可选的执行代码
+    技能不只是代码，是一套完成任务的方法论
     """
-    id: str
-    name: str
-    description: str
+    id: str = ""
+    name: str = ""
+    description: str = ""
     
-    # 核心：方法论
-    method: str = ""  # 分析问题的方法论
-    steps: List[str] = field(default_factory=list)  # 处理步骤
+    # 方法论：如何分析问题
+    method: str = ""
     
-    # 可选：代码
-    code: str = ""  # 可选的执行代码
+    # 步骤：如何执行
+    steps: List[str] = field(default_factory=list)
+    
+    # 代码：可选的执行代码
+    code: str = ""
+    
+    # 标签：技能分类
+    tags: List[str] = field(default_factory=list)
+    
+    # 示例
+    examples: List[str] = field(default_factory=list)
     
     # 元数据
     version: str = "1.0"
-    tags: List[str] = field(default_factory=list)  # 技能标签
-    examples: List[str] = field(default_factory=list)  # 使用示例
-    
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    def __post_init__(self):
+        if not self.id:
+            self.id = f"skill_{uuid.uuid4().hex[:8]}"
     
     def to_markdown(self) -> str:
         """导出为 Markdown"""
         steps_str = "\n".join(f"{i+1}. {s}" for i, s in enumerate(self.steps)) if self.steps else "无"
-        examples_str = "\n".join(f"- {ex}" for ex in self.examples) if self.examples else "无"
         tags_str = ", ".join(self.tags) if self.tags else "无"
+        examples_str = "\n".join(f"- {e}" for e in self.examples) if self.examples else "无"
         
         return f"""# 技能：{self.name}
 
@@ -62,7 +67,7 @@ class Skill:
 
 ## 代码（可选）
 ```python
-{self.code}
+{self.code or "无"}
 ```
 
 ## 使用示例
@@ -70,72 +75,63 @@ class Skill:
 """
     
     @classmethod
-    def from_markdown(cls, content: str, file_id: str = None) -> Optional['Skill']:
-        """从 Markdown 导入"""
+    def from_markdown(cls, content: str, file_id: str = "") -> Optional["Skill"]:
+        """从 Markdown 解析"""
         try:
-            # 提取基本信息
-            id_match = re.search(r'- ID: (.+)', content)
-            version_match = re.search(r'- 版本: (.+)', content)
-            created_match = re.search(r'- 创建时间: (.+)', content)
-            tags_match = re.search(r'- 标签: (.+)', content)
+            skill = cls()
             
-            name_match = re.search(r'# 技能：(.+)', content)
-            name = name_match.group(1).strip() if name_match else "unknown"
+            # ID
+            if m := re.search(r"- ID: (.+)", content):
+                skill.id = m.group(1).strip()
+            elif file_id:
+                skill.id = file_id
             
-            desc_match = re.search(r'## 描述\n(.+?)(?=##)', content, re.DOTALL)
-            description = desc_match.group(1).strip() if desc_match else ""
+            # 版本
+            if m := re.search(r"- 版本: (.+)", content):
+                skill.version = m.group(1).strip()
             
-            method_match = re.search(r'## 方法论\n(.+?)(?=##)', content, re.DOTALL)
-            method = method_match.group(1).strip() if method_match else ""
+            # 标签
+            if m := re.search(r"- 标签: (.+)", content):
+                skill.tags = [t.strip() for t in m.group(1).split(",")]
             
-            # 提取步骤
-            steps = []
-            steps_match = re.search(r'## 处理步骤\n([\s\S]+?)(?=##)', content)
-            if steps_match:
-                for line in steps_match.group(1).strip().split('\n'):
+            # 名称
+            if m := re.search(r"# 技能：(.+)", content):
+                skill.name = m.group(1).strip()
+            
+            # 描述
+            if m := re.search(r"## 描述\n(.+?)(?=##)", content, re.DOTALL):
+                skill.description = m.group(1).strip()
+            
+            # 方法论
+            if m := re.search(r"## 方法论\n(.+?)(?=##)", content, re.DOTALL):
+                skill.method = m.group(1).strip()
+            
+            # 步骤
+            skill.steps = []
+            if m := re.search(r"## 处理步骤\n([\s\S]+?)(?=##)", content):
+                for line in m.group(1).strip().split("\n"):
                     line = line.strip()
                     if line and line[0].isdigit():
-                        steps.append(re.sub(r'^\d+\.\s*', '', line))
+                        skill.steps.append(re.sub(r"^\d+\.\s*", "", line))
             
-            # 提取代码
-            code_match = re.search(r'```python\n([\s\S]*?)```', content)
-            code = code_match.group(1).strip() if code_match else ""
+            # 代码
+            if m := re.search(r"```python\n([\s\S]+?)```", content):
+                skill.code = m.group(1).strip()
             
-            # 提取标签
-            tags = []
-            if tags_match:
-                tags = [t.strip() for t in tags_match.group(1).split(',')]
+            # 示例
+            skill.examples = re.findall(r"- (.+)", content)
             
-            # 提取示例
-            examples = re.findall(r'- (.+)', content)
+            if not skill.name:
+                return None
             
-            return cls(
-                id=id_match.group(1).strip() if id_match else file_id or str(uuid.uuid4()),
-                name=name,
-                description=description,
-                method=method,
-                steps=steps,
-                code=code,
-                version=version_match.group(1).strip() if version_match else "1.0",
-                tags=tags,
-                examples=examples,
-                created_at=created_match.group(1).strip() if created_match else None
-            )
+            return skill
         except Exception as e:
             print(f"解析技能失败: {e}")
             return None
-    
-    def needs_code(self) -> bool:
-        """是否需要代码"""
-        return bool(self.code.strip())
-    
-    def get_capabilities(self) -> List[str]:
-        """获取技能提供的核心能力"""
-        return self.tags or []
 
 
 class SkillStore:
-    """技能存储"""
+    """技能库"""
     
     def __init__(self, path: str = "skills"):
         self.path = Path(path)
@@ -152,46 +148,38 @@ class SkillStore:
     
     def add(self, skill: Skill) -> str:
         """添加技能"""
-        # 检查是否已有同名技能
-        for existing in self._skills.values():
-            if existing.name.lower() == skill.name.lower():
+        # 检查同名
+        for s in self._skills.values():
+            if s.name.lower() == skill.name.lower():
                 # 更新
-                existing.method = skill.method
-                existing.steps = skill.steps
-                existing.code = skill.code
-                existing.tags = skill.tags
-                self._save(existing)
-                return existing.id
+                s.method = skill.method
+                s.steps = skill.steps
+                s.code = skill.code
+                s.tags = skill.tags
+                self._save(s)
+                return s.id
         
         self._skills[skill.id] = skill
         self._save(skill)
         return skill.id
     
     def get(self, skill_id: str) -> Optional[Skill]:
-        """获取技能"""
         return self._skills.get(skill_id)
     
     def get_by_name(self, name: str) -> Optional[Skill]:
-        """按名称获取"""
-        for skill in self._skills.values():
-            if skill.name.lower() == name.lower():
-                return skill
+        for s in self._skills.values():
+            if s.name.lower() == name.lower():
+                return s
         return None
     
     def search_by_tags(self, tags: List[str]) -> List[Skill]:
-        """按标签搜索"""
-        results = []
-        for skill in self._skills.values():
-            if any(tag in skill.tags for tag in tags):
-                results.append(skill)
-        return results
+        return [s for s in self._skills.values() 
+                if any(t in s.tags for t in tags)]
     
     def list_all(self) -> List[Skill]:
-        """列出所有技能"""
         return list(self._skills.values())
     
     def delete(self, skill_id: str) -> bool:
-        """删除技能"""
         if skill_id in self._skills:
             skill = self._skills.pop(skill_id)
             file = self.path / f"{skill.id}.md"
@@ -201,17 +189,14 @@ class SkillStore:
         return False
     
     def _save(self, skill: Skill):
-        """保存技能"""
         file = self.path / f"{skill.id}.md"
         file.write_text(skill.to_markdown(), encoding="utf-8")
     
     def reload(self):
-        """重新加载"""
         self._skills.clear()
         self._load_all()
     
     def count(self) -> int:
-        """技能数量"""
         return len(self._skills)
 
 
