@@ -20,7 +20,8 @@ uploads/
 outputs/
 vector_store/
 memory/
-skills/*.md
+# 个人生成的技能文件（可以保留模板）
+# skills/*.md
 *.xlsx
 *.xls
 
