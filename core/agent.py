@@ -1,161 +1,157 @@
-"""Agent 核心 - 以技能为中心"""
-from typing import List, Optional, Callable, Dict, Any
+"""Agent 核心 - 多智能体协作"""
+from typing import List, Dict, Optional, Callable, Any
+from concurrent.futures import ThreadPoolExecutor
+import time
 
-from storage.skill import Skill, get_skill_store
+from agents.manager import ManagerAgent
+from agents.learning import LearningAgent
+from agents.orchestrator import OrchestratorAgent
+from infra.logger import get_logger, LogType
 
 
 class Agent:
-    """Agent - 以技能为核心"""
+    """
+    多智能体协作 Agent
+    
+    每个智能体都是流转中枢：
+    ┌─────────────────────────────────────────────────────────────┐
+    │  Manager Agent (流转中枢)                                    │
+    │  - 意图识别                                                │
+    │  - 选择技能（方法论）                                       │
+    │  - 规划工具调用                                            │
+    └────────────────────────────┬────────────────────────────────┘
+                                 │
+                                 ▼
+    ┌─────────────────────────────────────────────────────────────┐
+    │  Learning Agent (流转中枢)                                  │
+    │  - 执行工具调用                                            │
+    │  - 获取数据                                                │
+    └────────────────────────────┬────────────────────────────────┘
+                                 │
+                                 ▼
+    ┌─────────────────────────────────────────────────────────────┐
+    │  Orchestrator Agent (流转中枢)                               │
+    │  - 整合数据                                                │
+    │  - 按技能方法论生成回答                                     │
+    └─────────────────────────────────────────────────────────────┘
+    """
     
     def __init__(
         self,
-        llm_client,
-        system_prompt: str = ""
+        system_prompt: str = "",
+        max_workers: int = 4
     ):
-        self.llm = llm_client
-        self.skill_store = get_skill_store()
-        self.system_prompt = system_prompt
+        # 初始化三个流转中枢
+        self.manager = ManagerAgent()
+        self.learning = LearningAgent()
+        self.orchestrator = OrchestratorAgent()
+        
+        # 线程池用于并行执行任务
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        
         self.context: List[Dict] = []
-        self.max_iterations = 10
+        self.system_prompt = system_prompt
+        self.logger = get_logger()
     
-    def chat(self, user_input: str, callback: Optional[Callable] = None) -> str:
+    def chat(
+        self,
+        user_input: str,
+        callback: Optional[Callable] = None
+    ) -> str:
         """
-        核心流程：
-        1. 理解任务
-        2. 选择技能（方法论 + 步骤）
-        3. 执行技能（代码可选）
+        多智能体协作处理用户输入
+        
+        Args:
+            user_input: 用户输入
+            callback: 步骤回调函数
+        
+        Returns:
+            最终回答
         """
-        self.context.append({"role": "user", "content": user_input})
+        start_time = time.time()
         
-        # 1. 理解任务，选择/生成技能
-        skill = self._select_skill(user_input)
+        # 记录输入数据
+        self.logger.log_data("Agent", "in", "user_input", user_input)
+        self.logger.log_flow("Agent", "开始处理用户请求")
         
-        if callback:
-            callback(f"\n📚 选择技能: {skill.name}\n")
-            callback(f"方法论: {skill.method}\n")
-            callback(f"步骤: {', '.join(skill.steps)}\n")
+        # 辅助函数：安全调用 callback
+        def safe_callback(step_type: str, message: str):
+            if callback:
+                try:
+                    callback(step_type, message)
+                except:
+                    pass
         
-        # 2. 执行技能
-        result = self._execute_skill(skill, user_input, callback)
+        safe_callback("thinking", "正在分析意图...")
         
-        # 3. 返回结果
-        return result
-    
-    def _select_skill(self, task: str) -> Skill:
-        """
-        选择或生成技能
-        1. 搜索已有技能
-        2. 如果没有，生成新技能
-        """
-        # 搜索已有技能
-        tags = self._infer_tags(task)
-        matched_skills = self.skill_store.search_by_tags(tags)
+        # 检查是否直接回答
+        if self.manager.should_answer_directly(user_input):
+            safe_callback("info", "直接回答")
+            self.logger.log_flow("Agent", "直接回答，无需工具调用")
+            response = self.orchestrator.generate_response(user_input)
+            return response
         
-        if matched_skills:
-            # 选择最匹配的
-            return matched_skills[0]
+        # 检查是否教导技能
+        if self.manager.should_learn_skill(user_input):
+            safe_callback("learning", "检测到教导意图...")
+            return "请告诉我具体的方法和步骤，我来学习这个技能。"
         
-        # 生成新技能
-        return self._create_skill(task)
-    
-    def _infer_tags(self, task: str) -> List[str]:
-        """推断任务标签"""
-        tags = []
-        task_lower = task.lower()
+        # ============================================================
+        # Step 1: Manager 流转中枢 - 意图识别、技能选择、工具规划
+        # ============================================================
+        self.logger.log_flow("Manager", "开始流转：意图识别、技能选择、工具规划")
         
-        if any(k in task_lower for k in ["分析", "分析数据"]):
-            tags.append("分析")
-        if any(k in task_lower for k in ["搜索", "查找", "检索"]):
-            tags.append("搜索")
-        if any(k in task_lower for k in ["总结", "摘要"]):
-            tags.append("总结")
-        if any(k in task_lower for k in ["代码", "编程", "写代码"]):
-            tags.append("代码")
-        if any(k in task_lower for k in ["报告", "文档"]):
-            tags.append("文档")
+        plan = self.manager.analyze(user_input)
         
-        return tags or ["通用"]
-    
-    def _create_skill(self, task: str) -> Skill:
-        """生成新技能"""
-        prompt = f"""分析任务：{task}
-
-请生成技能：
-1. method: 分析这个任务的方法论
-2. steps: 处理步骤列表（3-5步）
-3. tags: 标签列表
-
-返回 JSON 格式："""
+        safe_callback("intent", f"识别意图: {plan.intent}")
         
-        response = self.llm.chat(
-            messages=[{"role": "user", "content": prompt}]
+        if plan.selected_skill:
+            safe_callback("skill", f"选择技能: {plan.selected_skill.name}")
+        
+        # ============================================================
+        # Step 2: Learning 流转中枢 - 工具调用、数据获取
+        # ============================================================
+        tool_results = {}
+        if plan.tool_tasks:
+            safe_callback("tool", f"开始执行 {len(plan.tool_tasks)} 个工具任务")
+            self.logger.log_flow("Learning", "开始流转：工具调用、数据获取")
+            
+            for task in plan.tool_tasks:
+                task_type = task.get("type", "")
+                params = task.get("params", {})
+                
+                safe_callback("tool", f"调用: {task_type}")
+                
+                result = self.learning.execute_task(task_type, params)
+                tool_results[task_type] = result
+                
+                if result.success:
+                    safe_callback("success", f"✓ {task_type} 完成")
+                else:
+                    safe_callback("error", f"✗ {task_type} 失败: {result.error}")
+        
+        # ============================================================
+        # Step 3: Orchestrator 流转中枢 - 整合数据、生成回答
+        # ============================================================
+        safe_callback("plan", "整合数据，生成回答...")
+        self.logger.log_flow("Orchestrator", "开始流转：整合数据、生成回答")
+        
+        response = self.orchestrator.orchestrate(
+            user_input=user_input,
+            tool_results=tool_results,
+            selected_skill=plan.selected_skill
         )
         
-        content = response.get("message", {}).get("content", "")
+        safe_callback("success", "回答生成完成")
         
-        # 解析 LLM 返回，生成 Skill
-        import json
-        import re
+        # 记录输出数据
+        duration_ms = (time.time() - start_time) * 1000
+        self.logger.log_data("Agent", "out", "response", response[:200] + "..." if len(response) > 200 else response)
+        self.logger.log_flow("Agent", f"处理完成，耗时 {duration_ms:.0f}ms")
         
-        skill = Skill(name=self._extract_skill_name(task))
-        skill.method = self._extract_method(content)
-        skill.steps = self._extract_steps(content)
-        skill.tags = self._infer_tags(task)
-        skill.description = f"处理: {task}"
-        
-        # 保存
-        self.skill_store.add(skill)
-        
-        return skill
-    
-    def _extract_skill_name(self, task: str) -> str:
-        """提取技能名称"""
-        # 简单处理：取任务关键词
-        words = task[:10] if len(task) > 10 else task
-        return f"技能_{words}"
-    
-    def _extract_method(self, content: str) -> str:
-        """提取方法论"""
-        lines = content.split('\n')
-        method_lines = []
-        for line in lines:
-            if any(k in line for k in ['方法', '方法论', '思路']):
-                method_lines.append(line)
-        return '\n'.join(method_lines) or "通用分析方法"
-    
-    def _extract_steps(self, content: str) -> List[str]:
-        """提取步骤"""
-        import re
-        steps = re.findall(r'\d+\.\s*(.+)', content)
-        return steps[:5] if steps else ["理解任务", "分析需求", "输出结果"]
-    
-    def _execute_skill(self, skill: Skill, task: str, callback: Optional[Callable] = None) -> str:
-        """执行技能"""
-        # 构建上下文
-        messages = []
-        
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        
-        messages.append({
-            "role": "system", 
-            "content": f"""技能：{skill.name}
-方法论：{skill.method}
-步骤：{', '.join(skill.steps)}
-代码：{skill.code or '无'}"""
-        })
-        
-        messages.extend(self.context)
-        
-        # 调用 LLM
-        response = self.llm.chat(messages=messages)
-        
-        result = response.get("message", {}).get("content", "执行完成")
-        
-        self.context.append({"role": "assistant", "content": result})
-        
-        return result
+        return response
     
     def reset(self):
-        """重置"""
+        """重置对话上下文"""
         self.context.clear()
+        self.logger.log_flow("Agent", "对话上下文已重置")

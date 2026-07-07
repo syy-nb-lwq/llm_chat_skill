@@ -20,8 +20,6 @@ uploads/
 outputs/
 vector_store/
 memory/
-# 个人生成的技能文件（可以保留模板）
-# skills/*.md
 *.xlsx
 *.xls
 
@@ -37,3 +35,10 @@ memory/
 # 临时文件
 *.tmp
 *.log
+
+# Node
+node_modules/
+dist/
+
+# Skills 数据文件（会被提交）
+# skills/*.md

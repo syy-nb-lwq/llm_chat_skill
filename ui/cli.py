@@ -1,8 +1,5 @@
 """命令行界面"""
-from openai import OpenAI
-
 from core.agent import Agent
-from infra.config import config
 
 
 def main():
@@ -10,8 +7,7 @@ def main():
     print("📚 Skill Agent")
     print("=" * 50)
     
-    client = OpenAI(api_key=config.llm_api_key, base_url=config.llm_base_url)
-    agent = Agent(llm_client=client)
+    agent = Agent()
     
     print("输入 quit 退出\n")
     
