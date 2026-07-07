@@ -1,162 +1,163 @@
-"""Manager Agent - 流转中枢：意图识别、技能选择、任务规划"""
+"""Manager Agent - 流转中枢:意图识别、技能选择、任务规划"""
+from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
-from infra.llm import get_llm_client
+
+from core.agent_base import BaseAgent
+from infra.logger import LogType
 from skills.manager import Skill, get_skill_store
-from infra.logger import get_logger, LogType
 
 
 @dataclass
 class PlanResult:
     """规划结果"""
     intent: str
-    # 选择的技能（方法论）
     selected_skill: Optional["Skill"] = None
-    # 需要的工具任务
-    tool_tasks: List[Dict] = None
-    # 是否需要用户指导
-    needs_guidance: bool = False
-    guidance_prompt: str = ""
-    
-    def __post_init__(self):
-        if self.tool_tasks is None:
-            self.tool_tasks = []
+    tool_tasks: List[Dict] = field(default_factory=list)
 
 
-class ManagerAgent:
+# 简易意图关键词
+_SIMPLE_INTENTS = ["hi", "hello", "你好", "thanks", "谢谢", "再见", "ok", "好的"]
+_TEACHING_KEYWORDS = [
+    "以后", "记住", "下次", "按这个", "按我的", "原则", "方法论",
+    "教你", "应该", "步骤是", "正确做法",
+]
+
+
+class ManagerAgent(BaseAgent):
+    """Manager Agent - 流转中枢
+
+    职责:
+    1. 意图识别
+    2. 技能选择(方法论)
+    3. 任务规划(工具调用)
     """
-    Manager Agent - 流转中枢
-    
-    职责：
-    1. 意图识别 - 分析用户想要什么
-    2. 技能选择 - 判断使用哪个技能（方法论）
-    3. 任务规划 - 确定需要哪些工具来获取数据
-    """
-    
-    SYSTEM_PROMPT = """你是一个任务规划助手。作为流转中枢，你需要：
+
+    name = "Manager"
+
+    PLAN_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "intent":         {"type": "string"},
+            "selected_skill": {"type": "string"},
+            "tool_tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id":     {"type": "string",
+                                   "description": "任务唯一 id,用于表示依赖,例如 't1'"},
+                        "type":   {"type": "string",
+                                   "enum": ["weather_query", "web_search"]},
+                        "params": {"type": "object"},
+                        "depends_on": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "依赖的其它任务 id",
+                        },
+                        "parallel_group": {"type": "string"},
+                    },
+                    "required": ["type", "params"],
+                },
+            },
+        },
+        "required": ["intent", "tool_tasks"],
+    }
+
+    def system_prompt(self) -> str:
+        skills = self.skill_store.list_all()
+        skills_list = self._format_skills(skills)
+        return f"""你是一个任务规划助手。作为流转中枢,你需要:
 
 1. 识别用户意图
-2. 选择合适的技能（方法论）来完成任务
+2. 选择合适的技能(方法论)来完成任务
 3. 规划需要的工具来获取数据
 
-重要规则：
-- 工具只能从以下列表选择：weather_query, web_search
+重要规则:
+- 工具只能从以下列表选择:weather_query, web_search
 - 不要创建不存在的工具
-- 技能是完成任务的方法论，工具是获取数据的手段
+- 技能是完成任务的方法论,工具是获取数据的手段
 
-已有技能列表：
+已有技能列表:
 {skills_list}
 
-Output JSON format:
+严格按以下 JSON 格式输出(不要任何额外文字):
 {{
   "intent": "用户意图简短描述",
-  "selected_skill": "选择的技能名称（如果没有合适的可以为空）",
+  "selected_skill": "选择的技能名称(没有则填空字符串)",
   "tool_tasks": [
-    {{"type": "weather_query", "params": {{"city": "城市名", "date": "日期"}}},
+    {{"type": "weather_query", "params": {{"city": "城市名", "date": "日期"}}}},
     {{"type": "web_search", "params": {{"query": "搜索关键词"}}}}
   ]
 }}"""
-    
+
     def __init__(self):
-        self.llm = get_llm_client()
+        super().__init__()
         self.skill_store = get_skill_store()
-        self.logger = get_logger()
-    
-    def analyze(self, user_input: str) -> PlanResult:
-        """
-        分析用户输入，规划任务
-        
-        作为流转中枢，协调 Skill 和 Tool 的使用
-        """
+
+    async def plan(self, user_input: str) -> PlanResult:
+        """分析用户输入,产出 PlanResult(失败时降级为空规划)"""
         self.logger.log_flow("Manager", "开始意图识别和任务规划")
-        
-        # 获取所有技能
         skills = self.skill_store.list_all()
-        
-        # 格式化技能列表
-        skills_list = self._format_skills(skills)
-        
-        # 调用 LLM 进行规划
-        messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT.format(skills_list=skills_list)},
-            {"role": "user", "content": f"用户输入: {user_input}"}
-        ]
-        
-        response = self.llm.chat(messages)
-        
-        # 解析结果
-        import json
-        import re
-        
-        json_match = re.search(r'\{[\s\S]*\}', response)
-        if json_match:
-            try:
-                plan = json.loads(json_match.group())
-                
-                # 查找选中的技能
-                selected_skill_name = plan.get("selected_skill", "")
-                selected_skill = None
-                if selected_skill_name:
-                    for skill in skills:
-                        if skill.name == selected_skill_name:
-                            selected_skill = skill
-                            break
-                
-                self.logger.info(
-                    LogType.AGENT_INTENT, 
-                    "Manager", 
-                    f"识别意图: {plan.get('intent', '')}"
-                )
-                
-                if selected_skill:
-                    self.logger.info(
-                        LogType.AGENT_PLAN, 
-                        "Manager", 
-                        f"选择技能: {selected_skill.name}"
-                    )
-                
-                self.logger.info(
-                    LogType.AGENT_PLAN, 
-                    "Manager", 
-                    f"规划工具: {len(plan.get('tool_tasks', []))} 个"
-                )
-                
-                return PlanResult(
-                    intent=plan.get("intent", ""),
-                    selected_skill=selected_skill,
-                    tool_tasks=plan.get("tool_tasks", [])
-                )
-                
-            except json.JSONDecodeError:
-                pass
-        
-        # 默认规划
+        try:
+            plan = await self.think_json(user_input, self.PLAN_SCHEMA)
+        except Exception as e:
+            self.logger.error(LogType.LLM_ERROR, "Manager", f"规划失败,降级: {e}")
+            return PlanResult(intent=user_input, selected_skill=None, tool_tasks=[])
+
+        selected_skill = None
+        skill_name = plan.get("selected_skill") or ""
+        if skill_name:
+            for s in skills:
+                if s.name == skill_name:
+                    selected_skill = s
+                    break
+
+        self.logger.info(LogType.AGENT_INTENT, "Manager",
+                         f"识别意图: {plan.get('intent', '')}")
+        if selected_skill:
+            self.logger.info(LogType.AGENT_PLAN, "Manager",
+                             f"选择技能: {selected_skill.name}")
+        tool_tasks = self._auto_id_tool_tasks(plan.get("tool_tasks", []) or [])
+        self.logger.info(LogType.AGENT_PLAN, "Manager",
+                         f"规划工具: {len(tool_tasks)} 个")
+
         return PlanResult(
-            intent="信息查询",
-            selected_skill=None,
-            tool_tasks=[{"type": "weather_query", "params": {"city": "厦门", "date": "today"}}]
+            intent=plan.get("intent", ""),
+            selected_skill=selected_skill,
+            tool_tasks=tool_tasks,
         )
-    
+
+    # ----- 兼容旧 API(sync) -----
+    def analyze(self, user_input: str) -> PlanResult:
+        """同步入口(向后兼容)。内部跑异步。"""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 在已有事件循环里,起个新线程跑
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    return ex.submit(asyncio.run, self.plan(user_input)).result()
+            return loop.run_until_complete(self.plan(user_input))
+        except RuntimeError:
+            return asyncio.run(self.plan(user_input))
+
     def should_answer_directly(self, user_input: str) -> bool:
-        """检查是否应该直接回答"""
-        simple_intents = ["hi", "hello", "你好", "thanks", "谢谢", "再见"]
-        return any(intent in user_input.lower() for intent in simple_intents)
-    
+        """检查是否应该直接回答(简单寒暄)"""
+        text = user_input.lower().strip()
+        return any(intent in text for intent in _SIMPLE_INTENTS)
+
     def should_learn_skill(self, user_input: str) -> bool:
-        """检查是否在教导技能"""
-        guidance_keywords = ["应该这样做", "按我的方法", "正确做法", "教你", "学一下", "步骤是"]
-        return any(kw in user_input for kw in guidance_keywords)
-    
+        """检查是否在教导技能(关键词粗筛,LLM 二次确认在 SkillTrainer)"""
+        return any(kw in user_input for kw in _TEACHING_KEYWORDS)
+
     def _format_skills(self, skills: List[Skill]) -> str:
-        """格式化技能列表"""
         if not skills:
             return "(暂无技能)"
-        
         lines = []
-        for skill in skills:
-            lines.append(f"- {skill.name}")
-            lines.append(f"  能力: {skill.capability}")
-            lines.append(f"  方法: {skill.method}")
+        for s in skills:
+            lines.append(f"- {s.name}")
+            lines.append(f"  能力: {s.capability}")
+            lines.append(f"  方法: {s.method}")
             lines.append("")
-        
         return "\n".join(lines)

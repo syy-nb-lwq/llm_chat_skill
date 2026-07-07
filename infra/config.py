@@ -1,52 +1,55 @@
-"""配置"""
-import os
+"""配置 - 使用 pydantic-settings 加载"""
 from pathlib import Path
-
-# 自动加载 .env 文件
-env_path = Path(__file__).parent.parent / ".env"
-if env_path.exists():
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ[key.strip()] = value.strip()
-
-from dataclasses import dataclass
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
-@dataclass
-class Config:
-    """配置"""
-    llm_api_key: str = ""
-    llm_base_url: str = "https://api.openai.com/v1"
-    llm_model: str = "gpt-4"
-    
-    skills_path: str = "skills"
-    memory_path: str = "memory"
-    vector_path: str = "vector_store"
-    
-    max_iterations: int = 10
-    temperature: float = 0.7
-    
-    @classmethod
-    def from_env(cls) -> 'Config':
-        return cls(
-            llm_api_key=os.getenv("LLM_API_KEY", ""),
-            llm_base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
-            llm_model=os.getenv("LLM_MODEL", "gpt-4"),
-            skills_path=os.getenv("SKILLS_PATH", "skills"),
-            memory_path=os.getenv("MEMORY_PATH", "memory"),
-            vector_path=os.getenv("VECTOR_PATH", "vector_store"),
-            max_iterations=int(os.getenv("MAX_ITERATIONS", "10")),
-            temperature=float(os.getenv("TEMPERATURE", "0.7")),
-        )
-    
-    def validate(self) -> bool:
+class ConfigError(RuntimeError):
+    """配置错误"""
+
+
+class Config(BaseSettings):
+    """全局配置,从 .env 文件加载"""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # ----- LLM -----
+    llm_api_key: str = Field("", description="LLM API Key")
+    llm_base_url: str = Field("https://api.openai.com/v1")
+    llm_model: str = Field("gpt-4o-mini")
+    temperature: float = Field(0.7, ge=0.0, le=2.0)
+    request_timeout_s: int = Field(60, ge=1)
+
+    # ----- 路径 -----
+    skills_path: Path = Field("skills")
+    memory_path: Path = Field("memory")
+    vector_path: Path = Field("vector_store")
+
+    # ----- 运行 -----
+    max_iterations: int = Field(10, ge=1, le=100)
+    session_ttl_s: int = Field(3600, ge=60)
+
+    # ----- 日志 -----
+    log_level: str = Field("INFO")
+    log_to_file: bool = Field(False)
+    log_dir: Path = Field("logs")
+
+    # ----- Feature Flags -----
+    skill_dag_enabled: bool = Field(False)
+    tool_cache_enabled: bool = Field(False)
+
+    def validate(self) -> None:
+        """启动时调用,失败抛 ConfigError"""
         if not self.llm_api_key:
-            print("错误: 请设置 LLM_API_KEY")
-            return False
-        return True
+            raise ConfigError(
+                "LLM_API_KEY 未设置,请在 .env 文件中配置(参考 .env.example)"
+            )
 
 
-config = Config.from_env()
+# 全局单例
+config = Config()

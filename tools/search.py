@@ -1,18 +1,18 @@
 """搜索工具 - 多个搜索源"""
+import time
 import requests
-from tools.base import Tool, ToolResult
+from tools.base import Tool, ToolResult, ToolSchema, ToolParam
 from infra.logger import get_logger, LogType
 
 
 class SearchTool(Tool):
     """搜索工具 - 支持多个搜索源"""
-    
+
     name = "web_search"
-    description = "搜索互联网获取相关信息"
-    
+    description = "搜索互联网获取相关信息,支持多个搜索后端(jina/bing/serpapi/duckduckgo)级联"
+
     def __init__(self):
         self.logger = get_logger()
-        
         # 搜索源按优先级排序
         self.backends = [
             ("jina", self._search_jina),
@@ -20,26 +20,57 @@ class SearchTool(Tool):
             ("serpapi", self._search_serpapi),
             ("duckduckgo", self._search_duckduckgo),
         ]
-    
+
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            params=[
+                ToolParam(name="query", type="string", description="搜索关键词", required=True),
+                ToolParam(name="max_results", type="integer",
+                          description="最大返回结果数", required=False, default=5),
+            ],
+            returns={
+                "source": "string",
+                "query": "string",
+                "results": "array<{title,url,snippet}>",
+            },
+            examples=[{"query": "厦门景点推荐"}, {"query": "北京天气", "max_results": 3}],
+        )
+
     def execute(self, query: str, max_results: int = 5) -> ToolResult:
-        """执行搜索"""
+        """执行搜索,按优先级尝试后端,首个成功的即返回"""
+        start = time.time()
         self.logger.log_data(self.name, "in", "query", query)
-        
+
         for backend_name, search_func in self.backends:
-            self.logger.info(LogType.TOOL_CALL, self.name, "尝试: " + backend_name, {"query": query})
+            self.logger.info(LogType.TOOL_CALL, self.name,
+                             "尝试: " + backend_name, {"query": query})
             try:
                 result = search_func(query, max_results)
                 if result.success:
                     self.logger.info(LogType.TOOL_SUCCESS, self.name, "成功: " + backend_name)
+                    # 保留后端来源到 meta,便于前端展示
+                    result.meta = {
+                        "source": backend_name,
+                        "duration_ms": (time.time() - start) * 1000,
+                        "result_count": len(result.data.get("results", [])) if isinstance(result.data, dict) else 0,
+                    }
                     self.logger.log_data(self.name, "out", "results", result.data)
                     return result
                 else:
-                    self.logger.warning(LogType.TOOL_ERROR, self.name, "失败: " + backend_name + " - " + result.error)
+                    self.logger.warning(LogType.TOOL_ERROR, self.name,
+                                        "失败: " + backend_name + " - " + result.error)
             except Exception as e:
-                self.logger.error(LogType.TOOL_ERROR, self.name, "异常: " + backend_name + " - " + str(e))
+                self.logger.error(LogType.TOOL_ERROR, self.name,
+                                  "异常: " + backend_name + " - " + str(e))
                 continue
-        
-        return ToolResult(success=False, error="所有搜索服务均不可用")
+
+        return ToolResult(
+            success=False,
+            error="所有搜索服务均不可用",
+            meta={"duration_ms": (time.time() - start) * 1000},
+        )
     
     def _search_jina(self, query: str, max_results: int) -> ToolResult:
         """使用 Jina AI 搜索 (国内可访问)"""

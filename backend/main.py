@@ -1,5 +1,9 @@
-"""FastAPI 后端服务 - WebSocket 通信"""
+"""FastAPI 后端服务 - WebSocket 通信(新版统一 event 协议)"""
+import asyncio
+import json
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 # 添加项目根目录到 Python 路径
@@ -7,18 +11,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict
-from concurrent.futures import ThreadPoolExecutor
-import json
-import asyncio
 
-from core.agent import Agent
-from skills.manager import get_skill_store, reset_skill_store
+from backend.session import sessions, Session
+from infra.config import config, ConfigError
 from infra.logger import get_logger, LogEntry
+
 
 app = FastAPI(title="Skill Agent API")
 
-# CORS 配置
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,205 +27,297 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-class ConnectionManager:
-    """WebSocket 连接管理器"""
-    
-    def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-    
-    async def connect(self, websocket: WebSocket, client_id: str):
-        await websocket.accept()
-        self.active_connections[client_id] = websocket
-    
-    def disconnect(self, client_id: str):
-        self.active_connections.pop(client_id, None)
-    
-    async def send_message(self, message: dict, client_id: str):
-        if client_id in self.active_connections:
-            await self.active_connections[client_id].send_json(message)
-    
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections.values():
-            await connection.send_json(message)
+logger = get_logger()
 
 
-manager = ConnectionManager()
-executor = ThreadPoolExecutor(max_workers=4)
+# ===== 启动校验 =====
+@app.on_event("startup")
+async def _startup():
+    try:
+        config.validate()
+    except ConfigError as e:
+        logger.error("flow_step", "Startup", f"配置错误: {e}")
 
 
+# ===== 工具/技能 REST =====
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "Skill Agent Backend"}
+    return {
+        "status": "ok",
+        "service": "Skill Agent Backend",
+        "version": "1.1",
+        "session_count": len(sessions._sessions),
+    }
+
+
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok",
+        "tools": _count_tools(),
+        "skills": _count_skills(),
+    }
 
 
 @app.get("/api/skills")
 async def list_skills():
-    """获取技能列表"""
-    # 重置技能库以确保加载最新文件
-    reset_skill_store()
+    """列出所有技能(包含同 name 多版本)"""
+    from skills.manager import get_skill_store
     store = get_skill_store()
     skills = store.list_all()
     return {
-        "skills": [
-            {
-                "name": s.name,
-                "capability": s.capability,
-                "patterns": s.patterns,
-                "tags": s.tags,
-                "method": s.method,
-                "steps": s.steps
-            }
-            for s in skills
-        ]
+        "skills": [_skill_to_dict(s) for s in skills]
     }
+
+
+def _skill_to_dict(s) -> dict:
+    """统一序列化(支持 P2 之后 Skill 结构)"""
+    return {
+        "id": getattr(s, "id", None),
+        "name": s.name,
+        "version": getattr(s, "version", "1.0.0"),
+        "capability": s.capability,
+        "patterns": s.patterns,
+        "tags": s.tags,
+        "method": s.method,
+        "steps": [
+            {**st.to_dict(), "description": st.description}
+            for st in getattr(s, "steps", [])
+        ] if hasattr(s, "steps") else [],
+        "source": getattr(s, "source", "builtin"),
+        "author": getattr(s, "author", None),
+        "created_at": getattr(s, "created_at", None),
+        "updated_at": getattr(s, "updated_at", None),
+    }
+
+
+@app.delete("/api/skills/{name}")
+async def delete_skill(name: str):
+    """删除一个技能(按 name 全删,所有版本)
+
+    注: builtin 技能可删除(因为我们目前是单用户系统),后续多用户时改为鉴权。
+    """
+    from skills.manager import get_skill_store
+    from pathlib import Path
+    store = get_skill_store()
+    removed = []
+    for s in list(store.list_all()):
+        if s.name == name:
+            # 文件
+            for sub in ("builtin", "user"):
+                d = store.base_path / sub
+                if d.exists():
+                    for f in d.glob(f"{name}*.yaml"):
+                        try:
+                            f.unlink()
+                            removed.append(str(f))
+                        except Exception as e:
+                            logger.error("flow_step", "Skills", f"删除失败 {f}: {e}")
+            # 内存
+            store._registry._by_name.pop(s.name, None)
+            store._registry._by_id.pop(s.id, None)
+            store._skills.pop(s.name, None)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"技能 {name} 不存在")
+    logger.info("flow_step", "Skills", f"删除技能 {name},文件: {removed}")
+    return {"deleted": name, "files": removed}
+
+
+@app.delete("/api/skills/{name}/{version}")
+async def delete_skill_version(name: str, version: str):
+    """删除指定版本的技能"""
+    from skills.manager import get_skill_store
+    store = get_skill_store()
+    target = store.get_by_name(name)
+    if not target or target.version != version:
+        raise HTTPException(status_code=404, detail=f"技能 {name}@{version} 不存在")
+    removed = []
+    for sub in ("builtin", "user"):
+        d = store.base_path / sub
+        if d.exists():
+            for f in d.glob(f"{name}@{version}.yaml"):
+                try:
+                    f.unlink()
+                    removed.append(str(f))
+                except Exception as e:
+                    logger.error("flow_step", "Skills", f"删除失败 {f}: {e}")
+    # 内存:仅删该版本
+    store._registry._by_id.pop(target.id, None)
+    if target.version == version:
+        # 同名多个版本只删这一个
+        pass
+    store._skills.pop(name, None)
+    return {"deleted": f"{name}@{version}", "files": removed}
+
+
+@app.post("/api/skills/reload")
+async def reload_skills():
+    """从磁盘重新加载技能"""
+    from skills.manager import get_skill_store
+    store = get_skill_store()
+    store.reload()
+    return {"reloaded": True, "count": len(store.list_all())}
 
 
 @app.get("/api/tools")
 async def list_tools():
-    """获取可用工具列表"""
     from agents.learning import LearningAgent
     learning = LearningAgent()
     return {
         "tools": [
-            {
-                "name": name,
-                "description": tool.description
-            }
+            {"name": name, "description": tool.description}
             for name, tool in learning.tools.items()
         ]
     }
 
 
+@app.get("/api/sessions/{client_id}/trace")
+async def get_session_trace(client_id: str):
+    """获取 session 最近一次 trace"""
+    sess = sessions.get(client_id)
+    if not sess:
+        return {"error": "session not found"}
+    # 取当前 trace
+    trace = sess.agent.logger.get_trace(sess.agent.logger._current_trace.trace_id) \
+        if sess.agent.logger._current_trace else None
+    if not trace:
+        return {"trace_id": "", "entries": []}
+    return {
+        "trace_id": trace.trace_id,
+        "entries": [e.to_dict() for e in trace.entries],
+    }
+
+
+def _count_tools() -> int:
+    from agents.learning import LearningAgent
+    return len(LearningAgent().tools)
+
+
+def _count_skills() -> int:
+    from skills.manager import get_skill_store
+    return len(get_skill_store().list_all())
+
+
+# ===== WebSocket 路由 =====
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
-    """WebSocket 聊天接口"""
-    client_id = str(id(websocket))
-    agent = Agent()
-    logger = get_logger()
-    
-    await manager.connect(websocket, client_id)
-    
-    # 订阅日志
-    def on_log_entry(entry: LogEntry):
-        """日志回调"""
+    await websocket.accept()
+    session: Session = None
+    push_queue: asyncio.Queue = asyncio.Queue()
+
+    async def push(event: str, payload: dict):
+        """异步入队,由 sender 协程发送"""
+        msg = {
+            "type": "event",
+            "event": event,
+            "trace_id": (session.agent.logger._current_trace.trace_id
+                         if session and session.agent.logger._current_trace else ""),
+            "ts": datetime.now().isoformat(),
+            "payload": payload,
+        }
+        await push_queue.put(msg)
+
+    def push_sync(event: str, payload: dict):
+        """同步事件(用于 on_event 同步回调)。用 run_coroutine_threadsafe 入队。"""
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(manager.send_message({
-                    "type": "log",
-                    "log": entry.to_dict()
-                }, client_id))
-        except:
+            loop = asyncio.get_running_loop()
+            asyncio.run_coroutine_threadsafe(push(event, payload), loop)
+        except RuntimeError:
             pass
-    
-    logger.subscribe(on_log_entry)
-    
-    # 创建发送步骤的回调函数
-    async def send_step(step_type: str, message: str):
-        """发送思考步骤到前端"""
-        await manager.send_message({
-            "type": "step",
-            "step_type": step_type,
-            "message": message
-        }, client_id)
-    
-    try:
-        # 发送连接成功消息
-        await manager.send_message({
-            "type": "connected",
-            "message": "连接成功"
-        }, client_id)
-        
+
+    async def sender():
         while True:
-            # 接收消息
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            if message.get("type") == "chat":
-                user_input = message.get("content", "")
-                guidance_context = message.get("context", "")
-                
-                # 发送思考中状态
-                await manager.send_message({
-                    "type": "thinking",
-                    "message": "正在处理..."
-                }, client_id)
-                
-                # 启动追踪
-                trace = logger.start_trace(f"chat-{user_input[:20]}")
-                
+            msg = await push_queue.get()
+            try:
+                await websocket.send_json(msg)
+            except Exception:
+                break
+
+    sender_task = asyncio.create_task(sender())
+    log_callback = None
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await push("error", {"message": "invalid JSON"})
+                continue
+
+            mtype = msg.get("type")
+
+            # ----- 初始化 -----
+            if mtype == "init":
+                client_id = msg.get("client_id") or str(uuid.uuid4())
+                session = await sessions.get_or_create(client_id)
+
+                # 订阅日志,把每条 LogEntry 翻译成 event=log 推给前端
+                log_callback = lambda entry: push_sync("log", entry.to_dict())
+                session.agent.logger.subscribe(log_callback)
+                session.log_callbacks.append(log_callback)
+
+                await push("connected", {
+                    "client_id": client_id,
+                    "session_id": session.agent.session_id,
+                })
+
+            # ----- 聊天 -----
+            elif mtype == "chat":
+                if session is None:
+                    await push("error", {"message": "请先发送 init"})
+                    continue
+                user_input = msg.get("content", "")
+                if not user_input.strip():
+                    await push("error", {"message": "content 为空"})
+                    continue
+
+                # 异步跑 Agent.handle
                 try:
-                    # 创建同步的 callback 函数用于 agent
-                    def sync_send_step(step_type: str, message: str):
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                asyncio.ensure_future(send_step(step_type, message))
-                        except:
-                            pass
-                    
-                    # 在线程池中异步执行 LLM 调用
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(
-                        executor, 
-                        lambda: agent.chat(user_input, callback=sync_send_step, guidance_context=guidance_context)
-                    )
-                    
-                    # 处理返回结果 (可能是回答或指导提示)
-                    if isinstance(result, tuple):
-                        response, guidance = result
-                        if guidance:
-                            # 需要用户指导
-                            await manager.send_message({
-                                "type": "guidance_request",
-                                "message": guidance
-                            }, client_id)
-                        if response:
-                            await manager.send_message({
-                                "type": "response",
-                                "content": response
-                            }, client_id)
-                    else:
-                        await manager.send_message({
-                            "type": "response",
-                            "content": result
-                        }, client_id)
-                    
+                    await session.agent.handle(user_input, push_sync)
                 except Exception as e:
-                    await manager.send_message({
-                        "type": "error",
-                        "message": str(e)
-                    }, client_id)
-                finally:
-                    # 结束追踪
-                    trace_summary = logger.end_trace()
-                    
-            elif message.get("type") == "reset":
-                agent.reset()
-                await manager.send_message({
-                    "type": "reset",
-                    "message": "对话已重置"
-                }, client_id)
-            
-            elif message.get("type") == "get_logs":
-                # 获取日志列表
-                if trace and trace.entries:
-                    await manager.send_message({
-                        "type": "logs",
-                        "logs": [e.to_dict() for e in trace.entries]
-                    }, client_id)
-                
+                    logger.error("flow_step", "WS", f"handle 失败: {e}")
+                    await push("error", {"message": str(e)})
+
+            # ----- 重置 -----
+            elif mtype == "reset":
+                if session:
+                    session.agent.reset()
+                await push("reset_ack", {"client_id": session.client_id if session else None})
+
+            # ----- 获取技能 -----
+            elif mtype == "ping":
+                await push("pong", {})
+
+            else:
+                await push("error", {"message": f"未知 type: {mtype}"})
+
     except WebSocketDisconnect:
-        manager.disconnect(client_id)
+        pass
     except Exception as e:
-        await manager.send_message({
-            "type": "error",
-            "message": f"连接错误: {str(e)}"
-        }, client_id)
-        manager.disconnect(client_id)
+        try:
+            await push("error", {"message": f"连接异常: {e}"})
+        except Exception:
+            pass
     finally:
-        logger.unsubscribe(on_log_entry)
+        # 清理订阅,避免泄漏
+        if session and log_callback:
+            try:
+                session.agent.logger.unsubscribe(log_callback)
+                session.log_callbacks.remove(log_callback)
+            except Exception:
+                pass
+        sender_task.cancel()
+
+
+# ===== 后台 GC =====
+@app.on_event("startup")
+async def _gc_loop():
+    async def loop():
+        while True:
+            await asyncio.sleep(60)
+            sessions.gc()
+    asyncio.create_task(loop())
 
 
 if __name__ == "__main__":

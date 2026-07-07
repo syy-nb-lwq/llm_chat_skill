@@ -1,5 +1,14 @@
 # 项目架构设计
 
+> 详细设计已迁移到 [`docs/`](docs/) 目录。本文件保留**概念级概览**,作为快速参考。
+>
+> 详细模块设计与改进路线:
+> - [docs/00-总览.md](docs/00-总览.md)
+> - [docs/01-架构设计.md](docs/01-架构设计.md)
+> - [docs/02-agents.md](docs/02-agents.md) · [03-skills.md](docs/03-skills.md) · [04-tools.md](docs/04-tools.md)
+> - [docs/05-core.md](docs/05-core.md) · [06-backend-frontend.md](docs/06-backend-frontend.md) · [07-infra.md](docs/07-infra.md)
+> - [docs/08-roadmap.md](docs/08-roadmap.md)
+
 ## 核心理念
 
 **智能体 = 流转中枢**
@@ -200,17 +209,36 @@ npm run dev
 
 ## 扩展指南
 
+> 详细扩展方式与改进后设计见 [`docs/`](docs/) 目录。
+
 ### 添加新工具
 
 1. 在 `tools/` 下创建新文件
-2. 继承 `Tool` 基类
-3. 实现 `execute` 方法
-4. 在 `learning.py` 中注册
+2. 继承 `Tool` 基类,实现 `schema()` 和 `execute()`
+3. 在 `agents/learning.py` 的 `ToolRegistry` 中 `register`
+4. 详见 [docs/04-tools.md §8](docs/04-tools.md)
 
-### 教导新技能
+### 教导新技能(改进后将实现)
 
 用户通过对话教导：
 ```
 "分析问题应该先收集数据，再制定方案，最后执行"
 ```
-→ 保存为技能方法论，下次按此方法论处理类似任务
+→ SkillTrainer 抽取为 `Skill`,沉淀到 `skills/user/<name>@<version>.yaml`
+→ 下次类似任务按此方法论处理
+→ 详见 [docs/02-agents.md §6](docs/02-agents.md) 和 [docs/03-skills.md §8](docs/03-skills.md)
+
+## 已知架构问题与改进路线
+
+详见 [docs/08-roadmap.md](docs/08-roadmap.md)。
+
+简要列表:
+- 三个 Agent 无统一基类
+- Manager 输出 JSON 解析无重试
+- 技能不可执行(只是 prompt 片段)
+- 工具调用串行,无依赖图
+- 多轮对话 Context 未启用
+- 教导闭环未实现
+- WebSocket 日志订阅泄漏
+- 前端流转可视化缺失
+- 无 `.env.example`、测试、Docker
