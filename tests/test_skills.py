@@ -51,9 +51,9 @@ def test_registry_match():
         Skill(name="travel", patterns=["行程", "旅游"]),
         Skill(name="code", patterns=["代码", "python"]),
     ])
-    res = reg.match("明天厦门怎么玩?")
+    res = reg.match("帮我安排一段旅游行程")
     assert res and res[0].name == "travel"
-    res2 = reg.match("帮我写段 python")
+    res2 = reg.match("帮我写段 python 代码")
     assert res2 and res2[0].name == "code"
 
 

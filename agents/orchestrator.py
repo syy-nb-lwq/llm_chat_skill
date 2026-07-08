@@ -76,7 +76,18 @@ class OrchestratorAgent(BaseAgent):
         return resp
 
     def _build_prompt(self, user_input, tool_data, method, steps):
-        steps_str = " -> ".join(steps) if steps else "无"
+        if steps:
+            rendered = []
+            for s in steps:
+                if hasattr(s, "name") and s.name:
+                    rendered.append(s.name)
+                elif hasattr(s, "id"):
+                    rendered.append(s.id)
+                else:
+                    rendered.append(str(s))
+            steps_str = " -> ".join(rendered)
+        else:
+            steps_str = "无"
         return f"""用户需求:{user_input}
 
 技能方法论:

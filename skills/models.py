@@ -12,7 +12,8 @@ class SkillStep:
     name: str = ""
     description: str = ""
     tool: Optional[str] = None                # 关联的工具名
-    input_schema: Dict = field(default_factory=dict)
+    input_schema: Dict = field(default_factory=dict)  # JSON Schema,只用于校验/提示
+    params: Dict = field(default_factory=dict)        # 实际传给工具的参数(支持 ${user_input.x} 和 ${step.data.x} 占位符)
     output_schema: Dict = field(default_factory=dict)
     depends_on: List[str] = field(default_factory=list)   # 上游 step id
     parallel_group: Optional[str] = None      # 同组可并行执行
@@ -27,8 +28,10 @@ class SkillStep:
             "name": self.name,
             "description": self.description,
             "tool": self.tool,
+            "params": self.params,
             "depends_on": self.depends_on,
             "parallel_group": self.parallel_group,
+            "fallback": self.fallback,
             "retry": self.retry,
             "timeout_s": self.timeout_s,
         }
@@ -72,4 +75,7 @@ class Skill:
             "steps": [s.to_dict() for s in self.steps],
             "examples": self.examples,
             "source": self.source,
+            "author": self.author,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }

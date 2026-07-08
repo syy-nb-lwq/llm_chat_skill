@@ -54,9 +54,9 @@ class SessionManager:
         for cid in expired:
             s = self._sessions.pop(cid, None)
             if s:
-                for cb in s.log_callbacks:
+                for cb in s.dispose_callbacks:
                     try:
-                        self.logger.unsubscribe(cb)
+                        cb()
                     except Exception:
                         pass
                 self.logger.info("Session", f"GC: {cid[:8]}")
@@ -64,9 +64,9 @@ class SessionManager:
     def destroy(self, client_id: str):
         s = self._sessions.pop(client_id, None)
         if s:
-            for cb in s.log_callbacks:
+            for cb in s.dispose_callbacks:
                 try:
-                    self.logger.unsubscribe(cb)
+                    cb()
                 except Exception:
                     pass
 

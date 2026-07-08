@@ -29,6 +29,9 @@ async def push_log(client_id: str, entry: dict):
 async def dispatcher(subscription, data: Any):
     """所有 topic 的统一入口 (回调签名: (subscription, data))"""
     topic = subscription.topic
+    # 忽略服务端自己推送的事件流,避免无限循环
+    if topic.startswith("events/") or topic.startswith("log/"):
+        return
     try:
         if topic.startswith("init/"):
             client_id = topic[5:]
@@ -65,8 +68,10 @@ async def dispatcher(subscription, data: Any):
         logger.error("ws", f"dispatcher 处理 {topic} 失败: {e}")
         # 尝试从 topic 提取 client_id 推送错误
         if "/" in topic:
-            client_id = topic.split("/", 1)[1]
-            await push_event(client_id, "error", {"message": str(e)})
+            parts = topic.split("/", 1)
+            if parts[0] in ("init", "chat", "reset", "ping"):
+                client_id = parts[1]
+                await push_event(client_id, "error", {"message": str(e)})
 
 
 # ===== 注册订阅 =====

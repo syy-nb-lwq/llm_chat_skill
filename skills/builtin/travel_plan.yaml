@@ -24,12 +24,9 @@ steps:
     name: 查询目的地天气
     description: 获取用户指定城市和日期的天气
     tool: weather_query
-    input_schema:
-      type: object
-      properties:
-        city: {type: string}
-        date: {type: string}
-      required: [city, date]
+    params:
+      city: ${user_input.city}
+      date: tomorrow
     retry: 2
     timeout_s: 20
 
@@ -37,12 +34,8 @@ steps:
     name: 搜索景点
     description: 根据城市搜索推荐景点
     tool: web_search
-    input_schema:
-      type: object
-      properties:
-        query: {type: string}
-        max_results: {type: integer}
-      required: [query]
+    params:
+      query: "${fetch_weather.data.city} 旅游景点推荐"
     depends_on: [fetch_weather]
     retry: 1
     timeout_s: 30

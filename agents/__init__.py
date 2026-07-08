@@ -1,6 +1,5 @@
-"""智能体层 - 流转中枢"""
-from .manager import ManagerAgent
-from .learning import LearningAgent
-from .orchestrator import OrchestratorAgent
+"""智能体层 - 流转中枢。
 
-__all__ = ["ManagerAgent", "LearningAgent", "OrchestratorAgent"]
+按需 import,避免循环依赖。"""
+
+__all__: list = []

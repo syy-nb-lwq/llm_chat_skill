@@ -40,10 +40,13 @@ class FakeLLM(LLMClient):
 
 def _patch_llm(monkeypatch, scripted):
     fake = FakeLLM(scripted)
-    monkeypatch.setattr("agents.manager.get_llm_client", lambda: fake)
-    monkeypatch.setattr("agents.orchestrator.get_llm_client", lambda: fake)
-    monkeypatch.setattr("agents.skill_trainer.get_llm_client", lambda: fake)
+    # BaseAgent.__init__ 里 `from infra.llm import get_llm_client`,
+    # 该名字绑定在 core.agent_base 模块里。要同时 patch 两边。
+    monkeypatch.setattr("infra.llm.get_llm_client", lambda: fake)
     monkeypatch.setattr("core.agent_base.get_llm_client", lambda: fake)
+    # 清掉可能已经缓存的实例
+    from infra import llm as _llm_mod
+    _llm_mod._llm_client = None
     return fake
 
 

@@ -1,6 +1,7 @@
 """Agent 核心 - 多智能体协作"""
+import asyncio
 import time
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from agents.manager import ManagerAgent
 from agents.orchestrator import OrchestratorAgent
@@ -39,15 +40,23 @@ class Agent:
         self.logger.info("Agent", f"INPUT: {user_input[:50]}")
 
         def emit(event: str, payload: dict):
-            if on_event:
+            if on_event is None:
+                return
+            # 同步回调:直接调
+            if not asyncio.iscoroutinefunction(on_event):
                 try:
-                    import asyncio
-                    if asyncio.iscoroutinefunction(on_event):
-                        asyncio.create_task(on_event(event, payload))
-                    else:
-                        on_event(event, payload)
-                except RuntimeError:
+                    on_event(event, payload)
+                except Exception:
                     pass
+                return
+            # 异步回调:在已运行的 event loop 中调度为 task
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(on_event(event, payload))
+            except RuntimeError:
+                # 没有 running loop,同步调用(要求回调内部不阻塞)
+                try:
+                    on_event(event, payload)
                 except Exception:
                     pass
 
@@ -88,24 +97,46 @@ class Agent:
                 "tasks": plan.tool_tasks,
             })
 
+            # 提取实体,供 Skill DAG 的 params 用 (${user_input.city})
+            entities = self._extract_entities(user_input)
+
             # 执行工具
             tool_results: Dict = {}
             if plan.tool_tasks:
                 emit("thinking", {"stage": "tools_running", "count": len(plan.tool_tasks)})
-                
+
                 async def on_tool_event(event: str, payload: dict):
                     emit(event, payload)
 
-                tasks = []
-                for i, t in enumerate(plan.tool_tasks):
-                    task_id = t.get("id") or f"t{i+1}"
-                    tasks.append(ToolTask(
-                        id=task_id,
-                        type=t.get("type", ""),
-                        params=t.get("params", {}),
-                        depends_on=t.get("depends_on", []) or [],
-                    ))
-                tool_results = await self.learning.execute_dag(tasks, on_tool_event)
+                # 如果启用了 Skill DAG 且 plan 关联到了带结构化 steps 的 skill,
+                # 优先用 DAGExecutor 把 skill.steps 翻成 ToolTask(忽略 Manager 输出的 task 列表)。
+                used_dag = False
+                if self.dag_enabled and plan.selected_skill and plan.selected_skill.has_structured_steps():
+                    skill_tasks, issues = self.dag.skill_to_tasks(plan.selected_skill)
+                    for i in issues:
+                        emit("thinking", {"stage": "dag_skip", "issue": i})
+                    if skill_tasks:
+                        tasks = skill_tasks
+                        used_dag = True
+                        emit("thinking", {"stage": "skill_dag_used", "skill": plan.selected_skill.name, "count": len(tasks)})
+
+                if not used_dag:
+                    tasks = []
+                    for i, t in enumerate(plan.tool_tasks):
+                        task_id = t.get("id") or f"t{i+1}"
+                        tasks.append(ToolTask(
+                            id=task_id,
+                            type=t.get("type", ""),
+                            params=t.get("params", {}),
+                            depends_on=t.get("depends_on", []) or [],
+                            retry=int(t.get("retry", 0) or 0),
+                            timeout_s=int(t.get("timeout_s", 30) or 30),
+                            fallback_to=t.get("fallback_to"),
+                        ))
+                tool_results = await self.learning.execute_dag(
+                    tasks, on_tool_event,
+                    user_input={"text": user_input, **entities}
+                )
 
             # 生成回答
             emit("thinking", {"stage": "synthesizing"})
@@ -135,3 +166,33 @@ class Agent:
     def reset(self):
         self.context.clear()
         self.logger.info("Agent", "RESET")
+
+    # ===== 实体提取(给 Skill DAG 的 ${user_input.x} 用) =====
+    _CITY_SUFFIXES = ("市",) if False else ()  # 占位,Chinese cities 通常不带"市"
+
+    def _extract_entities(self, text: str) -> Dict[str, Any]:
+        """轻量实体提取。
+
+        当前支持:
+        - city:  已知中国城市名(直接字典匹配)
+        - date:  today / tomorrow / YYYY-MM-DD
+        """
+        out: Dict[str, Any] = {}
+        # city
+        cities = [
+            "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉",
+            "西安", "重庆", "厦门", "南京", "天津", "苏州", "青岛",
+            "长沙", "大连", "沈阳", "郑州",
+        ]
+        for c in cities:
+            if c in text:
+                out["city"] = c
+                break
+        # date
+        if "明天" in text:
+            out["date"] = "tomorrow"
+        elif "今天" in text or "今日" in text:
+            out["date"] = "today"
+        elif "后天" in text:
+            out["date"] = "后天"  # wttr.in 不支持,让 weather 工具处理
+        return out

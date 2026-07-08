@@ -103,7 +103,10 @@ class SkillTrainer(BaseAgent):
                 name=s.get("name", sid),
                 description=s.get("description", ""),
                 tool=s.get("tool"),
+                params=s.get("params_hint", {}) or s.get("params", {}) or {},
                 depends_on=s.get("depends_on", []) or [],
+                retry=int(s.get("retry", 0) or 0),
+                timeout_s=int(s.get("timeout_s", 30) or 30),
             ))
 
         existing = self.skill_store.get_by_name(obj["name"])

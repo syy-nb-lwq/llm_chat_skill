@@ -74,21 +74,38 @@ async def delete_skill(name: str):
     from skills.manager import get_skill_store
     store = get_skill_store()
     removed = []
-    for s in list(store.list_all()):
-        if s.name == name:
-            for sub in ("builtin", "user"):
-                d = store.base_path / sub
-                if d.exists():
-                    for f in d.glob(f"{name}*.yaml"):
-                        try:
-                            f.unlink()
-                            removed.append(str(f))
-                        except Exception as e:
-                            logger.error("skills", f"删除失败: {e}")
-            store._registry._by_name.pop(s.name, None)
-            store._registry._by_id.pop(s.id, None)
-            store._skills.pop(s.name, None)
-    if not removed:
+    # 从内存移除
+    skill = store._registry._by_name.pop(name, None)
+    if skill:
+        # 同步移除 by_id
+        store._registry._by_id.pop(skill.id, None)
+        store._skills.pop(name, None)
+    # 从文件删除(扫描所有可能目录)
+    for d in [store.base_path, store.base_path / "builtin", store.base_path / "user"]:
+        if d.exists():
+            for f in d.rglob(f"{name}*.yaml"):
+                try:
+                    f.unlink()
+                    removed.append(str(f))
+                except Exception as e:
+                    logger.error("skills", f"删除失败: {e}")
+            for f in d.rglob(f"{name}*.md"):
+                try:
+                    f.unlink()
+                    removed.append(str(f))
+                except Exception as e:
+                    logger.error("skills", f"删除失败: {e}")
+    # 额外:backend/skills/ 也可能存了 MD
+    root = store.base_path.parent
+    backend_skills = root / "backend" / "skills"
+    if backend_skills.exists():
+        for f in backend_skills.rglob(f"{name}*.md"):
+            try:
+                f.unlink()
+                removed.append(str(f))
+            except Exception as e:
+                logger.error("skills", f"删除失败: {e}")
+    if not removed and skill is None:
         raise HTTPException(status_code=404, detail=f"技能 {name} 不存在")
     return {"deleted": name, "files": removed}
 

@@ -20,13 +20,15 @@ class SkillStore:
         if path is None:
             root = Path(__file__).parent.parent
             base = root / "skills"
+            extras = [root / "backend" / "skills"]
         else:
             base = Path(path)
+            extras = []
         self.path = base
         self.base_path = base
         self.path.mkdir(parents=True, exist_ok=True)
         self.logger = get_logger()
-        self._loader = SkillLoader(base)
+        self._loader = SkillLoader(base, extra_dirs=extras)
         self._registry = SkillRegistry()
         self.reload()
 

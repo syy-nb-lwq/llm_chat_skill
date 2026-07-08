@@ -31,12 +31,32 @@ def test_resolve_missing_yields_empty():
 
 
 def test_execute_tasks_sync_serial():
-    """旧 API 兼容"""
+    """旧 API 兼容 - 现在走 execute_dag(单元素)"""
+    import asyncio
     la = LearningAgent()
-    res = la.execute_tasks([
-        {"type": "weather_query", "params": {"city": "厦门"}},
-    ])
-    assert "weather_query" in res
+
+    async def _run():
+        from agents.learning import ToolTask
+        return await la.execute_dag([
+            ToolTask(id="t1", type="weather_query", params={"city": "厦门"}),
+        ])
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # pytest-asyncio 已经在运行 loop,直接 await
+            import pytest
+            pytest.skip("event loop 已在运行,改用 pytest-asyncio")
+            return
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    try:
+        res = loop.run_until_complete(_run())
+    finally:
+        loop.close()
+    assert "t1" in res
 
 
 @pytest.mark.asyncio
@@ -53,7 +73,7 @@ async def test_execute_dag_simple(monkeypatch):
         def schema(self):
             return ToolSchema(name=self.name, description=self.description,
                               params=[ToolParam("x", "string")])
-        def execute(self, x):
+        async def execute(self, x):
             return ToolResult(success=True, data={"echo": x})
 
     la.registry.register(StubTool())
@@ -75,7 +95,7 @@ async def test_execute_dag_with_dependency(monkeypatch):
         def schema(self):
             return ToolSchema(name=self.name, description="",
                               params=[ToolParam("x", "string")])
-        def execute(self, x):
+        async def execute(self, x):
             return ToolResult(success=True, data={"y": x + "!"})
 
     class StubB(Tool):
@@ -83,7 +103,7 @@ async def test_execute_dag_with_dependency(monkeypatch):
         def schema(self):
             return ToolSchema(name=self.name, description="",
                               params=[ToolParam("z", "string")])
-        def execute(self, z):
+        async def execute(self, z):
             return ToolResult(success=True, data={"final": z})
 
     la.registry.register(StubA())
