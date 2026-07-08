@@ -3,7 +3,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from infra.logger import get_logger, LogType
+from infra.logger import get_logger
 from skills.models import Skill, SkillStep
 
 
@@ -23,14 +23,12 @@ class SkillRegistry:
             for s in skills:
                 self._index(s)
 
-    # ----- 索引 -----
     def _index(self, skill: Skill):
         self._by_name[skill.name] = skill
         self._by_id[skill.id] = skill
         for p in skill.patterns:
             self._pattern_index[p.lower()].append(skill.name)
 
-    # ----- CRUD -----
     def add(self, skill: Skill, persist: bool = False, base_path: Optional[Path] = None) -> None:
         existing = self._by_name.get(skill.name)
         if existing and existing.version == skill.version:
@@ -38,8 +36,7 @@ class SkillRegistry:
                 f"技能 {skill.name} v{skill.version} 已存在,请升级 version 或换 name"
             )
         self._index(skill)
-        self.logger.info(LogType.FLOW_STEP, "Skills",
-                         f"新增技能: {skill.name} v{skill.version}")
+        self.logger.info("Skills", f"新增技能: {skill.name} v{skill.version}")
         if persist and base_path:
             self._save_yaml(skill, base_path)
 
@@ -50,16 +47,13 @@ class SkillRegistry:
         return list(self._by_name.values())
 
     def reload(self, skills: List[Skill]):
-        """重新加载(用于文件改动后)"""
         self._by_name.clear()
         self._by_id.clear()
         self._pattern_index.clear()
         for s in skills:
             self._index(s)
 
-    # ----- 匹配 -----
     def match(self, user_input: str, top_k: int = 3) -> List[Skill]:
-        """关键词加权打分。返回 top_k 候选技能。"""
         text = user_input.lower().strip()
         if not text:
             return []
@@ -87,9 +81,7 @@ class SkillRegistry:
                     score += 0.1
         return score
 
-    # ----- 失效检测 -----
     def validate(self, tool_names: List[str]) -> List[str]:
-        """检查所有技能,返回问题列表"""
         issues: List[str] = []
         for s in self._by_name.values():
             issues.extend(self._validate_one(s, tool_names))
@@ -110,7 +102,6 @@ class SkillRegistry:
             out.append(f"技能 {skill.name}: 存在循环依赖")
         return out
 
-    # ----- 持久化 -----
     def _save_yaml(self, skill: Skill, base_path: Path):
         try:
             import yaml
@@ -123,12 +114,10 @@ class SkillRegistry:
                 encoding="utf-8",
             )
         except Exception as e:
-            self.logger.error(LogType.FLOW_STEP, "Skills",
-                              f"保存技能失败 {skill.name}: {e}")
+            self.logger.error("Skills", f"保存技能失败 {skill.name}: {e}")
 
 
 def _has_cycle(steps: List[SkillStep]) -> bool:
-    """检测 steps 之间的循环依赖"""
     graph = {s.id: list(s.depends_on) for s in steps}
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {n: WHITE for n in graph}

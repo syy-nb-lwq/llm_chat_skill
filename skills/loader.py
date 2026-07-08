@@ -1,116 +1,88 @@
-"""技能加载器 - 支持 YAML(新)和 Markdown(旧,兼容)"""
+"""Skill 加载器 - 从 YAML/MD 文件加载技能"""
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import yaml
 
-from infra.logger import get_logger, LogType
+from infra.logger import get_logger
 from skills.models import Skill, SkillStep
 
 
-class SkillLoadError(Exception):
-    pass
-
-
 class SkillLoader:
-    """从目录加载技能。目录结构:
-        skills/builtin/*.yaml
-        skills/user/*.yaml
-    兼容旧格式:skills/*.md
-    """
+    """技能加载器"""
 
     def __init__(self, base_path: Path):
-        self.base_path = Path(base_path)
+        self.base_path = base_path
         self.logger = get_logger()
 
     def load_all(self) -> List[Skill]:
-        skills: List[Skill] = []
-        # 新格式
-        for sub in ("builtin", "user"):
-            d = self.base_path / sub
-            if not d.exists():
-                continue
-            for f in d.glob("*.yaml"):
-                try:
-                    skills.append(self._load_yaml(f))
-                except Exception as e:
-                    self.logger.error(LogType.FLOW_STEP, "Skills",
-                                      f"YAML 加载失败 {f}: {e}")
-        # 旧格式兼容
+        skills = []
+        # YAML 格式
+        for f in self.base_path.glob("*.yaml"):
+            try:
+                skills.append(self._load_yaml(f))
+            except Exception as e:
+                self.logger.error("Skills", f"YAML 加载失败 {f}: {e}")
+        # MD 格式(旧兼容)
         for f in self.base_path.glob("*.md"):
             try:
-                s = self._load_md(f)
-                if s:
-                    skills.append(s)
+                skills.append(self._load_md(f))
             except Exception as e:
-                self.logger.error(LogType.FLOW_STEP, "Skills",
-                                  f"MD 加载失败 {f}: {e}")
+                self.logger.error("Skills", f"MD 加载失败 {f}: {e}")
         return skills
 
-    # ----- YAML -----
-    def _load_yaml(self, f: Path) -> Skill:
-        raw = yaml.safe_load(f.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise SkillLoadError(f"{f}: 顶层必须是 dict")
+    def _load_yaml(self, path: Path) -> Skill:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return self._parse_skill(data)
 
-        steps: List[SkillStep] = []
-        for s in raw.get("steps", []) or []:
+    def _load_md(self, path: Path) -> Skill:
+        text = path.read_text(encoding="utf-8")
+        # 简单的 front-matter 解析
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                data = yaml.safe_load(parts[1])
+                return self._parse_skill(data)
+        # 旧格式: name 在第一行,method 在后续
+        lines = text.strip().split("\n")
+        name = lines[0].strip("# ").strip()
+        method = "\n".join(lines[1:]).strip()
+        return Skill(
+            name=name,
+            version="1.0.0",
+            capability="",
+            method=method,
+            patterns=[],
+            tags=[],
+            steps=[],
+            examples=[],
+        )
+
+    def _parse_skill(self, data: dict) -> Skill:
+        steps = []
+        for s in data.get("steps", []):
             steps.append(SkillStep(
-                id=s["id"],
-                name=s.get("name", s["id"]),
+                id=s.get("id", ""),
+                name=s.get("name", ""),
                 description=s.get("description", ""),
                 tool=s.get("tool"),
                 input_schema=s.get("input_schema", {}),
                 output_schema=s.get("output_schema", {}),
-                depends_on=s.get("depends_on", []) or [],
-                parallel_group=s.get("parallel_group"),
-                template=s.get("template"),
-                fallback=s.get("fallback"),
-                retry=int(s.get("retry", 0)),
-                timeout_s=int(s.get("timeout_s", 30)),
+                depends_on=s.get("depends_on", []),
             ))
 
         return Skill(
-            name=raw["name"],
-            version=raw.get("version", "1.0.0"),
-            capability=raw.get("capability", ""),
-            method=raw.get("method", ""),
-            patterns=raw.get("patterns", []) or [],
-            tags=raw.get("tags", []) or [],
+            name=data.get("name", ""),
+            version=data.get("version", "1.0.0"),
+            capability=data.get("capability", ""),
+            method=data.get("method", ""),
+            patterns=data.get("patterns", []),
+            tags=data.get("tags", []),
             steps=steps,
-            examples=raw.get("examples", []) or [],
-            source=raw.get("source", "builtin"),
-            author=raw.get("author"),
+            examples=data.get("examples", []),
+            source=data.get("source", "builtin"),
+            author=data.get("author"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
         )
-
-    # ----- Markdown(旧) -----
-    def _load_md(self, f: Path) -> Optional[Skill]:
-        content = f.read_text(encoding="utf-8")
-        skill = Skill(name=f.stem, source="builtin")
-
-        if m := re.search(r"# 技能：(.+)", content):
-            skill.name = m.group(1).strip()
-        if m := re.search(r"## 能力\n([\s\S]+?)(?=##)", content):
-            skill.capability = m.group(1).strip()
-        if m := re.search(r"## 匹配模式\n([\s\S]+?)(?=##)", content):
-            skill.patterns = re.findall(r"- (.+)", m.group(1))
-        if m := re.search(r"## 方法论\n([\s\S]+?)(?=##)", content):
-            skill.method = m.group(1).strip()
-        if m := re.search(r"## 步骤\n([\s\S]+?)(?=##)", content):
-            steps_text: List[str] = []
-            for line in m.group(1).strip().split("\n"):
-                line = line.strip()
-                if line and (line[0].isdigit() or line.startswith("-")):
-                    line = re.sub(r"^[\d]+\.\s*", "", line)
-                    line = re.sub(r"^-\s*", "", line)
-                    if line:
-                        steps_text.append(line)
-            skill.legacy_steps_text = steps_text
-            # 也存到 structured steps(无 tool,DAG 不会调度它们)
-            for i, t in enumerate(steps_text):
-                skill.steps.append(SkillStep(id=f"s{i}", name=t, description=t))
-
-        if not skill.name:
-            return None
-        return skill

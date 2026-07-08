@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
 from core.agent_base import BaseAgent
-from infra.logger import LogType
 from skills.manager import Skill, get_skill_store
 
 
@@ -15,7 +14,6 @@ class PlanResult:
     tool_tasks: List[Dict] = field(default_factory=list)
 
 
-# 简易意图关键词
 _SIMPLE_INTENTS = ["hi", "hello", "你好", "thanks", "谢谢", "再见", "ok", "好的"]
 _TEACHING_KEYWORDS = [
     "以后", "记住", "下次", "按这个", "按我的", "原则", "方法论",
@@ -44,16 +42,10 @@ class ManagerAgent(BaseAgent):
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id":     {"type": "string",
-                                   "description": "任务唯一 id,用于表示依赖,例如 't1'"},
-                        "type":   {"type": "string",
-                                   "enum": ["weather_query", "web_search"]},
+                        "id":     {"type": "string"},
+                        "type":   {"type": "string", "enum": ["weather_query", "web_search"]},
                         "params": {"type": "object"},
-                        "depends_on": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "依赖的其它任务 id",
-                        },
+                        "depends_on": {"type": "array", "items": {"type": "string"}},
                         "parallel_group": {"type": "string"},
                     },
                     "required": ["type", "params"],
@@ -80,7 +72,7 @@ class ManagerAgent(BaseAgent):
 已有技能列表:
 {skills_list}
 
-严格按以下 JSON 格式输出(不要任何额外文字):
+严格按以下 JSON 格式输出:
 {{
   "intent": "用户意图简短描述",
   "selected_skill": "选择的技能名称(没有则填空字符串)",
@@ -95,13 +87,13 @@ class ManagerAgent(BaseAgent):
         self.skill_store = get_skill_store()
 
     async def plan(self, user_input: str) -> PlanResult:
-        """分析用户输入,产出 PlanResult(失败时降级为空规划)"""
-        self.logger.log_flow("Manager", "开始意图识别和任务规划")
+        """分析用户输入,产出 PlanResult"""
+        self.logger.info("Manager", "开始意图识别和任务规划")
         skills = self.skill_store.list_all()
         try:
             plan = await self.think_json(user_input, self.PLAN_SCHEMA)
         except Exception as e:
-            self.logger.error(LogType.LLM_ERROR, "Manager", f"规划失败,降级: {e}")
+            self.logger.error("Manager", f"规划失败,降级: {e}")
             return PlanResult(intent=user_input, selected_skill=None, tool_tasks=[])
 
         selected_skill = None
@@ -112,14 +104,12 @@ class ManagerAgent(BaseAgent):
                     selected_skill = s
                     break
 
-        self.logger.info(LogType.AGENT_INTENT, "Manager",
-                         f"识别意图: {plan.get('intent', '')}")
+        self.logger.info("Manager", f"识别意图: {plan.get('intent', '')}")
         if selected_skill:
-            self.logger.info(LogType.AGENT_PLAN, "Manager",
-                             f"选择技能: {selected_skill.name}")
+            self.logger.info("Manager", f"选择技能: {selected_skill.name}")
+
         tool_tasks = self._auto_id_tool_tasks(plan.get("tool_tasks", []) or [])
-        self.logger.info(LogType.AGENT_PLAN, "Manager",
-                         f"规划工具: {len(tool_tasks)} 个")
+        self.logger.info("Manager", f"规划工具: {len(tool_tasks)} 个")
 
         return PlanResult(
             intent=plan.get("intent", ""),
@@ -127,28 +117,20 @@ class ManagerAgent(BaseAgent):
             tool_tasks=tool_tasks,
         )
 
-    # ----- 兼容旧 API(sync) -----
-    def analyze(self, user_input: str) -> PlanResult:
-        """同步入口(向后兼容)。内部跑异步。"""
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 在已有事件循环里,起个新线程跑
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    return ex.submit(asyncio.run, self.plan(user_input)).result()
-            return loop.run_until_complete(self.plan(user_input))
-        except RuntimeError:
-            return asyncio.run(self.plan(user_input))
+    def _auto_id_tool_tasks(self, tasks: List[Dict]) -> List[Dict]:
+        result = []
+        for i, t in enumerate(tasks):
+            task = dict(t)
+            if not task.get("id"):
+                task["id"] = f"t{i+1}"
+            result.append(task)
+        return result
 
     def should_answer_directly(self, user_input: str) -> bool:
-        """检查是否应该直接回答(简单寒暄)"""
         text = user_input.lower().strip()
         return any(intent in text for intent in _SIMPLE_INTENTS)
 
     def should_learn_skill(self, user_input: str) -> bool:
-        """检查是否在教导技能(关键词粗筛,LLM 二次确认在 SkillTrainer)"""
         return any(kw in user_input for kw in _TEACHING_KEYWORDS)
 
     def _format_skills(self, skills: List[Skill]) -> str:

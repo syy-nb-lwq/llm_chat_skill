@@ -2,7 +2,6 @@
 from typing import Dict, List, Optional, AsyncIterator
 
 from core.agent_base import BaseAgent
-from infra.logger import LogType
 from skills.manager import Skill
 from tools.base import ToolResult
 
@@ -29,7 +28,6 @@ class OrchestratorAgent(BaseAgent):
         selected_skill: Optional[Skill] = None,
     ) -> str:
         """整合数据,生成回答(异步)"""
-        self.logger.log_flow("Orchestrator", "开始整合数据,生成回答")
         tool_data = self._format_tool_results(tool_results)
         if selected_skill and selected_skill.method:
             return await self._generate_with_methodology(
@@ -58,14 +56,14 @@ class OrchestratorAgent(BaseAgent):
             yield token
 
     async def _generate_with_methodology(
-        self, user_input: str, tool_data: str, method: str, steps: List[str]
+        self, user_input: str, tool_data: str, method: str, steps: List
     ) -> str:
         prompt = self._build_prompt(user_input, tool_data, method, steps)
         resp = await self.llm.chat_with_retry([
             {"role": "system", "content": self.system_prompt()},
             {"role": "user", "content": prompt},
         ])
-        self.logger.info(LogType.FLOW_STEP, "Orchestrator", "回答生成完成")
+        self.logger.info("Orchestrator", "回答生成完成")
         return resp
 
     async def _generate_direct(self, user_input: str, tool_data: str) -> str:
@@ -74,7 +72,7 @@ class OrchestratorAgent(BaseAgent):
             {"role": "system", "content": self.system_prompt()},
             {"role": "user", "content": prompt},
         ])
-        self.logger.info(LogType.FLOW_STEP, "Orchestrator", "回答生成完成")
+        self.logger.info("Orchestrator", "回答生成完成")
         return resp
 
     def _build_prompt(self, user_input, tool_data, method, steps):
@@ -98,17 +96,6 @@ class OrchestratorAgent(BaseAgent):
 {tool_data}
 
 请基于这些数据生成一个准确、简洁的回答。"""
-
-    # ----- 同步兼容 -----
-    def generate_response(self, user_input: str) -> str:
-        """直接生成(无工具)"""
-        import asyncio
-        async def _run():
-            return await self.llm.chat_with_retry([
-                {"role": "system", "content": self.system_prompt()},
-                {"role": "user", "content": user_input},
-            ])
-        return asyncio.run(_run())
 
     def _format_tool_results(self, tool_results: Dict[str, ToolResult]) -> str:
         if not tool_results:
