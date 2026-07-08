@@ -3,7 +3,6 @@
     <header class="header">
       <h1>📚 Skill Agent</h1>
       <div class="header-info">
-        <span class="client-id">{{ clientIdShort }}</span>
         <span class="status" :class="{ connected: isConnected }">
           {{ isConnected ? '已连接' : '未连接' }}
         </span>
@@ -16,7 +15,6 @@
           <button :class="{ active: activeTab === 'tools' }" @click="activeTab = 'tools'">🔧 工具</button>
           <button :class="{ active: activeTab === 'skills' }" @click="activeTab = 'skills'">📘 技能</button>
           <button :class="{ active: activeTab === 'flow' }" @click="activeTab = 'flow'">🔀 流转</button>
-          <button :class="{ active: activeTab === 'manager' }" @click="activeTab = 'manager'">📚 管理</button>
         </div>
 
         <div v-show="activeTab === 'tools'" class="sidebar-content">
@@ -25,16 +23,8 @@
         <div v-show="activeTab === 'skills'" class="sidebar-content">
           <SkillList :skills="skills" />
         </div>
-        <div v-show="activeTab === 'flow'" class="sidebar-content flow-content">
+        <div v-show="activeTab === 'flow'" class="sidebar-content">
           <FlowPanel :turns="turns" />
-        </div>
-        <div v-show="activeTab === 'manager'" class="sidebar-content">
-          <SkillManager
-            :skills="skills"
-            :loading="loadingSkills"
-            :recent-learned="recentLearned"
-            @reload="loadSkills"
-          />
         </div>
       </aside>
 
@@ -54,160 +44,154 @@ import ToolList from './components/ToolList.vue'
 import SkillList from './components/SkillList.vue'
 import FlowPanel from './components/FlowPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
-import SkillManager from './components/SkillManager.vue'
 
 export default {
   name: 'App',
-  components: { ToolList, SkillList, FlowPanel, ChatPanel, SkillManager },
+  components: { ToolList, SkillList, FlowPanel, ChatPanel },
   data() {
     return {
       isConnected: false,
-      activeTab: 'tools',
+      activeTab: 'flow',  // 默认显示流转面板
       tools: [],
       skills: [],
-      loadingSkills: false,
       messages: [],
       turns: [],
       currentTurn: null,
-      pendingAssistantIndex: -1,
-      recentLearned: null,
-      toastTimer: null,
+      pendingIndex: -1,
     }
-  },
-  computed: {
-    clientIdShort() {
-      return wsService.clientId ? wsService.clientId.slice(0, 8) + '...' : '未初始化'
-    },
   },
   mounted() {
     this.initWebSocket()
-    this.loadTools()
-    this.loadSkills()
+    this.loadData()
   },
   beforeUnmount() {
-    wsService.disconnect()
-    if (this.toastTimer) clearTimeout(this.toastTimer)
+    wsService.off('connected', this.handleConnected)
+    wsService.off('disconnected', this.handleDisconnected)
   },
   methods: {
-    async loadTools() {
+    async loadData() {
       try {
-        const r = await fetch('http://localhost:8000/api/tools')
-        const d = await r.json()
-        this.tools = d.tools || []
-      } catch {
-        this.tools = [{ name: 'weather_query', description: '查询天气' }, { name: 'web_search', description: '网络搜索' }]
-      }
-    },
-    async loadSkills() {
-      this.loadingSkills = true
-      try {
-        const r = await fetch('http://localhost:8000/api/skills')
-        const d = await r.json()
-        this.skills = d.skills || []
+        const [toolsRes, skillsRes] = await Promise.all([
+          fetch('http://localhost:8000/api/tools'),
+          fetch('http://localhost:8000/api/skills')
+        ])
+        const toolsData = await toolsRes.json()
+        const skillsData = await skillsRes.json()
+        this.tools = toolsData.tools || []
+        this.skills = skillsData.skills || []
       } catch (e) {
-        console.error(e)
-      } finally {
-        this.loadingSkills = false
-      }
-    },
-
-    startTurn(traceId) {
-      this.currentTurn = {
-        trace_id: traceId,
-        index: this.turns.length + 1,
-        steps: [],
-        duration_ms: 0,
-        start_ts: Date.now(),
-      }
-    },
-    pushStep(event, payload, raw) {
-      if (!this.currentTurn) this.startTurn('local-' + Date.now())
-      // 从后端消息里取 trace_id(若还没有)
-      if (!this.currentTurn.trace_id || this.currentTurn.trace_id.startsWith('local-')) {
-        if (raw && raw.trace_id) this.currentTurn.trace_id = raw.trace_id
-      }
-      this.currentTurn.steps.push({ event, payload, ts: Date.now() })
-    },
-    endTurn() {
-      if (this.currentTurn) {
-        this.currentTurn.duration_ms = Date.now() - this.currentTurn.start_ts
-        this.turns.unshift(this.currentTurn)
-        if (this.turns.length > 10) this.turns.length = 10
-        this.currentTurn = null
+        console.error('Load data failed:', e)
       }
     },
 
     initWebSocket() {
       wsService.on('connected', () => { this.isConnected = true })
-
       wsService.on('disconnected', () => { this.isConnected = false })
+      
+      // 流转事件
+      wsService.on('thinking', (payload) => this.handleThinking(payload))
+      wsService.on('plan', (payload) => this.handlePlan(payload))
+      wsService.on('tool_call', (payload) => this.handleToolCall(payload))
+      wsService.on('tool_result', (payload) => this.handleToolResult(payload))
+      wsService.on('tool_error', (payload) => this.handleToolError(payload))
+      
+      // 消息事件
+      wsService.on('message_delta', (payload) => this.handleMessageDelta(payload))
+      wsService.on('message_final', (payload) => this.handleMessageFinal(payload))
+      
+      // 错误
+      wsService.on('error', (payload) => this.handleError(payload))
+      
+      wsService.connect()
+    },
 
-      wsService.on('thinking', (p) => {
-        if (['teaching_detect', 'planning', 'tools_running', 'synthesizing'].includes(p.stage)) {
-          if (!this.currentTurn) this.startTurn('local-' + Date.now())
-        }
-        this.pushStep('thinking', p)
-      })
+    // 开始新的对话轮次
+    startTurn(traceId) {
+      this.currentTurn = {
+        trace_id: traceId,
+        index: this.turns.length + 1,
+        steps: [],
+        start: Date.now(),
+      }
+    },
 
-      wsService.on('plan', (p) => this.pushStep('plan', p))
+    // 结束当前轮次
+    endTurn() {
+      if (this.currentTurn) {
+        this.currentTurn.duration_ms = Date.now() - this.currentTurn.start
+        this.turns.unshift(this.currentTurn)
+        if (this.turns.length > 10) this.turns.pop()
+        this.currentTurn = null
+      }
+    },
 
-      wsService.on('tool_call', (p) => this.pushStep('tool_call', p))
-      wsService.on('tool_result', (p) => this.pushStep('tool_result', p))
-      wsService.on('tool_error', (p) => this.pushStep('tool_error', p))
+    // 添加步骤到当前轮次
+    addStep(event, payload) {
+      if (!this.currentTurn) {
+        this.startTurn('')
+      }
+      this.currentTurn.steps.push({ event, payload })
+    },
 
-      // 教导闭环:高亮 + 切到管理标签
-      wsService.on('skill_learned', (p) => {
-        this.recentLearned = { name: p.name, version: p.version, capability: p.capability }
-        this.pushStep('skill_learned', p)
-        this.activeTab = 'manager'
-        if (this.toastTimer) clearTimeout(this.toastTimer)
-        this.toastTimer = setTimeout(() => { this.recentLearned = null }, 5000)
-        this.loadSkills()
-      })
+    // ===== 事件处理 =====
+    handleThinking(payload) {
+      this.addStep('thinking', payload)
+    },
 
-      // 流式输出
-      wsService.on('message_delta', (p) => {
-        if (this.pendingAssistantIndex < 0 || this.messages[this.pendingAssistantIndex]?.role !== 'assistant') {
-          this.messages.push({ role: 'assistant', content: '' })
-          this.pendingAssistantIndex = this.messages.length - 1
-        }
-        this.messages[this.pendingAssistantIndex].content += p.delta || ''
-      })
+    handlePlan(payload) {
+      this.addStep('plan', payload)
+      // 如果有 trace_id，更新当前轮次
+      if (payload.trace_id && this.currentTurn) {
+        this.currentTurn.trace_id = payload.trace_id
+      }
+    },
 
-      wsService.on('message_final', (p) => {
-        if (this.pendingAssistantIndex >= 0 && p.content) {
-          this.messages[this.pendingAssistantIndex].content = p.content
-        }
-        this.pushStep('message_final', { content_length: (p.content || '').length })
-        this.pendingAssistantIndex = -1
-        this.endTurn()
-        this.loadSkills()
-      })
+    handleToolCall(payload) {
+      this.addStep('tool_call', payload)
+    },
 
-      wsService.on('error', (p) => {
-        this.messages.push({ role: 'system', content: '错误: ' + (p.message || '') })
-        this.endTurn()
-      })
+    handleToolResult(payload) {
+      this.addStep('tool_result', payload)
+    },
 
-      wsService.on('log', () => {})
+    handleToolError(payload) {
+      this.addStep('tool_error', payload)
+    },
 
-      wsService.on('reset_ack', () => {
-        this.messages = []
-        this.turns = []
-      })
+    handleMessageDelta(payload) {
+      // 消息增量，添加到聊天区域
+      if (this.pendingIndex < 0 || this.messages[this.pendingIndex]?.role !== 'assistant') {
+        this.messages.push({ role: 'assistant', content: '' })
+        this.pendingIndex = this.messages.length - 1
+      }
+      this.messages[this.pendingIndex].content += payload.delta || ''
+    },
 
-      wsService.connect().catch((e) => console.error('connect error', e))
+    handleMessageFinal(payload) {
+      if (this.pendingIndex >= 0 && payload.content) {
+        this.messages[this.pendingIndex].content = payload.content
+      }
+      this.pendingIndex = -1
+      this.endTurn()
+    },
+
+    handleError(payload) {
+      this.messages.push({ role: 'system', content: '错误: ' + (payload.message || '') })
+      this.pendingIndex = -1
+      this.endTurn()
     },
 
     onSend(text) {
       this.messages.push({ role: 'user', content: text })
-      this.pendingAssistantIndex = -1
-      // 用 'pending-' 占位,后端首个事件到达后会被真实 trace_id 替换
-      this.startTurn('pending-' + Date.now())
+      this.pendingIndex = -1
+      this.startTurn('')
       wsService.chat(text)
     },
 
     onReset() {
+      this.messages = []
+      this.turns = []
+      this.currentTurn = null
       wsService.reset()
     },
   },
@@ -217,7 +201,7 @@ export default {
 <style>
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
   color: #eaeaea;
   min-height: 100vh;
@@ -229,14 +213,13 @@ body {
   max-width: 1400px;
   margin: 0 auto;
   padding: 16px;
-  box-sizing: border-box;
 }
 .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 16px;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255,255,255,0.05);
   border-radius: 12px;
   margin-bottom: 16px;
 }
@@ -247,28 +230,23 @@ body {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-.header-info { display: flex; gap: 12px; align-items: center; font-size: 12px; color: #999; }
-.client-id { font-family: monospace; }
-.status { padding: 4px 10px; border-radius: 12px; background: rgba(255, 0, 0, 0.2); }
-.status.connected { background: rgba(0, 255, 0, 0.2); }
-
-.main-content {
-  display: flex;
-  gap: 16px;
-  flex: 1;
-  min-height: 0;
+.status {
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(255,0,0,0.2);
 }
+.status.connected { background: rgba(0,255,0,0.2); }
+.main-content { display: flex; gap: 16px; flex: 1; }
 .sidebar {
   width: 320px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255,255,255,0.03);
   border-radius: 12px;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 .sidebar-tabs {
   display: flex;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255,255,255,0.05);
 }
 .sidebar-tabs button {
   flex: 1;
@@ -289,5 +267,4 @@ body {
   overflow-y: auto;
   padding: 12px;
 }
-.flow-content { padding: 0; }
 </style>

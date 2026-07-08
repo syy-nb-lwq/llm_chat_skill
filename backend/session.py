@@ -2,10 +2,10 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Callable
 
 from core.agent import Agent
-from infra.logger import get_logger, LogEntry
+from infra.logger import get_logger
 
 
 @dataclass
@@ -15,8 +15,7 @@ class Session:
     agent: Agent
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
-    # 每个 session 独立的日志订阅者,断线后清理
-    log_callbacks: list = field(default_factory=list)
+    log_callbacks: List[Callable] = field(default_factory=list)
 
     def touch(self):
         self.last_active = time.time()
@@ -37,8 +36,7 @@ class SessionManager:
             if sess is None:
                 sess = Session(client_id=client_id, agent=Agent(session_id=client_id))
                 self._sessions[client_id] = sess
-                self.logger.info("flow_step", "SessionManager",
-                                 f"创建 session: {client_id}")
+                self.logger.info("Session", f"创建: {client_id[:8]}")
             sess.touch()
             return sess
 
@@ -61,8 +59,7 @@ class SessionManager:
                         self.logger.unsubscribe(cb)
                     except Exception:
                         pass
-                self.logger.info("flow_step", "SessionManager",
-                                 f"GC session: {cid}")
+                self.logger.info("Session", f"GC: {cid[:8]}")
 
     def destroy(self, client_id: str):
         s = self._sessions.pop(client_id, None)

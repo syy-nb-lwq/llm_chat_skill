@@ -47,7 +47,7 @@ export default {
   },
   methods: {
     iconFor(event) {
-      return {
+      const icons = {
         thinking: '🔄',
         plan: '📋',
         tool_call: '🔧',
@@ -56,13 +56,14 @@ export default {
         message_delta: '💬',
         message_final: '📝',
         error: '❌',
-        log: '📊',
         skill_learned: '✨',
-      }[event] || '•'
+      }
+      return icons[event] || '•'
     },
     summaryOf(step) {
+      const event = step.event
       const p = step.payload || {}
-      switch (step.event) {
+      switch (event) {
         case 'thinking':
           return `阶段: ${p.stage || ''}`
         case 'plan':
@@ -72,10 +73,8 @@ export default {
           const short = params.length > 40 ? params.slice(0, 40) + '…' : params
           return `[${p.task_id || '-'}] ${p.tool} ${short}`
         }
-        case 'tool_result': {
-          const meta = p.meta || {}
-          return `[${p.task_id || '-'}] ${p.tool} ✓${meta.source ? ' via ' + meta.source : ''}${meta.duration_ms ? ' ' + Math.round(meta.duration_ms) + 'ms' : ''}`
-        }
+        case 'tool_result':
+          return `[${p.task_id || '-'}] ${p.tool} ✓`
         case 'tool_error':
           return `[${p.task_id || '-'}] ${p.tool} 失败: ${p.error || ''}`
         case 'message_delta':
@@ -86,8 +85,6 @@ export default {
           return p.message || ''
         case 'skill_learned':
           return `${p.name} v${p.version} | 步骤 ${p.step_count} | ${(p.patterns||[]).join(', ')}`
-        case 'log':
-          return `[${p.component || ''}] ${(p.message || '').slice(0, 50)}`
         default:
           return ''
       }
