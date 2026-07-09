@@ -37,6 +37,12 @@ async def _startup():
         logger.error("startup", f"配置错误: {e}")
     # 在事件循环中注册 PubSub 订阅处理器
     await register_handlers()
+    # 启动 Session GC 后台任务
+    async def gc_loop():
+        while True:
+            await asyncio.sleep(60)
+            sessions.gc()
+    asyncio.create_task(gc_loop())
 
 
 # ===== REST API =====
@@ -128,16 +134,6 @@ async def list_tools():
             for tool in learning.tools.all()
         ]
     }
-
-
-# ===== 后台 GC =====
-@app.on_event("startup")
-async def _gc_loop():
-    async def loop():
-        while True:
-            await asyncio.sleep(60)
-            sessions.gc()
-    asyncio.create_task(loop())
 
 
 if __name__ == "__main__":

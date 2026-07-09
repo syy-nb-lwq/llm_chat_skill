@@ -175,7 +175,15 @@ class Agent:
         self.logger.info("Agent", "RESET")
 
     # ===== 实体提取(给 Skill DAG 的 ${user_input.x} 用) =====
-    _CITY_SUFFIXES = ("市",) if False else ()  # 占位,Chinese cities 通常不带"市"
+
+    _KNOWN_CITIES = {
+        "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉",
+        "西安", "重庆", "厦门", "南京", "天津", "苏州", "青岛",
+        "长沙", "大连", "沈阳", "郑州", "哈尔滨", "长春", "南昌",
+        "合肥", "昆明", "福州", "济南", "太原", "石家庄", "兰州",
+        "乌鲁木齐", "呼和浩特", "南宁", "贵阳", "海口", "银川", "西宁",
+        "拉萨", "香港", "澳门", "台北",
+    }
 
     def _extract_entities(self, text: str) -> Dict[str, Any]:
         """轻量实体提取。
@@ -185,17 +193,10 @@ class Agent:
         - date:  today / tomorrow / YYYY-MM-DD
         """
         out: Dict[str, Any] = {}
-        # city
-        cities = [
-            "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉",
-            "西安", "重庆", "厦门", "南京", "天津", "苏州", "青岛",
-            "长沙", "大连", "沈阳", "郑州",
-        ]
-        for c in cities:
+        for c in self._KNOWN_CITIES:
             if c in text:
                 out["city"] = c
                 break
-        # date
         if "明天" in text:
             out["date"] = "tomorrow"
         elif "今天" in text or "今日" in text:

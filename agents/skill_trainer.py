@@ -112,9 +112,12 @@ class SkillTrainer(BaseAgent):
         existing = self.skill_store.get_by_name(obj["name"])
         if existing:
             try:
-                major, minor, patch = [int(x) for x in existing.version.split(".")]
+                parts = existing.version.split(".")
+                major = int(parts[0])
+                minor = int(parts[1]) if len(parts) > 1 else 0
+                patch = int(parts[2]) if len(parts) > 2 else 0
                 version = f"{major}.{minor}.{patch + 1}"
-            except Exception:
+            except (ValueError, IndexError, AttributeError):
                 version = "1.1.0"
         else:
             version = "1.0.0"
@@ -146,8 +149,7 @@ class SkillTrainer(BaseAgent):
             data = skill.to_dict()
             path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-            self.skill_store._registry.add(skill)
-            self.skill_store._skills = self.skill_store._registry._by_name
+            self.skill_store.add(skill)
 
             self.logger.info("SkillTrainer", f"沉淀技能: {skill.name} v{skill.version} → {path.name}")
             return True, str(path)
