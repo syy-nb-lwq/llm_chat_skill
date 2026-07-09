@@ -15,7 +15,8 @@ class Session:
     agent: Agent
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
-    log_callbacks: List[Callable] = field(default_factory=list)
+    # Session 销毁时要调用的清理钩子(关闭订阅、刷新资源等)
+    dispose_callbacks: List[Callable] = field(default_factory=list)
 
     def touch(self):
         self.last_active = time.time()

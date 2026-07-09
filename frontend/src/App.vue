@@ -21,7 +21,12 @@
           <ToolList :tools="tools" />
         </div>
         <div v-show="activeTab === 'skills'" class="sidebar-content">
-          <SkillList :skills="skills" />
+          <SkillManager
+            :skills="skills"
+            :loading="loading"
+            :recent-learned="recentLearned"
+            @reload="loadData"
+          />
         </div>
         <div v-show="activeTab === 'flow'" class="sidebar-content">
           <FlowPanel :turns="turns" />
@@ -42,12 +47,13 @@
 import { wsService } from './websocket'
 import ToolList from './components/ToolList.vue'
 import SkillList from './components/SkillList.vue'
+import SkillManager from './components/SkillManager.vue'
 import FlowPanel from './components/FlowPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
 
 export default {
   name: 'App',
-  components: { ToolList, SkillList, FlowPanel, ChatPanel },
+  components: { ToolList, SkillList, SkillManager, FlowPanel, ChatPanel },
   data() {
     return {
       isConnected: false,
@@ -58,6 +64,8 @@ export default {
       turns: [],
       currentTurn: null,
       pendingIndex: -1,
+      loading: false,
+      recentLearned: null,
     }
   },
   mounted() {
@@ -67,9 +75,11 @@ export default {
   beforeUnmount() {
     wsService.off('connected', this.handleConnected)
     wsService.off('disconnected', this.handleDisconnected)
+    wsService.off('skill_learned', this.handleSkillLearned)
   },
   methods: {
     async loadData() {
+      this.loading = true
       try {
         const [toolsRes, skillsRes] = await Promise.all([
           fetch('http://localhost:8000/api/tools'),
@@ -81,27 +91,32 @@ export default {
         this.skills = skillsData.skills || []
       } catch (e) {
         console.error('Load data failed:', e)
+      } finally {
+        this.loading = false
       }
     },
 
     initWebSocket() {
       wsService.on('connected', () => { this.isConnected = true })
       wsService.on('disconnected', () => { this.isConnected = false })
-      
+
       // 流转事件
       wsService.on('thinking', (payload) => this.handleThinking(payload))
       wsService.on('plan', (payload) => this.handlePlan(payload))
       wsService.on('tool_call', (payload) => this.handleToolCall(payload))
       wsService.on('tool_result', (payload) => this.handleToolResult(payload))
       wsService.on('tool_error', (payload) => this.handleToolError(payload))
-      
+
       // 消息事件
       wsService.on('message_delta', (payload) => this.handleMessageDelta(payload))
       wsService.on('message_final', (payload) => this.handleMessageFinal(payload))
-      
+
+      // 技能学习事件
+      wsService.on('skill_learned', (payload) => this.handleSkillLearned(payload))
+
       // 错误
       wsService.on('error', (payload) => this.handleError(payload))
-      
+
       wsService.connect()
     },
 
@@ -179,6 +194,17 @@ export default {
       this.messages.push({ role: 'system', content: '错误: ' + (payload.message || '') })
       this.pendingIndex = -1
       this.endTurn()
+    },
+
+    // 技能学习完成:展示 toast + 自动刷新技能列表 + 切到 skills 标签
+    async handleSkillLearned(payload) {
+      this.recentLearned = payload
+      // 自动重载技能列表
+      try { await this.loadData() } catch (e) { console.error(e) }
+      // 切到技能标签,让用户看到新技能
+      this.activeTab = 'skills'
+      // 4 秒后清掉 toast
+      setTimeout(() => { this.recentLearned = null }, 4000)
     },
 
     onSend(text) {

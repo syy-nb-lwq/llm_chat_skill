@@ -39,7 +39,11 @@ class Agent:
         self.context.add_user_message(user_input)
         self.logger.info("Agent", f"INPUT: {user_input[:50]}")
 
+        # 收集异步回调任务,handle 末尾统一 await,确保事件按 emit 顺序完成
+        pending_async: list = []
+
         def emit(event: str, payload: dict):
+            """派发事件。同步回调直接调;异步回调收集到 pending_async 末尾 await。"""
             if on_event is None:
                 return
             # 同步回调:直接调
@@ -49,16 +53,12 @@ class Agent:
                 except Exception:
                     pass
                 return
-            # 异步回调:在已运行的 event loop 中调度为 task
+            # 异步回调:挂到 list,handle() 末尾统一 await
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(on_event(event, payload))
-            except RuntimeError:
-                # 没有 running loop,同步调用(要求回调内部不阻塞)
-                try:
-                    on_event(event, payload)
-                except Exception:
-                    pass
+                task = asyncio.ensure_future(on_event(event, payload))
+                pending_async.append(task)
+            except Exception:
+                pass
 
         try:
             # 教导意图检测
@@ -79,7 +79,7 @@ class Agent:
             if self.manager.should_answer_directly(user_input):
                 emit("thinking", {"stage": "direct_answer"})
                 buf = []
-                async for d in self.orchestrator.stream(user_input, {}, None):
+                async for d in self.orchestrator.stream(user_input, {}, None, self.context):
                     buf.append(d)
                     emit("message_delta", {"delta": d})
                 ans = "".join(buf)
@@ -89,7 +89,7 @@ class Agent:
 
             # 规划
             emit("thinking", {"stage": "planning"})
-            plan = await self.manager.plan(user_input)
+            plan = await self.manager.plan(user_input, self.context)
             skill_name = plan.selected_skill.name if plan.selected_skill else None
             emit("plan", {
                 "intent": plan.intent,
@@ -142,11 +142,11 @@ class Agent:
             emit("thinking", {"stage": "synthesizing"})
             buf = []
             try:
-                async for d in self.orchestrator.stream(user_input, tool_results, plan.selected_skill):
+                async for d in self.orchestrator.stream(user_input, tool_results, plan.selected_skill, self.context):
                     buf.append(d)
                     emit("message_delta", {"delta": d})
             except Exception:
-                ans = await self.orchestrator.orchestrate(user_input, tool_results, plan.selected_skill)
+                ans = await self.orchestrator.orchestrate(user_input, tool_results, plan.selected_skill, self.context)
                 buf = [ans]
                 emit("message_delta", {"delta": ans})
 
@@ -162,6 +162,13 @@ class Agent:
             self.logger.error("Agent", f"ERROR: {e}")
             emit("error", {"message": str(e)})
             raise
+        finally:
+            # 统一 await 所有异步 emit,保证事件按 emit 顺序完成
+            if pending_async:
+                results = await asyncio.gather(*pending_async, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, Exception):
+                        self.logger.warning("Agent", f"emit task failed: {r}")
 
     def reset(self):
         self.context.clear()

@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
 from core.agent_base import BaseAgent
+from core.context import Context
 from skills.manager import Skill, get_skill_store
 
 
@@ -86,12 +87,22 @@ class ManagerAgent(BaseAgent):
         super().__init__()
         self.skill_store = get_skill_store()
 
-    async def plan(self, user_input: str) -> PlanResult:
-        """分析用户输入,产出 PlanResult"""
+    async def plan(self, user_input: str, context: Optional[Context] = None) -> PlanResult:
+        """分析用户输入,产出 PlanResult。
+
+        Args:
+            user_input: 本轮用户输入
+            context:    完整对话上下文(可选)。传入后,最近几条历史会作为额外
+                        上下文提供给 LLM,以支持多轮对话。
+        """
         self.logger.info("Manager", "开始意图识别和任务规划")
         skills = self.skill_store.list_all()
+        # 把多轮上下文拼接进来,token 超限由 to_llm_messages 内部截断
         try:
-            plan = await self.think_json(user_input, self.PLAN_SCHEMA)
+            plan = await self.think_json(
+                self._build_user_prompt(user_input, context),
+                self.PLAN_SCHEMA,
+            )
         except Exception as e:
             self.logger.error("Manager", f"规划失败,降级: {e}")
             return PlanResult(intent=user_input, selected_skill=None, tool_tasks=[])
@@ -116,6 +127,39 @@ class ManagerAgent(BaseAgent):
             selected_skill=selected_skill,
             tool_tasks=tool_tasks,
         )
+
+    def _build_user_prompt(self, user_input: str, context: Optional[Context]) -> str:
+        """把上下文历史对话拼到当前 user_input。
+
+        不会破坏现有调用——若 context 为空/None,直接返回原 user_input。
+        """
+        if context is None or len(context) == 0:
+            return user_input
+        history = context.to_llm_messages(max_tokens=2000)
+        if not history:
+            return user_input
+        # 跳过 system 和 tool 类型,只保留可见的对话
+        recent = [
+            m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+        if len(recent) <= 1:
+            return user_input
+        # 最后一条是当前 user_input 的内容(Agent.handle 已 add_user_message);
+        # 把它剔除,只拼历史。
+        prior = recent[:-1]
+        if not prior:
+            return user_input
+        lines = ["以下是此前的对话历史(用户/助手),可能与本次任务相关:"]
+        for m in prior[-6:]:
+            role = "用户" if m["role"] == "user" else "助手"
+            content = (m["content"] or "").strip()
+            if len(content) > 500:
+                content = content[:500] + "..."
+            lines.append(f"- {role}: {content}")
+        lines.append("")
+        lines.append(f"本次用户输入: {user_input}")
+        lines.append("请结合对话历史,识别本轮真实意图。")
+        return "\n".join(lines)
 
     def _auto_id_tool_tasks(self, tasks: List[Dict]) -> List[Dict]:
         result = []

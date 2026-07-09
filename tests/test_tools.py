@@ -53,3 +53,65 @@ def test_register_duplicate_raises():
     reg.register(WeatherTool())
     with pytest.raises(ValueError):
         reg.register(WeatherTool())
+
+
+@pytest.mark.asyncio
+async def test_weather_tool_uses_httpx_async(monkeypatch):
+    """WeatherTool.execute 必须 await 异步客户端,而不是用同步 requests 阻塞事件循环"""
+    from tools.weather import WeatherTool
+
+    tool = WeatherTool()
+
+    class _FakeResp:
+        def raise_for_status(self): pass
+        def json(self):
+            return {
+                "current_condition": [{
+                    "weatherDesc": [{"value": "晴"}],
+                    "temp_C": "25",
+                    "humidity": "60",
+                    "windspeedKmph": "10",
+                }]
+            }
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): self.calls = 0
+        async def get(self, url, params=None):
+            self.calls += 1
+            return _FakeResp()
+        async def aclose(self): pass
+
+    fake = _FakeClient()
+    # 替换 _get_client 直接返回 fake,跳过真实 httpx 构造
+    async def _fake_get_client():
+        return fake
+    monkeypatch.setattr(tool, "_get_client", _fake_get_client)
+
+    result = await tool.execute("北京")
+    assert result.success, result.error
+    assert result.data["city"] == "北京"
+    assert result.data["weather"] == "晴"
+    assert result.data["temp"] == "25"
+    assert fake.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_weather_tool_handles_httpx_timeout(monkeypatch):
+    """网络超时应被捕获并返回 success=False(而不是抛异常)"""
+    import httpx
+    from tools.weather import WeatherTool
+
+    tool = WeatherTool()
+
+    class _TimeoutClient:
+        async def get(self, url, params=None):
+            raise httpx.TimeoutException("simulated")
+        async def aclose(self): pass
+
+    async def _fake_get_client():
+        return _TimeoutClient()
+    monkeypatch.setattr(tool, "_get_client", _fake_get_client)
+
+    result = await tool.execute("上海")
+    assert not result.success
+    assert "超时" in result.error
