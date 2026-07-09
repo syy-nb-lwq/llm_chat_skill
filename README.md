@@ -147,7 +147,7 @@ CI: GitHub Actions 跑 Python 3.10 / 3.11 / 3.12 矩阵测试。
 │   ├── test_logger.py          # logging 级别 + 订阅 + 单例(6)
 │   └── test_backend.py         # FastAPI REST + WebSocket(6 + 1 skip)
 ├── ui/                         # Streamlit / CLI 入口
-├── docs/                       # 架构设计文档(含 P6 深化清单)
+├── docs/                       # 架构设计文档(含 V2 自我进化设计)
 ├── docker-compose.yml          # 一键启动
 ├── Dockerfile
 ├── requirements.txt            # 含 httpx

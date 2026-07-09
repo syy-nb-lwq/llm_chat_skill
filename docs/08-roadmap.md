@@ -224,3 +224,15 @@ pytest -v
 - 分布式部署 / 高并发
 - 权限/租户系统
 - Embedding 语义匹配(版本 1 用关键词即可)
+
+## V2 目标:自我进化
+
+详见 [docs/09-self-evolution.md](docs/09-self-evolution.md)。
+
+核心组件:
+- **ExecutionCritic**:每次执行后评估质量,生成改进建议
+- **MemoryStore**:跨 Session 持久化经验,让 Agent 记住历史失败
+- **SkillMerger**:多版本 Skill 自动合并
+- **SelfReflectLoop**:低负载时主动反思,生成洞察
+
+演进路径:Phase 1(MemoryStore+Critic,只记录不修改) → Phase 2(SkillMerger+审核) → Phase 3(开放自我修改)
