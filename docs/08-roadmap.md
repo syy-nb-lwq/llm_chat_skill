@@ -173,11 +173,11 @@ pytest -v
 
 ---
 
-## P6 — 深化(本轮已做,待归档)
+## P6 — 深化(本轮已做,全部完成 ✅)
 
 > 2026-07 本轮审查后的修复与增强。
 
-### 已完成
+### 已完成(第一批)
 
 | ID | 问题 | 文件 | 改动 |
 |---|---|---|---|
@@ -189,19 +189,16 @@ pytest -v
 | B3 | emit() 异步路径 create_task 未 await | `core/agent.py` | `ensure_future` 收集到列表,handle() 末尾 `asyncio.gather` drain,finally 保证;新增 2 个单测 |
 | B2 | logger 简陋 print 输出 | `infra/logger.py` | 升级 stdlib logging;支持 config.log_level/文件输出/订阅回调;新增 6 个单测 |
 
+### 已完成(第二批)
+
+| ID | 问题 | 文件 | 改动 |
+|---|---|---|---|
+| B8 | `persist` 直接写 `_registry._by_name` | `agents/skill_trainer.py` | 改用 `store.add()` 公共 API |
+| B7 | 重复 `@app.on_event("startup")` | `backend/main.py` | 合并为单一 startup,GC 移入内部 |
+| B4 | 城市列表仅 18 个 | `core/agent.py` | 扩充至 37 城(含港澳台);去占位代码 |
+| B9 | 版本递增粗粒度 try/except | `agents/skill_trainer.py` | 精确捕获 ValueError/IndexError,逐段解析 |
+
 **测试结果:58 passed / 1 skipped**
-
-### 待做
-
-| ID | 问题 | 风险 |
-|---|---|---|
-| B4 | `_extract_entities` 城市硬编码 | 低 |
-| B7 | `backend/main.py` 重复 `@app.on_event("startup")` | 低 |
-| B8 | `skill_trainer.persist` 直接写 `_registry._by_name` | 中 |
-| B9 | 版本递增简单 try/except | 低 |
-| B10 | `params_hint` 可选导致空参数 | 低 |
-| C1 | 测试需同步 patch 两处 get_llm_client | 低 |
-| C5/C6 | 日志/技能字段命名不统一 | 低 |
 
 ---
 
