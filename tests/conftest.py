@@ -35,9 +35,12 @@ def reset_singletons():
     from infra import llm as llm_mod
     from infra import logger as logger_mod
     from skills import manager as skill_mod
-    from tools import base as tools_mod
+    from tools.hub import reset_tool_hub
+    from tools.base import reset_tool_registry
     llm_mod.reset_llm_client()
     logger_mod.get_logger().__init__()
     skill_mod.reset_skill_store()
-    tools_mod.reset_tool_registry()
+    # 重置两个工具系统
+    reset_tool_registry()
+    reset_tool_hub()
     yield

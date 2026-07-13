@@ -8,7 +8,9 @@ from agents.orchestrator import OrchestratorAgent
 from agents.learning import LearningAgent, ToolTask
 from agents.skill_trainer import SkillTrainer
 from core.context import Context
+from core.critic import ExecutionCritic, build_execution_context
 from core.dag import DAGExecutor
+from core.memory import get_memory_store
 from infra.config import config
 from infra.logger import get_logger
 
@@ -19,12 +21,14 @@ class Agent:
     def __init__(self, session_id: str = "default"):
         self.session_id = session_id
         self.logger = get_logger()
+        self.trace_id = f"session-{session_id}-{int(time.time())}"
 
         self.manager = ManagerAgent()
         self.learning = LearningAgent()
         self.orchestrator = OrchestratorAgent()
         self.dag = DAGExecutor(self.learning)
         self.trainer = SkillTrainer()
+        self.critic = ExecutionCritic(get_memory_store())
 
         self.context = Context()
         self.dag_enabled = bool(config.skill_dag_enabled)
@@ -85,6 +89,20 @@ class Agent:
                 ans = "".join(buf)
                 self.context.add_assistant_message(ans)
                 emit("message_final", {"content": ans})
+                
+                # ExecutionCritic 异步评估(直接回答场景)
+                duration = (time.time() - start) * 1000
+                execution_context = build_execution_context(
+                    trace_id=self.trace_id,
+                    scenario="direct_answer",
+                    intent=user_input[:50],
+                    selected_skill=None,
+                    tool_results={},
+                    latency_ms=duration,
+                )
+                pending_async.append(asyncio.ensure_future(
+                    self.critic.evaluate(execution_context)
+                ))
                 return ans
 
             # 规划
@@ -156,6 +174,21 @@ class Agent:
 
             duration = (time.time() - start) * 1000
             self.logger.info("Agent", f"DONE: {duration:.0f}ms")
+
+            # ExecutionCritic 异步评估,不阻塞响应
+            execution_context = build_execution_context(
+                trace_id=self.trace_id,
+                scenario=plan.selected_skill.name if plan.selected_skill else "",
+                intent=plan.intent,
+                selected_skill=plan.selected_skill.name if plan.selected_skill else None,
+                tool_results=tool_results,
+                latency_ms=duration,
+            )
+            # 异步执行 critic,收集到 pending_async 末尾 await
+            pending_async.append(asyncio.ensure_future(
+                self.critic.evaluate(execution_context)
+            ))
+
             return ans
 
         except Exception as e:

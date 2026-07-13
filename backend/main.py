@@ -43,6 +43,36 @@ async def _startup():
             await asyncio.sleep(60)
             sessions.gc()
     asyncio.create_task(gc_loop())
+    
+    # 初始化工具中枢 Hub
+    from tools.hub import get_tool_hub
+    from tools.sources.python_source import create_python_source
+    from tools.sources.mcp_source import create_mcp_source
+    hub = get_tool_hub()
+    
+    # 注册 Python 内置工具源
+    python_source = create_python_source(
+        name="builtin",
+        directories=[str(Path(__file__).parent.parent / "tools")],
+    )
+    hub.register_source(python_source)
+    
+    # 连接所有工具源
+    try:
+        await hub.connect_all()
+        logger.info("startup", f"工具中枢已初始化,工具数: {len(hub.names())}")
+    except Exception as e:
+        logger.warning("startup", f"工具源连接失败: {e}")
+    
+    # 启动自我反思循环(如果启用)
+    try:
+        from core.reflect import SelfReflectLoop, get_self_evolution_enabled
+        if get_self_evolution_enabled():
+            reflect_loop = SelfReflectLoop()
+            asyncio.create_task(reflect_loop.start())
+            logger.info("startup", "自我反思循环已启动")
+    except Exception as e:
+        logger.warning("startup", f"启动自我反思循环失败: {e}")
 
 
 # ===== REST API =====
@@ -128,12 +158,149 @@ async def reload_skills():
 async def list_tools():
     from agents.learning import LearningAgent
     learning = LearningAgent()
+    # 尝试从 Hub 获取工具
+    tools = learning.tools.all()
+    if not tools:
+        # 兼容:如果 Hub 没有工具,尝试从旧注册表获取
+        from tools.base import get_tool_registry
+        tools = get_tool_registry().all()
     return {
         "tools": [
             {"name": tool.name, "description": tool.description}
-            for tool in learning.tools.all()
+            for tool in tools
         ]
     }
+
+
+# ===== Patch 管理 API =====
+@app.get("/api/patches")
+async def list_patches():
+    """获取所有待审阅的改进建议"""
+    from core.memory import get_memory_store
+    store = get_memory_store()
+    patches = store.get_pending_patches()
+    return {
+        "patches": [
+            {
+                "id": p.id,
+                "trace_id": p.trace_id,
+                "timestamp": p.timestamp,
+                "target_skill": p.target_skill,
+                "patch_type": p.patch_type,
+                "diagnosis": p.diagnosis,
+                "suggestion": p.suggestion,
+                "confidence": p.confidence,
+                "status": p.status,
+            }
+            for p in patches
+        ]
+    }
+
+
+@app.post("/api/patches/{patch_id}/approve")
+async def approve_patch(patch_id: str):
+    """批准一个 SkillPatch,使其生效"""
+    from core.memory import get_memory_store
+    from core.merger import get_self_evolution_enabled
+    from skills.manager import get_skill_store
+    from pathlib import Path
+    import json
+
+    if not get_self_evolution_enabled():
+        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+
+    store = get_memory_store()
+    store.approve_patch(patch_id, "human")
+
+    applied = False
+    # 如果是 improve_skill 类型,尝试应用修改
+    patch_file = Path(__file__).parent.parent / "memory" / "skill_patches" / "pending" / f"{patch_id}.json"
+    if patch_file.exists():
+        data = json.loads(patch_file.read_text(encoding="utf-8"))
+        if data.get("status") == "approved":
+            suggestion = data.get("suggestion", {})
+            if suggestion.get("type") == "improve_skill" and suggestion.get("target_skill"):
+                # 尝试应用修改到目标技能
+                skill_store = get_skill_store()
+                skill = skill_store.get_by_name(suggestion["target_skill"])
+                if skill:
+                    # 更新技能的 method
+                    if "method" in suggestion:
+                        skill.method = suggestion["method"]
+                    # 重新加载
+                    skill_store.reload()
+                    applied = True
+
+    return {"approved": patch_id, "applied": applied}
+
+
+@app.post("/api/patches/{patch_id}/reject")
+async def reject_patch(patch_id: str):
+    """拒绝一个 SkillPatch"""
+    from core.memory import get_memory_store
+    from core.merger import get_self_evolution_enabled
+
+    if not get_self_evolution_enabled():
+        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+
+    store = get_memory_store()
+    store.reject_patch(patch_id, "human")
+    return {"rejected": patch_id}
+
+
+@app.get("/api/memory/stats")
+async def memory_stats():
+    """获取记忆统计"""
+    from core.memory import get_memory_store
+    store = get_memory_store()
+    stats = store.get_stats()
+    return stats
+
+
+@app.get("/api/reflections")
+async def list_reflections():
+    """获取反思报告列表"""
+    from core.merger import get_self_evolution_enabled
+    from pathlib import Path
+    import json
+
+    if not get_self_evolution_enabled():
+        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+
+    base = Path(__file__).parent.parent / "memory" / "reflections"
+    reports = []
+
+    for month_dir in sorted(base.iterdir(), reverse=True):
+        if not month_dir.is_dir():
+            continue
+        for path in sorted(month_dir.glob("*.json"), reverse=True):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                reports.append(data)
+            except Exception:
+                pass
+            if len(reports) >= 20:  # 最多 20 条
+                break
+        if len(reports) >= 20:
+            break
+
+    return {"reflections": reports}
+
+
+@app.post("/api/reflections/request")
+async def request_reflection():
+    """请求立即生成反思报告"""
+    from core.reflect import SelfReflectLoop, get_self_evolution_enabled
+
+    if not get_self_evolution_enabled():
+        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+
+    loop = SelfReflectLoop()
+    report = await loop.request_reflection()
+
+    if report:
+        return {"success": True, "report_id": report.id}
+    return {"success": False, "message": "无需反思"}
 
 
 if __name__ == "__main__":

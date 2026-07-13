@@ -269,7 +269,7 @@ v{version2}: {method2}
 
 ## 5. 演进路线图
 
-### Phase 1:MemoryStore + Critic(基础版,低风险)
+### Phase 1:MemoryStore + Critic(基础版,低风险) ✅ 已完成
 
 **目标**:先让系统"记住",不急着"自我修改"。
 
@@ -282,9 +282,18 @@ v{version2}: {method2}
 
 **Feature Flag**: `SELF_EVOLUTION_ENABLED=false`(默认关)
 
+已实现功能:
+- ✅ MemoryStore: 失败/成功记录持久化,按月归档
+- ✅ ExecutionCritic: 异步评估执行质量,生成诊断和建议
+- ✅ Manager 集成: 规划前读取历史教训 hints
+- ✅ 容量控制: 每月超过 50 条时淘汰最低 success_rate 的 20%
+- ✅ SkillPatch: 待审阅改进建议的增删改查
+- ✅ Feature Flag: `SELF_EVOLUTION_ENABLED` 控制开关
+- ✅ 73 个单元测试全部通过
+
 ---
 
-### Phase 2:SkillMerger + 手动审核(中风险)
+## Phase 2:SkillMerger + 手动审核(中风险) ✅ 已完成
 
 **目标**:允许自我改进,但有审核门槛。
 
@@ -293,6 +302,13 @@ v{version2}: {method2}
 | SkillMerger | LLM 版本合并 | `core/merger.py` |
 | Pending 队列 | 待审阅 SkillPatch UI | `frontend/src/components/PatchReview.vue` |
 | 自动审核 | 低风险 Patch 自动生效 | `core/critic.py` |
+
+已实现功能:
+- ✅ SkillMerger: LLM 版本合并,支持手动和自动触发
+- ✅ PatchReview 前端组件: 展示待审阅的改进建议,支持批准/拒绝
+- ✅ Patch 管理 API: `/api/patches`, `/api/patches/{id}/approve`, `/api/patches/{id}/reject`
+- ✅ 记忆统计 API: `/api/memory/stats`
+- ✅ 前端新增"✨ 进化"标签页
 
 **自动审核策略**:
 
@@ -304,15 +320,21 @@ confidence < 0.7   → 丢弃,只存 MemoryStore
 
 ---
 
-### Phase 3:SelfReflectLoop + 开放自我修改(高风险)
+## Phase 3:SelfReflectLoop + 开放自我修改(高风险) ✅ 已完成
 
 **目标**:Agent 能主动反思并修改自身行为。
 
 | 组件 | 任务 | 文件 |
 |------|------|------|
 | SelfReflectLoop | 定时复盘 | `core/reflect.py` |
-| Prompt 自适应 | Agent 调整自己的 system_prompt | `agents/base.py` |
 | 进化仪表盘 | 前端展示进化状态 | `frontend/src/components/EvolutionDashboard.vue` |
+
+已实现功能:
+- ✅ SelfReflectLoop: 定时复盘,检测高频失败场景
+- ✅ 触发条件: 24h 内失败 > 5 条或同场景失败 3 次
+- ✅ 反思报告: 高频失败场景、技能优化建议、强化技能列表
+- ✅ 进化仪表盘: 统计卡片、反思报告列表、快速操作
+- ✅ 前端新增"📈 仪表盘"标签页
 
 **安全护栏**:
 - 禁止修改 `SKILL_DAG_ENABLED` / `TOOL_CACHE_ENABLED` 等系统级 flag

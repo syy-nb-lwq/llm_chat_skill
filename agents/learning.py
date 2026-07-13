@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from infra.logger import get_logger
-from tools.base import ToolResult, get_tool_registry
+from tools.base import ToolResult
+from tools.hub import get_tool_hub
 
 
 # 参数值类型(支持 ${task.data.x} 占位符)
@@ -110,8 +111,9 @@ class LearningAgent:
 
     def __init__(self):
         self.logger = get_logger()
-        self.tools = get_tool_registry()
-        self.registry = self.tools  # 兼容旧字段名
+        self.hub = get_tool_hub()
+        self.tools = self.hub  # 兼容旧字段名
+        self.registry = self.hub  # 兼容旧字段名
 
     async def execute_tool(
         self,
@@ -124,8 +126,8 @@ class LearningAgent:
         timeout_s: int = 30,
     ) -> ToolResult:
         """执行单个工具(支持重试 + 超时)"""
-        tool = self.tools.get(tool_type)
-        if not tool:
+        tool_info = self.hub.get_tool(tool_type)
+        if not tool_info:
             return ToolResult(success=False, error=f"工具不存在: {tool_type}")
 
         # 参数拷贝,避免污染调用方
@@ -135,7 +137,7 @@ class LearningAgent:
             self.logger.info(tool_type, f"执行工具: {local_params}")
             try:
                 result = await asyncio.wait_for(
-                    tool.execute(**local_params),
+                    self.hub.call_tool(tool_type, local_params),
                     timeout=timeout_s,
                 )
                 if result.success:

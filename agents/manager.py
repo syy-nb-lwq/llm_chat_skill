@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 
 from core.agent_base import BaseAgent
 from core.context import Context
+from core.memory import get_memory_store
 from skills.manager import Skill, get_skill_store
 
 
@@ -86,6 +87,7 @@ class ManagerAgent(BaseAgent):
     def __init__(self):
         super().__init__()
         self.skill_store = get_skill_store()
+        self.memory_store = get_memory_store()
 
     async def plan(self, user_input: str, context: Optional[Context] = None) -> PlanResult:
         """分析用户输入,产出 PlanResult。
@@ -97,10 +99,14 @@ class ManagerAgent(BaseAgent):
         """
         self.logger.info("Manager", "开始意图识别和任务规划")
         skills = self.skill_store.list_all()
+        
+        # 读取历史教训 hints,拼到 user_input 前面
+        enriched_input = self._enrich_with_hints(user_input)
+        
         # 把多轮上下文拼接进来,token 超限由 to_llm_messages 内部截断
         try:
             plan = await self.think_json(
-                self._build_user_prompt(user_input, context),
+                self._build_user_prompt(enriched_input, context),
                 self.PLAN_SCHEMA,
             )
         except Exception as e:
@@ -187,3 +193,11 @@ class ManagerAgent(BaseAgent):
             lines.append(f"  方法: {s.method}")
             lines.append("")
         return "\n".join(lines)
+
+    def _enrich_with_hints(self, user_input: str) -> str:
+        """读取历史教训 hints,拼到 user_input 前面"""
+        hints = self.memory_store.get_skill_hints(user_input)
+        if not hints:
+            return user_input
+        hints_text = "\n".join(f"- {h}" for h in hints)
+        return f"{user_input}\n\n[历史经验提示]:\n{hints_text}"

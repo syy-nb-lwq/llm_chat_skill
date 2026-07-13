@@ -15,6 +15,8 @@
           <button :class="{ active: activeTab === 'tools' }" @click="activeTab = 'tools'">🔧 工具</button>
           <button :class="{ active: activeTab === 'skills' }" @click="activeTab = 'skills'">📘 技能</button>
           <button :class="{ active: activeTab === 'flow' }" @click="activeTab = 'flow'">🔀 流转</button>
+          <button :class="{ active: activeTab === 'patches' }" @click="activeTab = 'patches'">✨ 进化</button>
+          <button :class="{ active: activeTab === 'dashboard' }" @click="activeTab = 'dashboard'">📈 仪表盘</button>
         </div>
 
         <div v-show="activeTab === 'tools'" class="sidebar-content">
@@ -30,6 +32,12 @@
         </div>
         <div v-show="activeTab === 'flow'" class="sidebar-content">
           <FlowPanel :turns="turns" />
+        </div>
+        <div v-show="activeTab === 'patches'" class="sidebar-content">
+          <PatchReview />
+        </div>
+        <div v-show="activeTab === 'dashboard'" class="sidebar-content">
+          <EvolutionDashboard />
         </div>
       </aside>
 
@@ -50,10 +58,12 @@ import SkillList from './components/SkillList.vue'
 import SkillManager from './components/SkillManager.vue'
 import FlowPanel from './components/FlowPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
+import PatchReview from './components/PatchReview.vue'
+import EvolutionDashboard from './components/EvolutionDashboard.vue'
 
 export default {
   name: 'App',
-  components: { ToolList, SkillList, SkillManager, FlowPanel, ChatPanel },
+  components: { ToolList, SkillList, SkillManager, FlowPanel, ChatPanel, PatchReview, EvolutionDashboard },
   data() {
     return {
       isConnected: false,

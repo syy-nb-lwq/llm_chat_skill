@@ -42,6 +42,7 @@ class Config(BaseSettings):
     # ----- Feature Flags -----
     skill_dag_enabled: bool = Field(False)
     tool_cache_enabled: bool = Field(False)
+    self_evolution_enabled: bool = Field(False)
 
     def validate(self) -> None:
         """启动时调用,失败抛 ConfigError"""

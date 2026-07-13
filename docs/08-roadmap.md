@@ -13,7 +13,10 @@ P2 工具 DAG    ──── 已完成 ✅
 P3 教导闭环    ──── 已完成 ✅
 P4 前端重做    ──── 已完成 ✅
 P5 工程化      ──── 已完成 ✅
-P6 深化       ──── 本轮已做,待归档
+P6 自我进化    ──── 已完成 ✅
+  ├─ Phase 1: MemoryStore + Critic ✅
+  ├─ Phase 2: SkillMerger + 审核 ✅
+  └─ Phase 3: SelfReflectLoop ✅
 ```
 
 每个阶段结束,代码都能跑、原有能力不退化。
@@ -162,6 +165,7 @@ tests/
 ├── test_agents.py           # Manager / Orchestrator / Trainer / Context / emit 顺序
 ├── test_more_dag.py         # 扩展 DAG 场景(并行/fallback/重试)
 ├── test_logger.py           # logging 级别 / 订阅 / 单例
+├── test_memory.py          # MemoryStore / ExecutionCritic / SkillMerger
 └── test_backend.py          # FastAPI 集成: REST + WebSocket 全协议
 ```
 
@@ -173,32 +177,63 @@ pytest -v
 
 ---
 
-## P6 — 深化(本轮已做,全部完成 ✅)
+## P6 — 自我进化 ✅
 
-> 2026-07 本轮审查后的修复与增强。
+> 详见 [docs/09-self-evolution.md](docs/09-self-evolution.md)。
 
-### 已完成(第一批)
+### 概述
 
-| ID | 问题 | 文件 | 改动 |
-|---|---|---|---|
-| B1 | `session.py` 字段名不一致 | `backend/session.py` | `log_callbacks` → `dispose_callbacks` |
-| A2 | Context 未真正接入 LLM | `agents/manager.py` `agents/orchestrator.py` `core/agent.py` | Manager/Orchestrator 接受 context 参数,拼到 user prompt;Agent.handle 实际传入;新增 2 个单测 |
-| C8 | 前端未接入 SkillManager + 未订阅 skill_learned | `frontend/src/App.vue` | SkillManager 替换 SkillList;加 `skill_learned` 监听;toast + 自动重载 + 切标签 |
-| C4 | 缺 `.env.example` | 新建 `.env.example` | 覆盖所有配置项,含各 LLM 端点示例 |
-| B5 | weather.py async 内用同步 requests | `tools/weather.py` | 改 httpx.AsyncClient;共享连接池;15s timeout 真正生效;加 aclose() 钩子 |
-| B3 | emit() 异步路径 create_task 未 await | `core/agent.py` | `ensure_future` 收集到列表,handle() 末尾 `asyncio.gather` drain,finally 保证;新增 2 个单测 |
-| B2 | logger 简陋 print 输出 | `infra/logger.py` | 升级 stdlib logging;支持 config.log_level/文件输出/订阅回调;新增 6 个单测 |
+自我进化让 Agent 能从执行结果中学习,记住失败教训并生成改进建议。
 
-### 已完成(第二批)
+### Phase 1: MemoryStore + Critic ✅
 
-| ID | 问题 | 文件 | 改动 |
-|---|---|---|---|
-| B8 | `persist` 直接写 `_registry._by_name` | `agents/skill_trainer.py` | 改用 `store.add()` 公共 API |
-| B7 | 重复 `@app.on_event("startup")` | `backend/main.py` | 合并为单一 startup,GC 移入内部 |
-| B4 | 城市列表仅 18 个 | `core/agent.py` | 扩充至 37 城(含港澳台);去占位代码 |
-| B9 | 版本递增粗粒度 try/except | `agents/skill_trainer.py` | 精确捕获 ValueError/IndexError,逐段解析 |
+**目标**:先让系统"记住",不急着"自我修改"。
 
-**测试结果:58 passed / 1 skipped**
+| 组件 | 文件 |
+|---|---|
+| MemoryStore | `core/memory.py` |
+| ExecutionCritic | `core/critic.py` |
+| Manager 集成 | `agents/manager.py` |
+
+### Phase 2: SkillMerger + 审核 ✅
+
+**目标**:允许自我改进,但有审核门槛。
+
+| 组件 | 文件 |
+|---|---|
+| SkillMerger | `core/merger.py` |
+| PatchReview UI | `frontend/src/components/PatchReview.vue` |
+
+### Phase 3: SelfReflectLoop ✅
+
+**目标**:Agent 能主动反思并修改自身行为。
+
+| 组件 | 文件 |
+|---|---|
+| SelfReflectLoop | `core/reflect.py` |
+| EvolutionDashboard | `frontend/src/components/EvolutionDashboard.vue` |
+
+### 启用方式
+
+```bash
+# .env 文件
+SELF_EVOLUTION_ENABLED=true
+```
+
+### API 端点
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/patches` | GET | 获取待审阅建议 |
+| `/api/patches/{id}/approve` | POST | 批准建议 |
+| `/api/patches/{id}/reject` | POST | 拒绝建议 |
+| `/api/memory/stats` | GET | 记忆统计 |
+| `/api/reflections` | GET | 反思报告列表 |
+| `/api/reflections/request` | POST | 请求立即反思 |
+
+### 测试覆盖
+
+- ✅ 73 passed / 1 skipped
 
 ---
 
@@ -212,7 +247,7 @@ pytest -v
 | P3 | 高(卖点) | ✅ 已完成 |
 | P4 | 中(体验) | ✅ 已完成 |
 | P5 | 中 | ✅ 已完成 |
-| P6 | 深化 | ✅ 本轮已做 |
+| P6 | 自我进化 | ✅ 已完成 |
 
 ---
 
@@ -224,15 +259,3 @@ pytest -v
 - 分布式部署 / 高并发
 - 权限/租户系统
 - Embedding 语义匹配(版本 1 用关键词即可)
-
-## V2 目标:自我进化
-
-详见 [docs/09-self-evolution.md](docs/09-self-evolution.md)。
-
-核心组件:
-- **ExecutionCritic**:每次执行后评估质量,生成改进建议
-- **MemoryStore**:跨 Session 持久化经验,让 Agent 记住历史失败
-- **SkillMerger**:多版本 Skill 自动合并
-- **SelfReflectLoop**:低负载时主动反思,生成洞察
-
-演进路径:Phase 1(MemoryStore+Critic,只记录不修改) → Phase 2(SkillMerger+审核) → Phase 3(开放自我修改)
