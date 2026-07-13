@@ -37,6 +37,14 @@ def reset_singletons():
     from skills import manager as skill_mod
     from tools.hub import reset_tool_hub
     from tools.base import reset_tool_registry
+
+    # 清理 backend/skills 残留文件
+    import shutil
+    backend_skills = Path(__file__).parent.parent / "backend" / "skills"
+    if backend_skills.exists():
+        for f in backend_skills.glob("*.md"):
+            f.unlink()
+
     llm_mod.reset_llm_client()
     logger_mod.get_logger().__init__()
     skill_mod.reset_skill_store()
