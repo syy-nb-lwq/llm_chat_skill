@@ -43,9 +43,12 @@ def test_list_skills(client):
     assert r.status_code == 200
     data = r.json()
     assert "skills" in data
-    # 默认没有内置技能，需要用户教导
     skills = data["skills"]
     assert isinstance(skills, list)
+    # 每个技能应该有 name 和 version 字段
+    for skill in skills:
+        assert "name" in skill
+        assert "version" in skill
 
 
 def test_delete_skill_not_found(client):
