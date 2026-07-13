@@ -3,7 +3,7 @@ import asyncio
 import time
 from typing import Any, Callable, Dict, Optional
 
-from agents.manager import ManagerAgent
+from agents.manager import ManagerAgent, IntentType
 from agents.orchestrator import OrchestratorAgent
 from agents.learning import LearningAgent, ToolTask
 from agents.skill_trainer import SkillTrainer
@@ -65,8 +65,28 @@ class Agent:
                 pass
 
         try:
-            # 教导意图检测
-            if self.trainer._heuristic_teaching(user_input):
+            # ===== 意图规划(统一入口) =====
+            emit("thinking", {"stage": "planning"})
+            plan = await self.manager.plan(user_input, self.context)
+
+            # 根据意图类型决定后续流程
+            intent_type = plan.intent
+
+            # 闲聊意图:直接回答,不记录到记忆
+            if intent_type == IntentType.CHITCHAT:
+                emit("thinking", {"stage": "chitchat", "detail": plan.intent_detail})
+                buf = []
+                async for d in self.orchestrator.stream(user_input, {}, None, self.context):
+                    buf.append(d)
+                    emit("message_delta", {"delta": d})
+                ans = "".join(buf)
+                self.context.add_assistant_message(ans)
+                emit("message_final", {"content": ans})
+                # 闲聊不进行 ExecutionCritic 评估,避免污染记忆库
+                return ans
+
+            # 教导意图:进入技能学习流程
+            if intent_type == IntentType.TEACH:
                 emit("thinking", {"stage": "teaching_detect"})
                 ok, msg, skill = await self.trainer.teach(user_input)
                 if ok and skill:
@@ -78,36 +98,9 @@ class Agent:
                     self.context.add_assistant_message(msg)
                     emit("message_final", {"content": msg})
                     return msg
+                # 教导失败,继续后续流程
 
-            # 直接回答
-            if self.manager.should_answer_directly(user_input):
-                emit("thinking", {"stage": "direct_answer"})
-                buf = []
-                async for d in self.orchestrator.stream(user_input, {}, None, self.context):
-                    buf.append(d)
-                    emit("message_delta", {"delta": d})
-                ans = "".join(buf)
-                self.context.add_assistant_message(ans)
-                emit("message_final", {"content": ans})
-                
-                # ExecutionCritic 异步评估(直接回答场景)
-                duration = (time.time() - start) * 1000
-                execution_context = build_execution_context(
-                    trace_id=self.trace_id,
-                    scenario="direct_answer",
-                    intent=user_input[:50],
-                    selected_skill=None,
-                    tool_results={},
-                    latency_ms=duration,
-                )
-                pending_async.append(asyncio.ensure_future(
-                    self.critic.evaluate(execution_context)
-                ))
-                return ans
-
-            # 规划
-            emit("thinking", {"stage": "planning"})
-            plan = await self.manager.plan(user_input, self.context)
+            # 技能执行(正常流程)
             skill_name = plan.selected_skill.name if plan.selected_skill else None
             emit("plan", {
                 "intent": plan.intent,
