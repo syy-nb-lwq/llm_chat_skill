@@ -43,9 +43,9 @@ def test_list_skills(client):
     assert r.status_code == 200
     data = r.json()
     assert "skills" in data
-    # builtin/travel_plan.yaml 应该被加载
-    names = [s["name"] for s in data["skills"]]
-    assert "travel_plan" in names
+    # 默认没有内置技能，需要用户教导
+    skills = data["skills"]
+    assert isinstance(skills, list)
 
 
 def test_delete_skill_not_found(client):
