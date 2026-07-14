@@ -8,6 +8,15 @@ from infra.llm import get_llm_client
 from infra.logger import get_logger
 
 
+# Feature Flag
+def _soul_enabled() -> bool:
+    try:
+        from infra.config import config
+        return bool(getattr(config, 'soul_enabled', False))
+    except Exception:
+        return False
+
+
 class BaseAgent(ABC):
     """所有 Agent 的基类"""
 
@@ -16,6 +25,29 @@ class BaseAgent(ABC):
     def __init__(self):
         self.llm = get_llm_client()
         self.logger = get_logger()
+        self._soul_loader = None
+
+    @property
+    def soul_loader(self):
+        """延迟获取 SoulLoader"""
+        if self._soul_loader is None and _soul_enabled():
+            try:
+                from core.soul import get_soul_loader
+                self._soul_loader = get_soul_loader()
+            except Exception:
+                pass
+        return self._soul_loader
+
+    def get_soul_prompt(self) -> str:
+        """获取 Soul system prompt"""
+        loader = self.soul_loader
+        if loader is None:
+            return ""
+        try:
+            soul = loader.load()
+            return soul.to_system_prompt()
+        except Exception:
+            return ""
 
     @abstractmethod
     def system_prompt(self) -> str: ...
@@ -29,10 +61,24 @@ class BaseAgent(ABC):
         retries: int = 3,
     ) -> Any:
         """单轮 LLM 调用"""
-        messages = [
-            {"role": "system", "content": self.system_prompt()},
-            {"role": "user", "content": user_prompt},
-        ]
+        # 组装 messages
+        messages = []
+        
+        # 添加 Soul prompt (如果启用)
+        soul_prompt = self.get_soul_prompt()
+        if soul_prompt:
+            messages.append({"role": "system", "content": soul_prompt})
+        
+        # 添加 Agent 自己的 system prompt
+        system = self.system_prompt()
+        if system:
+            if messages and messages[0]["role"] == "system":
+                # 合并 Soul 和 system prompt
+                messages[0]["content"] = messages[0]["content"] + "\n\n" + system
+            else:
+                messages.append({"role": "system", "content": system})
+        
+        messages.append({"role": "user", "content": user_prompt})
         last_err = None
         for attempt in range(1, retries + 1):
             self.logger.info(self.name, f"LLM 请求 (尝试 {attempt}/{retries})")

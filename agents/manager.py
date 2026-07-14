@@ -5,7 +5,16 @@ from typing import List, Dict, Any, Optional
 from core.agent_base import BaseAgent
 from core.context import Context
 from core.memory import get_memory_store
+from core.semantic_memory import get_semantic_memory, SemanticMemoryStore
 from skills.manager import Skill, get_skill_store
+
+# Feature Flag
+def _semantic_memory_enabled() -> bool:
+    try:
+        from infra.config import config
+        return bool(config.semantic_memory_enabled)
+    except Exception:
+        return False
 
 
 @dataclass
@@ -132,6 +141,18 @@ class ManagerAgent(BaseAgent):
         super().__init__()
         self.skill_store = get_skill_store()
         self.memory_store = get_memory_store()
+        # 语义记忆(延迟初始化)
+        self._semantic_memory: Optional[SemanticMemoryStore] = None
+
+    @property
+    def semantic_memory(self) -> Optional[SemanticMemoryStore]:
+        """延迟获取语义记忆实例"""
+        if self._semantic_memory is None and _semantic_memory_enabled():
+            try:
+                self._semantic_memory = get_semantic_memory()
+            except Exception:
+                pass
+        return self._semantic_memory
 
     async def plan(self, user_input: str, context: Optional[Context] = None) -> PlanResult:
         """分析用户输入,产出 PlanResult。
@@ -348,9 +369,30 @@ class ManagerAgent(BaseAgent):
         return "\n".join(lines)
 
     def _enrich_with_hints(self, user_input: str) -> str:
-        """读取历史教训 hints,拼到 user_input 前面"""
-        hints = self.memory_store.get_skill_hints(user_input)
+        """读取历史教训 hints,拼到 user_input 前面
+        
+        优先使用语义记忆,回退到普通记忆
+        """
+        hints: List[str] = []
+        
+        # 尝试语义记忆
+        if self.semantic_memory:
+            try:
+                import asyncio
+                # 异步搜索
+                results = asyncio.get_event_loop().run_until_complete(
+                    self.semantic_memory.search_context(user_input, limit=3)
+                )
+                hints.extend(results)
+            except Exception:
+                pass
+        
+        # 回退到普通记忆
+        if not hints:
+            hints = self.memory_store.get_skill_hints(user_input)
+        
         if not hints:
             return user_input
+        
         hints_text = "\n".join(f"- {h}" for h in hints)
         return f"{user_input}\n\n[历史经验提示]:\n{hints_text}"

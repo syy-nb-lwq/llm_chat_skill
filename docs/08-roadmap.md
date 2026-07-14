@@ -254,8 +254,328 @@ SELF_EVOLUTION_ENABLED=true
 ## 不在本次改进范围
 
 明确推迟到 V2 的:
-- 多 LLM 提供商适配
 - 多模态(图文/语音)
 - 分布式部署 / 高并发
 - 权限/租户系统
-- Embedding 语义匹配(版本 1 用关键词即可)
+
+---
+
+## P7 — OpenClaw 特性借鉴
+
+> 借鉴 [OpenClaw 架构](https://learnopenclaw.org/architecture.html) 的优秀设计,增强 Agent 的主动性与记忆能力。
+
+### 阶段总览
+
+```
+P7-5 Provider Plugin      ──── ✅ 已完成
+P7-4 SQLite 长期记忆      ──── ✅ 已完成
+P7-2 SOUL 身份系统        ──── ✅ 已完成
+P7-1 Heartbeat 主动任务   ──── ✅ 已完成
+P7-3 MCP 工具协议         ──── ✅ 已完成
+```
+
+---
+
+### P7-1 — Heartbeat 主动任务 ✅
+
+**目标**:让 Agent 能主动定时执行任务,不止被动响应。
+
+**参考**:OpenClaw 的 Heartbeat 机制,每 30 分钟唤醒检查 `HEARTBEAT.md` 清单。
+
+#### 核心设计
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    HeartbeatScheduler               │
+│  ┌─────────────────────────────────────────────┐    │
+│  │ HEARTBEAT.md (用户定义的定时任务清单)          │    │
+│  │ - 每天 8 点发送日程摘要                       │    │
+│  │ - 检查 CI 构建状态变化                        │    │
+│  │ - 重要邮件标记提醒                            │    │
+│  └─────────────────────────────────────────────┘    │
+│                       │                              │
+│            每 N 分钟触发一次                          │
+│                       ▼                              │
+│  ┌─────────────────────────────────────────────┐    │
+│  │ HeartbeatAgent                              │    │
+│  │ 1. 加载 HEARTBEAT.md                         │    │
+│  │ 2. 按条件筛选待执行项                         │    │
+│  │ 3. 若无任务 → 返回 HEARTBEAT_OK (静默)        │    │
+│  │ 4. 若有任务 → 正常执行 + 推送结果              │    │
+│  └─────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [core/heartbeat.py](file:///d:\pythonProject\langchain_functioncall\core\heartbeat.py) | HeartbeatScheduler + HeartbeatAgent |
+| [heartbeat/HEARTBEAT.md](file:///d:\pythonProject\langchain_functioncall\heartbeat\HEARTBEAT.md) | 任务配置示例 |
+| [tests/test_heartbeat.py](file:///d:\pythonProject\langchain_functioncall\tests\test_heartbeat.py) | 单元测试 (11 passed) |
+
+#### 启用方式
+
+```bash
+# .env 配置
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL_SECONDS=1800  # 30 分钟
+HEARTBEAT_PATH=heartbeat/HEARTBEAT.md
+```
+
+#### 验收
+
+- [x] HeartbeatScheduler 定时调度器
+- [x] HEARTBEAT.md 加载器 + 条件解析
+- [x] HEARTBEAT_OK 静默跳过机制
+- [x] 支持每天/每隔 N 分钟/每隔 N 小时 触发条件
+
+---
+
+### P7-2 — SOUL 身份系统 ✅
+
+**目标**:用配置文件定义 Agent 身份,更灵活地定制 Agent 性格和行为风格。
+
+**参考**:OpenClaw 的 `SOUL.md` 文件,定义 Agent 的名字、性格、沟通风格、核心价值观。
+
+#### 核心设计
+
+```
+# SOUL.md (Agent 身份定义)
+---
+name: "小智"
+personality: "专业、高效,但不失幽默"
+communication_style: "简洁明了,适当使用 emoji"
+values:
+  - "用户隐私第一"
+  - "透明度优先"
+  - "持续学习改进"
+standing_instructions:
+  - "每次回答前先确认用户需求"
+  - "不确定时主动询问"
+---
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [core/soul.py](file:///d:\pythonProject\langchain_functioncall\core\soul.py) | Soul 数据结构 + SoulLoader |
+| [soul/SOUL.md](file:///d:\pythonProject\langchain_functioncall\soul\SOUL.md) | 默认 SOUL 配置 |
+| [tests/test_soul.py](file:///d:\pythonProject\langchain_functioncall\tests\test_soul.py) | 单元测试 (9 passed) |
+
+#### 启用方式
+
+```bash
+# .env 配置
+SOUL_ENABLED=true
+SOUL_PATH=soul/SOUL.md
+```
+
+#### 验收
+
+- [x] Soul 数据结构定义 (name/personality/values/expertise 等)
+- [x] SoulLoader 加载/热重载
+- [x] BaseAgent 集成 SOUL
+- [x] 支持 Markdown + YAML front-matter 格式
+
+---
+
+### P7-3 — MCP 工具协议 ✅
+
+**目标**:标准化工具集成,支持动态发现和双向通信。
+
+**参考**:OpenClaw 基于 MCP (Model Context Protocol) 连接 GitHub/数据库等工具服务。
+
+#### 核心设计
+
+```
+┌─────────────┐    MCP 协议     ┌─────────────────────┐
+│   Agent     │◀──────────────▶│    Tool Server      │
+│  (Client)   │  stdio / SSE   │  (GitHub/DB/FS...)  │
+└─────────────┘                 └─────────────────────┘
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [tools/mcp_client.py](file:///d:\pythonProject\langchain_functioncall\tools\mcp_client.py) | MCPClient + StdioTransport |
+| [tests/test_mcp.py](file:///d:\pythonProject\langchain_functioncall\tests\test_mcp.py) | 单元测试 (10 passed) |
+
+#### 启用方式
+
+```bash
+# .env 配置
+MCP_ENABLED=true
+# MCP 服务器配置 (JSON 数组)
+MCP_SERVERS=[{"name": "github", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}]
+```
+
+#### 验收
+
+- [x] MCPClient 基础实现
+- [x] StdioTransport 传输层
+- [x] 工具定义与 OpenAI function calling 格式转换
+- [x] MCPServerConfig 配置管理
+
+---
+
+### P7-4 — SQLite 长期记忆 ✅
+
+**目标**:用 SQLite + Embeddings 实现 Agent 的长期记忆和语义检索。
+
+**参考**:OpenClaw 的记忆架构,分层管理 Working/Short-term/Long-term Memory。
+
+#### 核心设计
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    记忆分层架构                          │
+│                                                         │
+│  Working Memory ──── 当前对话 Context (已实现)          │
+│        ↓                                                │
+│  Short-term Memory ──── 本次会话历史 (已实现)           │
+│        ↓                                                │
+│  Long-term Memory ──── SQLite + Embeddings (新增)      │
+│        │                                                │
+│        ├── 成功执行路径 (用于复现)                       │
+│        ├── 失败教训 (用于避免重复错误)                   │
+│        └── 用户偏好 (用于个性化服务)                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [core/memory_db.py](file:///d:\pythonProject\langchain_functioncall\core\memory_db.py) | MemoryDB SQLite + FTS5 |
+| [infra/embedding.py](file:///d:\pythonProject\langchain_functioncall\infra\embedding.py) | Embedding 服务封装 |
+| [core/semantic_memory.py](file:///d:\pythonProject\langchain_functioncall\core\semantic_memory.py) | 语义检索实现 |
+| [tests/test_memory_db.py](file:///d:\pythonProject\langchain_functioncall\tests\test_memory_db.py) | 单元测试 (18 passed) |
+
+#### 启用方式
+
+```bash
+# .env 配置
+SEMANTIC_MEMORY_ENABLED=true
+
+# Embedding 配置
+EMBEDDING_PROVIDER=openai  # openai / local / mock
+EMBEDDING_API_KEY=sk-xxx
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
+```
+
+#### 验收
+
+- [x] 语义搜索支持混合搜索(关键词+向量)
+- [x] SQLite + FTS5 全文搜索
+- [x] 支持 OpenAI/Local/Mock 三种 Embedding
+- [x] 与 Manager Agent 集成
+
+---
+
+### P7-5 — Provider Plugin (多 LLM 支持) ✅
+
+**目标**:支持动态切换 LLM 提供商,支持本地模型。
+
+**参考**:OpenClaw 的 Provider Plugin 系统,支持 Anthropic/OpenAI/本地模型动态注册。
+
+#### 核心设计
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Provider Plugin 系统               │
+│                                                     │
+│  @register_provider("openai")                       │
+│  class OpenAIProvider(BaseProvider): ...             │
+│                                                     │
+│  @register_provider("anthropic")                   │
+│  class AnthropicProvider(BaseProvider): ...         │
+│                                                     │
+│  @register_provider("local")                       │
+│  class LocalProvider(BaseProvider): ...             │
+│                                                     │
+│  LLMClient.get_provider() → BaseProvider            │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [infra/providers/base.py](file:///d:\pythonProject\langchain_functioncall\infra\providers\base.py) | BaseProvider 抽象接口 |
+| [infra/providers/openai.py](file:///d:\pythonProject\langchain_functioncall\infra\providers\openai.py) | OpenAI Provider |
+| [infra/providers/anthropic.py](file:///d:\pythonProject\langchain_functioncall\infra\providers\anthropic.py) | Anthropic Provider |
+| [infra/providers/local.py](file:///d:\pythonProject\langchain_functioncall\infra\providers\local.py) | Local (Ollama) Provider |
+| [infra/providers/manager.py](file:///d:\pythonProject\langchain_functioncall\infra\providers\manager.py) | Provider 动态注册管理 |
+| [infra/llm.py](file:///d:\pythonProject\langchain_functioncall\infra\llm.py) | LLMClient 集成 Provider |
+| [tests/test_providers.py](file:///d:\pythonProject\langchain_functioncall\tests\test_providers.py) | 单元测试 (15 passed) |
+
+#### 启用方式
+
+```bash
+# .env 配置
+MULTI_PROVIDER_ENABLED=true
+DEFAULT_PROVIDER=openai
+
+# OpenAI
+OPENAI_API_KEY=sk-xxx
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+
+# Anthropic (可选)
+# ANTHROPIC_API_KEY=sk-ant-xxx
+# ANTHROPIC_MODEL=claude-sonnet-4-20250514
+
+# Local/Ollama (可选)
+LOCAL_BASE_URL=http://localhost:11434
+LOCAL_MODEL=llama3.2
+```
+
+#### 验收
+
+- [x] 能动态切换 OpenAI / Anthropic / Ollama
+- [x] Provider 失败时自动重试
+- [x] 兼容旧配置(单 Provider 模式)
+
+---
+
+### P7 优先级建议
+
+| 子阶段 | 价值 | 复杂度 | 状态 |
+|---|---|---|---|
+| P7-5 Provider Plugin | 高(解耦 LLM) | 中 | ✅ 已完成 |
+| P7-4 SQLite 记忆 | 高(体验提升) | 中 | ✅ 已完成 |
+| P7-2 SOUL 身份 | 中(差异化) | 低 | ✅ 已完成 |
+| P7-1 Heartbeat | 中(主动性) | 中 | ✅ 已完成 |
+| P7-3 MCP 协议 | 中(生态集成) | 高 | ✅ 已完成 |
+
+---
+
+### P7 不破坏什么
+
+- 所有现有 API 保持兼容
+- Feature Flag 控制开关,默认关闭
+- P6 自我进化系统仍可用
+
+### 启用方式
+
+```bash
+# .env 文件
+HEARTBEAT_ENABLED=false
+SOUL_ENABLED=false
+MCP_ENABLED=false
+SEMANTIC_MEMORY_ENABLED=false
+MULTI_PROVIDER_ENABLED=false
+```
+
+---
+
+## V2 特性(未来规划)
+
+- 多模态(图文/语音)
+- 分布式部署 / 高并发
+- 权限/租户系统
+- Agent 协作网络

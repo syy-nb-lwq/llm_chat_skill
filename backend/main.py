@@ -35,8 +35,23 @@ async def _startup():
         config.validate()
     except ConfigError as e:
         logger.error("startup", f"配置错误: {e}")
+    
     # 在事件循环中注册 PubSub 订阅处理器
     await register_handlers()
+    
+    # 初始化 Provider
+    from infra.providers.registry import init_providers
+    init_providers(
+        openai_api_key=config.openai_api_key,
+        openai_base_url=config.openai_base_url,
+        openai_model=config.openai_model,
+        anthropic_api_key=config.anthropic_api_key,
+        anthropic_model=config.anthropic_model,
+        local_base_url=config.local_base_url,
+        local_model=config.local_model,
+        default_provider=config.default_provider,
+    )
+    
     # 启动 Session GC 后台任务
     async def gc_loop():
         while True:
