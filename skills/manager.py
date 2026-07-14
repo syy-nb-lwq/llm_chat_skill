@@ -65,6 +65,13 @@ class SkillStore:
                 f.unlink(missing_ok=True)
         return True
 
+    def remove(self, skill_name: str) -> bool:
+        """通过名称移除技能"""
+        skill = self._registry.get(skill_name)
+        if not skill:
+            return False
+        return self.delete(skill.id)
+
     # ----- 新 API -----
     def match(self, user_input: str, top_k: int = 3) -> List[Skill]:
         return self._registry.match(user_input, top_k)

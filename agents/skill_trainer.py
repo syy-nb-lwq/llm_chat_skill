@@ -162,7 +162,31 @@ class SkillTrainer(BaseAgent):
         if not is_teach:
             return False, f"未识别为教导意图({reason})", None
 
+        # 先尝试从输入中抽取技能信息
         skill = await self.extract_skill(user_input)
+        
+        # 检查是否已有相似技能（基于 capability 相似度）
+        if skill:
+            similar = await self._find_similar_skill(skill)
+            if similar:
+                # 询问用户是要更新还是创建新技能
+                msg = (f"技能库中已有相似技能:\n"
+                       f"**{similar.name}** (v{similar.version})\n"
+                       f"能力: {similar.capability}\n\n"
+                       f"你要:\n"
+                       f"1. 更新现有技能\n"
+                       f"2. 创建新技能\n"
+                       f"3. 取消")
+                return False, msg, None
+        
+        # 如果信息不完整，询问用户补充
+        if not skill or not self._is_skill_complete(skill):
+            # 构建交互式教导问题
+            questions = self._generate_teach_questions(user_input, skill)
+            if questions:
+                # 返回交互式问题，让 Agent 询问用户
+                return False, questions, None
+
         if not skill:
             return False, "技能抽取失败", None
 
@@ -172,3 +196,65 @@ class SkillTrainer(BaseAgent):
 
         msg = f"已记住新技能: **{skill.name}** v{skill.version}"
         return True, msg, skill
+
+    def _is_skill_complete(self, skill: Skill) -> bool:
+        """检查技能信息是否完整"""
+        if not skill.name or len(skill.name) < 2:
+            return False
+        if not skill.capability or len(skill.capability) < 5:
+            return False
+        return True
+
+    def _generate_teach_questions(self, user_input: str, partial_skill: Optional[Skill]) -> str:
+        """生成交互式教导问题"""
+        questions = []
+        
+        if not partial_skill or not partial_skill.name:
+            questions.append("这个技能叫什么名字？（用简短的英文或中文命名）")
+        elif not partial_skill.capability:
+            questions.append(f"【{partial_skill.name}】是用来做什么的？")
+        elif not partial_skill.steps:
+            questions.append(f"【{partial_skill.name}】需要哪些步骤？请描述一下处理流程。")
+        else:
+            questions.append("这个技能还有什么需要注意的地方吗？直接告诉我，或者输入'没有了'结束。")
+        
+        return "请帮我完善这个技能的信息：\n" + "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
+
+    async def _find_similar_skill(self, skill: Skill) -> Optional[Skill]:
+        """查找相似的技能（使用 LLM 判断语义相似度）"""
+        if not skill.capability:
+            return None
+        
+        all_skills = self.skill_store.list_all()
+        for existing in all_skills:
+            if not existing.capability:
+                continue
+            # 使用 LLM 判断是否相似
+            try:
+                is_similar = await self._is_capability_similar(
+                    skill.capability, existing.capability
+                )
+                if is_similar:
+                    return existing
+            except Exception:
+                continue
+        
+        return None
+    
+    async def _is_capability_similar(self, cap1: str, cap2: str) -> bool:
+        """使用 LLM 判断两个 capability 是否相似"""
+        prompt = f"""判断以下两个技能描述是否描述了相同或相似的任务:
+
+技能1: {cap1}
+技能2: {cap2}
+
+如果它们处理的是相同或非常相似的任务类型(如都是日报处理、都是天气查询等),回答 "是"。
+如果它们处理的是不同类型的任务,回答 "否"。
+
+只回答 "是" 或 "否":"""
+
+        try:
+            response = await self.think(prompt)
+            return "是" in response.strip()[:10]
+        except Exception:
+            return False

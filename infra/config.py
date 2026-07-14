@@ -75,6 +75,11 @@ class Config(BaseSettings):
     mcp_enabled: bool = Field(False, description="启用 MCP 工具协议")
     mcp_servers: str = Field("", description="MCP 服务器配置(JSON数组)")
 
+    # ----- 意图识别配置 -----
+    intent_mode: str = Field("rule_first", description="意图识别模式: rule_first/llm_always")
+    intent_rule_threshold: int = Field(5, description="规则匹配阈值(字符数)")
+    intent_llm_fallback: bool = Field(True, description="规则无法判断时是否调用 LLM")
+
     def validate(self) -> None:
         """启动时调用,失败抛 ConfigError"""
         if self.multi_provider_enabled:

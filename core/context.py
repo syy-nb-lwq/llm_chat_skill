@@ -10,6 +10,7 @@ class Message:
     role: str  # user / assistant / system / tool
     content: str
     tool_call: Optional[Dict] = None
+    tool_tasks: Optional[List[Dict]] = None  # 存储本次执行的 tool_tasks
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -35,6 +36,19 @@ class Context:
 
     def add_tool_message(self, content: str):
         self.add_message("tool", content)
+
+    # ----- tool_tasks 存储 -----
+    def set_last_tool_tasks(self, tasks: List[Dict]):
+        """存储上一次的 tool_tasks"""
+        if self.messages:
+            self.messages[-1].tool_tasks = tasks
+
+    def get_last_tool_tasks(self) -> Optional[List[Dict]]:
+        """获取上一次的 tool_tasks"""
+        for msg in reversed(self.messages):
+            if msg.tool_tasks:
+                return msg.tool_tasks
+        return None
 
     # ----- 读取 -----
     def get_last_user_message(self) -> Optional[str]:

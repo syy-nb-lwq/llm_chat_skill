@@ -1,7 +1,7 @@
 """Agent 核心 - 多智能体协作"""
 import asyncio
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agents.manager import ManagerAgent, IntentType
 from agents.orchestrator import OrchestratorAgent
@@ -88,17 +88,45 @@ class Agent:
             # 教导意图:进入技能学习流程
             if intent_type == IntentType.TEACH:
                 emit("thinking", {"stage": "teaching_detect"})
-                ok, msg, skill = await self.trainer.teach(user_input)
+                ok, result, skill = await self.trainer.teach(user_input)
+                
                 if ok and skill:
+                    # 技能创建成功
                     emit("skill_learned", {
                         "name": skill.name,
                         "version": skill.version,
-                        "message": msg,
+                        "message": result,
                     })
-                    self.context.add_assistant_message(msg)
-                    emit("message_final", {"content": msg})
-                    return msg
+                    self.context.add_assistant_message(result)
+                    emit("message_final", {"content": result})
+                    return result
+                
+                # 需要交互式教导
+                if result and not ok:
+                    emit("teaching_interactive", {"questions": result})
+                    # 使用 LLM 补充信息并完成教导
+                    complete_msg = await self._complete_teaching(user_input, result)
+                    self.context.add_assistant_message(complete_msg)
+                    emit("message_final", {"content": complete_msg})
+                    return complete_msg
+                
                 # 教导失败,继续后续流程
+
+            # 重试意图:重新执行上次的任务
+            if intent_type == IntentType.RETRY:
+                emit("thinking", {"stage": "retry"})
+                # 从 context 中获取上一次的 tool_tasks
+                last_tasks = self._get_last_tool_tasks()
+                if last_tasks:
+                    self.logger.info("Agent", f"重试执行上次的 {len(last_tasks)} 个工具")
+                    # 使用上一次的 tool_tasks 继续执行
+                    plan.tool_tasks = last_tasks
+                else:
+                    emit("thinking", {"stage": "no_retry_history"})
+                    ans = "没有找到上次的执行记录,无法重试"
+                    self.context.add_assistant_message(ans)
+                    emit("message_final", {"content": ans})
+                    return ans
 
             # 技能执行(正常流程)
             skill_name = plan.selected_skill.name if plan.selected_skill else None
@@ -148,6 +176,9 @@ class Agent:
                     tasks, on_tool_event,
                     user_input={"text": user_input, **entities}
                 )
+
+            # 存储本次 tool_tasks 用于重试
+            self.context.set_last_tool_tasks(plan.tool_tasks)
 
             # 生成回答
             emit("thinking", {"stage": "synthesizing"})
@@ -210,6 +241,44 @@ class Agent:
         "乌鲁木齐", "呼和浩特", "南宁", "贵阳", "海口", "银川", "西宁",
         "拉萨", "香港", "澳门", "台北",
     }
+
+    def _get_last_tool_tasks(self) -> Optional[List[Dict]]:
+        """获取上一次的 tool_tasks"""
+        return self.context.get_last_tool_tasks()
+
+    async def _complete_teaching(self, user_input: str, questions: str) -> str:
+        """交互式教导: 使用 LLM 补充信息并完成教导"""
+        self.logger.info("Agent", "进入交互式教导流程")
+        
+        # 先询问用户需要补充的信息
+        prompt = f"""用户想要教一个技能,但提供的信息不完整。
+
+原始输入: {user_input}
+
+{questions}
+
+请用友好的方式询问用户补充信息:"""
+
+        try:
+            response = await self.llm.chat([
+                {"role": "user", "content": prompt},
+            ])
+            # 将用户的回复添加到 context 供下一轮使用
+            self.context.add_user_message(f"{user_input}\n\n{response}")
+            return response
+        except Exception as e:
+            self.logger.error("Agent", f"交互式教导失败: {e}")
+            return f"好的，请继续告诉我更多信息。"
+
+    async def _finish_teaching(self, user_input: str) -> str:
+        """完成教导: 根据收集的信息创建技能"""
+        self.logger.info("Agent", "尝试完成教导")
+        
+        # 使用完整上下文创建技能
+        ok, msg, skill = await self.trainer.teach(user_input)
+        if ok and skill:
+            return msg
+        return msg  # 返回询问或其他消息
 
     def _extract_entities(self, text: str) -> Dict[str, Any]:
         """轻量实体提取。

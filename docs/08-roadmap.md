@@ -573,6 +573,178 @@ MULTI_PROVIDER_ENABLED=false
 
 ---
 
+## P8 — Skill Manager Agent
+
+> 技能库智能管理系统,负责技能检索、创建、更新和整理。
+
+### 阶段总览
+
+```
+P8-1 技能检索     ──── ✅ 已完成
+P8-2 技能创建     ──── ✅ 已完成
+P8-3 技能更新     ──── ✅ 已完成
+P8-4 技能整理     ──── ✅ 已完成
+```
+
+---
+
+### P8-1 — 技能检索 ✅
+
+**目标**:使用 LLM 判断技能库中是否有能覆盖当前任务的技能。
+
+**核心设计**:
+
+```python
+class SkillRetrievalAgent(BaseAgent):
+    async def find_matching_skills(user_input: str, top_k: int = 3) -> List[SkillMatch]
+```
+
+**检索流程**:
+
+```
+用户输入: "帮我写日报"
+    │
+    ▼
+SkillRetrievalAgent.find_matching_skills()
+    │
+    ▼
+LLM 判断: 哪些技能能覆盖这个需求
+    │
+    ▼
+返回: SkillMatch(skill, score, coverage)
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [agents/skill_manager.py](file:///d:\pythonProject\langchain_functioncall\agents\skill_manager.py) | SkillRetrievalAgent |
+
+---
+
+### P8-2 — 技能创建 ✅
+
+**目标**:支持交互式教导,创建新技能。
+
+**核心设计**:
+
+```python
+class SkillCreatorAgent(BaseAgent):
+    async def create_skill_from_teaching(user_input: str) -> Tuple[bool, str, Optional[Skill]]
+```
+
+**创建流程**:
+
+```
+用户: "生成一个技能用来做日报编写"
+    │
+    ▼
+检查相似技能 (LLM 语义判断)
+    │
+    ▼
+信息完整 → 直接保存
+信息不完整 → 交互式询问 → 保存
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [agents/skill_trainer.py](file:///d:\pythonProject\langchain_functioncall\agents\skill_trainer.py) | 交互式教导 |
+
+---
+
+### P8-3 — 技能更新 ✅
+
+**目标**:基于用户反馈更新已有技能。
+
+**核心设计**:
+
+```python
+class SkillUpdaterAgent(BaseAgent):
+    async def update_skill(skill_name: str, feedback: str) -> Tuple[bool, str, Optional[Skill]]
+```
+
+---
+
+### P8-4 — 技能整理 ✅
+
+**目标**:定时检查、归纳、合并重复技能。
+
+**核心设计**:
+
+```python
+class SkillOrganizerAgent(BaseAgent):
+    async def analyze_skill_duplication() -> List[SkillAnalysis]
+    async def merge_skills(skill1: str, skill2: str) -> Tuple[bool, str, Optional[Skill]]
+```
+
+**整理流程**:
+
+```
+定时触发 / 手动触发
+    │
+    ▼
+两两对比技能 (LLM 判断相似度)
+    │
+    ▼
+重叠度 > 50% → 建议合并
+    │
+    ▼
+用户确认 → 执行合并
+```
+
+#### 已完成文件
+
+| 文件 | 说明 |
+|---|---|
+| [agents/skill_manager.py](file:///d:\pythonProject\langchain_functioncall\agents\skill_manager.py) | SkillManagerAgent 统一入口 |
+| [skills/manager.py](file:///d:\pythonProject\langchain_functioncall\skills\manager.py) | SkillStore.remove() |
+
+#### 测试覆盖
+
+```
+tests/test_skill_manager.py - 4 passed
+```
+
+---
+
+### P8 架构总览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    SkillManagerAgent                         │
+│                       (统一入口)                             │
+├───────────────┬───────────────┬─────────────┬────────────┤
+│ SkillRetrieval│ SkillCreator  │ SkillUpdater│ Organizer  │
+│    Agent     │    Agent     │    Agent    │   Agent   │
+├───────────────┴───────────────┴─────────────┴────────────┤
+│                    SkillStore                               │
+│                (skills/*.yaml)                            │
+└───────────────────────────────────────────────────────────┘
+```
+
+#### 四大职责
+
+| 职责 | Agent | 方法 |
+|------|-------|------|
+| **1. 检索技能** | `SkillRetrievalAgent` | `find_matching_skills()` |
+| **2. 创建技能** | `SkillCreatorAgent` | `create_skill_from_teaching()` |
+| **3. 更新技能** | `SkillUpdaterAgent` | `update_skill()` |
+| **4. 整理技能** | `SkillOrganizerAgent` | `analyze_skill_duplication()` / `merge_skills()` |
+
+---
+
+### P8 验收
+
+- [x] 技能检索: LLM 判断任务覆盖度
+- [x] 技能创建: 检查相似技能,避免重复
+- [x] 技能更新: 基于反馈更新
+- [x] 技能整理: 分析重复,支持合并
+- [x] 测试覆盖: 204 passed
+
+---
+
 ## V2 特性(未来规划)
 
 - 多模态(图文/语音)
