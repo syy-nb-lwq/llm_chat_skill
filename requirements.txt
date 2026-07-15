@@ -16,3 +16,10 @@ pydantic-settings>=2.0
 PyYAML>=6.0
 # P6 协议改造
 fastapi-websocket-pubsub>=0.3.0
+# P7+ 多 LLM Provider & Embedding
+tiktoken>=0.5.0
+jsonschema>=4.20.0
+numpy>=1.24.0
+anthropic>=0.25.0
+# 自我进化/SOUL/MCP 测试与依赖
+python-multipart>=0.0.7

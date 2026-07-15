@@ -10,7 +10,6 @@ from agents.skill_trainer import SkillTrainer
 from core.context import Context
 from core.critic import ExecutionCritic, build_execution_context
 from core.dag import DAGExecutor
-from core.identity import IdentityContext
 from core.memory import get_memory_store
 from infra.config import config
 from infra.logger import get_logger
@@ -19,12 +18,10 @@ from infra.logger import get_logger
 class Agent:
     """多智能体协作入口"""
 
-    def __init__(self, session_id: str = "default", user_id: str = "default"):
+    def __init__(self, session_id: str = "default"):
         self.session_id = session_id
-        self.user_id = user_id
         self.logger = get_logger()
-        # 兼容字段:首次 handle 之前保持空字符串,handle 入口再生成
-        self.trace_id = ""
+        self.trace_id = f"session-{session_id}-{int(time.time())}"
 
         self.manager = ManagerAgent()
         self.learning = LearningAgent()
@@ -32,8 +29,6 @@ class Agent:
         self.dag = DAGExecutor(self.learning)
         self.trainer = SkillTrainer()
         self.critic = ExecutionCritic(get_memory_store())
-        from skills.manager import get_skill_store
-        self.skill_store = get_skill_store()
 
         self.context = Context()
         self.dag_enabled = bool(config.skill_dag_enabled)
@@ -44,37 +39,60 @@ class Agent:
         on_event: Optional[Callable] = None,
     ) -> str:
         start = time.time()
-
-        # 每次 handle 都创建独立的身份 + execution 标识,避免失败记录互相覆盖
-        identity = IdentityContext(
-            user_id=self.user_id,
-            session_id=self.session_id,
-        )
-        self.trace_id = identity.execution_id
-
+        
         self.context.add_user_message(user_input)
-        self.logger.info("Agent", f"INPUT({identity.execution_id}): {user_input[:50]}")
+        self.logger.info("Agent", f"INPUT: {user_input[:50]}")
 
-        # 收集异步回调任务,handle 末尾统一 await,确保事件按 emit 顺序完成
+        # 异步回调串行队列:保证按 emit 顺序执行,而不依赖 task 调度
         pending_async: list = []
 
         def emit(event: str, payload: dict):
-            """派发事件。同步回调直接调;异步回调收集到 pending_async 末尾 await。"""
+            """派发事件。
+            - 同步 on_event: 直接调用
+            - 异步 on_event: 创建 future + 串行 await(由 _drain_pending 完成)
+              不能用 ensure_future 调度,否则 sleep 0.01s 的回调会并发跑、append 乱序。
+            """
             if on_event is None:
                 return
-            # 同步回调:直接调
             if not asyncio.iscoroutinefunction(on_event):
                 try:
                     on_event(event, payload)
                 except Exception:
                     pass
                 return
-            # 异步回调:挂到 list,handle() 末尾统一 await
             try:
-                task = asyncio.ensure_future(on_event(event, payload))
-                pending_async.append(task)
+                # 把"调用 on_event 并返回结果"包装成 future
+                fut: asyncio.Future = asyncio.Future()
+
+                async def _wrap():
+                    try:
+                        await on_event(event, payload)
+                        if not fut.done():
+                            fut.set_result(None)
+                    except Exception as e:
+                        if not fut.done():
+                            fut.set_exception(e)
+
+                # 关键:不立即 schedule _wrap,挂到 pending,等 drain 时串行 await。
+                # 用一个 _deferred 协程持有 _wrap 引用,让 event loop 在 await 时才启动。
+                async def _deferred():
+                    await _wrap()
+
+                # 保存 _deferred 协程本身,drain 时用 ensure_future 启动并 await
+                pending_async.append(_deferred())
             except Exception:
                 pass
+
+        async def _drain_pending():
+            """按 emit 顺序串行 await 所有 pending 任务。"""
+            while pending_async:
+                batch = pending_async[:]
+                pending_async.clear()
+                for coro in batch:
+                    try:
+                        await asyncio.ensure_future(coro)
+                    except Exception:
+                        pass
 
         try:
             # ===== 意图规划(统一入口) =====
@@ -94,45 +112,39 @@ class Agent:
                 ans = "".join(buf)
                 self.context.add_assistant_message(ans)
                 emit("message_final", {"content": ans})
+                # 等异步 on_event 完成,保证事件按 emit 顺序排干
+                await _drain_pending()
                 # 闲聊不进行 ExecutionCritic 评估,避免污染记忆库
                 return ans
 
-            # 教导意图:进入技能学习流程(M1-01 + M1-07)
+            # 教导意图:进入技能学习流程
             if intent_type == IntentType.TEACH:
                 emit("thinking", {"stage": "teaching_detect"})
-                ts = await self.trainer.start_or_continue(
-                    user_input,
-                    user_id=identity.user_id,
-                    session_id=identity.session_id,
-                )
+                ok, result, skill = await self.trainer.teach(user_input)
+                
+                if ok and skill:
+                    # 技能创建成功
+                    emit("skill_learned", {
+                        "name": skill.name,
+                        "version": skill.version,
+                        "message": result,
+                    })
+                    self.context.add_assistant_message(result)
+                    emit("message_final", {"content": result})
+                    await _drain_pending()
+                    return result
 
-                if ts.status == "active":
-                    # 用户在草稿阶段输入"确认" → 校验 + 发布
-                    ok, msg, skill = self.trainer.confirm_and_publish(
-                        identity.user_id, identity.session_id,
-                    )
-                    if ok and skill:
-                        emit("skill_learned", {
-                            "name": skill.name,
-                            "version": skill.version,
-                            "message": msg,
-                            "teaching_session_id": ts.teaching_session_id,
-                        })
-                    self.context.add_assistant_message(msg)
-                    emit("message_final", {"content": msg})
-                    return msg
-
-                # 其它状态(collecting / draft / duplicate)→ 返回问题或草稿
-                emit("teaching_interactive", {
-                    "teaching_session_id": ts.teaching_session_id,
-                    "status": ts.status,
-                    "missing_fields": ts.missing_fields,
-                    "duplicate_of": ts.duplicate_of,
-                })
-                assistant_msg = ts.current_question or "请补充技能信息"
-                self.context.add_assistant_message(assistant_msg)
-                emit("message_final", {"content": assistant_msg})
-                return assistant_msg
+                # 需要交互式教导
+                if result and not ok:
+                    emit("teaching_interactive", {"questions": result})
+                    # 使用 LLM 补充信息并完成教导
+                    complete_msg = await self._complete_teaching(user_input, result)
+                    self.context.add_assistant_message(complete_msg)
+                    emit("message_final", {"content": complete_msg})
+                    await _drain_pending()
+                    return complete_msg
+                
+                # 教导失败,继续后续流程
 
             # 重试意图:重新执行上次的任务
             if intent_type == IntentType.RETRY:
@@ -148,29 +160,8 @@ class Agent:
                     ans = "没有找到上次的执行记录,无法重试"
                     self.context.add_assistant_message(ans)
                     emit("message_final", {"content": ans})
+                    await _drain_pending()
                     return ans
-
-            # 技能管理意图(M1-09):列出/查看/版本/回滚
-            if intent_type == IntentType.MANAGER:
-                emit("thinking", {"stage": "skill_management"})
-                skills = self.skill_store.list_all()
-                versions = self.skill_store._registry.all_versions()
-                active_map = self.skill_store._registry.active_versions()
-                if not skills:
-                    ans = "当前没有任何已发布技能。"
-                else:
-                    lines = []
-                    for s in skills:
-                        ver = s.version
-                        active_ver = active_map.get(s.name, "")
-                        marker = " (active)" if ver == active_ver else ""
-                        lines.append(
-                            f"- **{s.name}** v{ver}{marker}: {s.capability}"
-                        )
-                    ans = "当前已发布技能:\n" + "\n".join(lines)
-                self.context.add_assistant_message(ans)
-                emit("message_final", {"content": ans})
-                return ans
 
             # 技能执行(正常流程)
             skill_name = plan.selected_skill.name if plan.selected_skill else None
@@ -185,7 +176,6 @@ class Agent:
 
             # 执行工具
             tool_results: Dict = {}
-            task_specs_by_id: Dict[str, Dict] = {}
             if plan.tool_tasks:
                 emit("thinking", {"stage": "tools_running", "count": len(plan.tool_tasks)})
 
@@ -203,21 +193,11 @@ class Agent:
                         tasks = skill_tasks
                         used_dag = True
                         emit("thinking", {"stage": "skill_dag_used", "skill": plan.selected_skill.name, "count": len(tasks)})
-                        for st in tasks:
-                            task_specs_by_id[st.id] = {
-                                "type": st.type,
-                                "params": st.params,
-                                "depends_on": st.depends_on,
-                                "retry": st.retry,
-                                "timeout_s": st.timeout_s,
-                                "fallback_to": st.fallback_to,
-                            }
 
                 if not used_dag:
                     tasks = []
                     for i, t in enumerate(plan.tool_tasks):
                         task_id = t.get("id") or f"t{i+1}"
-                        task_specs_by_id[task_id] = t
                         tasks.append(ToolTask(
                             id=task_id,
                             type=t.get("type", ""),
@@ -262,12 +242,6 @@ class Agent:
                 selected_skill=plan.selected_skill.name if plan.selected_skill else None,
                 tool_results=tool_results,
                 latency_ms=duration,
-                user_id=identity.user_id,
-                session_id=identity.session_id,
-                turn_id=identity.turn_id,
-                execution_id=identity.execution_id,
-                parent_execution_id=identity.parent_execution_id,
-                task_specs=task_specs_by_id,
             )
             # 异步执行 critic,收集到 pending_async 末尾 await
             pending_async.append(asyncio.ensure_future(
@@ -288,40 +262,6 @@ class Agent:
                     if isinstance(r, Exception):
                         self.logger.warning("Agent", f"emit task failed: {r}")
 
-    def chat(
-        self,
-        user_input: str,
-        on_event: Optional[Callable] = None,
-    ) -> str:
-        """Sync wrapper used by CLI and Streamlit entry points."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self.handle(user_input, on_event))
-
-        result: Dict[str, Any] = {}
-        error: Dict[str, BaseException] = {}
-
-        def runner():
-            loop = asyncio.new_event_loop()
-            try:
-                asyncio.set_event_loop(loop)
-                result["value"] = loop.run_until_complete(self.handle(user_input, on_event))
-            except BaseException as exc:  # pragma: no cover - defensive sync bridge
-                error["value"] = exc
-            finally:
-                asyncio.set_event_loop(None)
-                loop.close()
-
-        import threading
-
-        thread = threading.Thread(target=runner, daemon=True)
-        thread.start()
-        thread.join()
-        if "value" in error:
-            raise error["value"]
-        return result.get("value", "")
-
     def reset(self):
         self.context.clear()
         self.logger.info("Agent", "RESET")
@@ -340,6 +280,40 @@ class Agent:
     def _get_last_tool_tasks(self) -> Optional[List[Dict]]:
         """获取上一次的 tool_tasks"""
         return self.context.get_last_tool_tasks()
+
+    async def _complete_teaching(self, user_input: str, questions: str) -> str:
+        """交互式教导: 使用 LLM 补充信息并完成教导"""
+        self.logger.info("Agent", "进入交互式教导流程")
+        
+        # 先询问用户需要补充的信息
+        prompt = f"""用户想要教一个技能,但提供的信息不完整。
+
+原始输入: {user_input}
+
+{questions}
+
+请用友好的方式询问用户补充信息:"""
+
+        try:
+            response = await self.llm.chat([
+                {"role": "user", "content": prompt},
+            ])
+            # 将用户的回复添加到 context 供下一轮使用
+            self.context.add_user_message(f"{user_input}\n\n{response}")
+            return response
+        except Exception as e:
+            self.logger.error("Agent", f"交互式教导失败: {e}")
+            return f"好的，请继续告诉我更多信息。"
+
+    async def _finish_teaching(self, user_input: str) -> str:
+        """完成教导: 根据收集的信息创建技能"""
+        self.logger.info("Agent", "尝试完成教导")
+        
+        # 使用完整上下文创建技能
+        ok, msg, skill = await self.trainer.teach(user_input)
+        if ok and skill:
+            return msg
+        return msg  # 返回询问或其他消息
 
     def _extract_entities(self, text: str) -> Dict[str, Any]:
         """轻量实体提取。
