@@ -356,8 +356,10 @@ async def approve_patch(patch_id: str):
     suggestion = data.get("suggestion", {}) or {}
     target_skill = suggestion.get("target_skill") or data.get("target_skill")
     updates = {}
-    if "method" in suggestion:
-        updates["method"] = suggestion["method"]
+    # 支持多种字段更新,不只限于 method
+    for field in ("method", "capability", "patterns"):
+        if field in suggestion:
+            updates[field] = suggestion[field]
 
     applied_files = []
     if target_skill and updates:
@@ -422,7 +424,13 @@ async def request_reflection():
     if not config.self_evolution_enabled:
         raise HTTPException(status_code=403, detail="self evolution disabled")
 
-    report = await SelfReflectLoop().request_reflection()
+    # 复用 app.state 上的实例,保留每日合并计数等状态
+    reflect_loop = getattr(app.state, "reflect_loop", None)
+    if reflect_loop is None:
+        reflect_loop = SelfReflectLoop()
+        app.state.reflect_loop = reflect_loop
+
+    report = await reflect_loop.request_reflection()
     if report:
         return {"success": True, "report_id": report.id}
     return {"success": False, "message": "no reflection generated"}

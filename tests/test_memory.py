@@ -20,8 +20,8 @@ from core.critic import (
     ExecutionContext,
     TaskExecutionSummary,
     build_execution_context,
-    get_self_evolution_enabled,
 )
+from infra.config import get_self_evolution_enabled
 
 
 # ---- 临时目录 fixture ----
@@ -35,7 +35,7 @@ def temp_mem_dir():
 @pytest.fixture
 def mem_store(temp_mem_dir):
     # Mock config.feature flag to avoid loading real .env
-    with patch("core.memory._load_flag", return_value=True):
+    with patch("core.memory.get_self_evolution_enabled", return_value=True):
         store = MemoryStore(base_path=temp_mem_dir)
         yield store
 
@@ -201,7 +201,7 @@ def test_capacity_enforce(mem_store):
 async def test_critic_disabled(temp_mem_dir):
     """feature flag 关闭时直接返回"""
     with patch("core.critic.get_self_evolution_enabled", return_value=False):
-        with patch("core.memory._load_flag", return_value=False):
+        with patch("core.memory.get_self_evolution_enabled", return_value=False):
             critic = ExecutionCritic(MemoryStore(base_path=temp_mem_dir))
             context = ExecutionContext(
                 trace_id="t001",
@@ -303,9 +303,10 @@ def test_build_execution_context():
 
 def test_get_self_evolution_enabled_mock():
     """feature flag 加载逻辑测试"""
-    with patch("core.critic._load_flag", return_value=True):
+    from infra.config import config
+    with patch.object(config, "self_evolution_enabled", True):
         assert get_self_evolution_enabled() is True
-    with patch("core.critic._load_flag", return_value=False):
+    with patch.object(config, "self_evolution_enabled", False):
         assert get_self_evolution_enabled() is False
 
 
@@ -314,7 +315,7 @@ def test_get_self_evolution_enabled_mock():
 @pytest.mark.asyncio
 async def test_memory_and_critic_integration(temp_mem_dir):
     """MemoryStore + ExecutionCritic 端到端集成"""
-    with patch("core.memory._load_flag", return_value=True):
+    with patch("core.memory.get_self_evolution_enabled", return_value=True):
         with patch("core.critic.get_self_evolution_enabled", return_value=True):
             store = MemoryStore(base_path=temp_mem_dir)
             critic = ExecutionCritic(memory_store=store)

@@ -8,6 +8,74 @@ from infra.llm import get_llm_client
 from infra.logger import get_logger
 
 
+def _try_validate_schema(obj: Any, schema: Dict) -> Optional[str]:
+    """用 jsonschema 严格校验对象,返回错误信息;通过则返回 None。
+
+    优先 jsonschema(精确),失败回退到简化检查(类型 + required + enum + 嵌套 dict.key)。
+    这样即使 jsonschema 包缺失也能保持向后兼容,但行为更宽松。
+    """
+    # 1. 优先用 jsonschema(已加入 requirements)
+    try:
+        import jsonschema
+        try:
+            jsonschema.validate(obj, schema)
+            return None
+        except jsonschema.ValidationError as e:
+            return str(e.message)
+    except ImportError:
+        pass
+
+    # 2. 回退:简化校验(原行为)
+    if not isinstance(obj, dict):
+        return "object expected"
+
+    required = schema.get("required", [])
+    for key in required:
+        # 支持点号路径 "a.b.c"
+        parts = key.split(".")
+        cur: Any = obj
+        for p in parts:
+            if not isinstance(cur, dict) or p not in cur:
+                return f"missing required: {key}"
+            cur = cur[p]
+
+    props = schema.get("properties", {})
+    for k, spec in props.items():
+        if k not in obj:
+            continue
+        v = obj[k]
+        # enum
+        if "enum" in spec and v not in spec["enum"]:
+            return f"{k} not in enum {spec['enum']}"
+        # type
+        expected = spec.get("type")
+        if expected:
+            tmap = {
+                "string": str, "number": (int, float), "integer": int,
+                "boolean": bool, "object": dict, "array": list,
+            }
+            py_type = tmap.get(expected)
+            if py_type and not isinstance(v, py_type):
+                # number 允许 int 兼容 float
+                if expected == "number" and isinstance(v, bool):
+                    return f"{k} should be {expected}"
+                if not (expected == "number" and isinstance(v, int)):
+                    return f"{k} type mismatch: expected {expected}"
+        # items (数组内类型)
+        if expected == "array" and "items" in spec and isinstance(v, list):
+            item_spec = spec["items"]
+            for i, item in enumerate(v):
+                # 嵌套 object 校验
+                if item_spec.get("type") == "object":
+                    err = _try_validate_schema(item, item_spec)
+                    if err:
+                        return f"{k}[{i}].{err}"
+                else:
+                    if "enum" in item_spec and item not in item_spec["enum"]:
+                        return f"{k}[{i}] not in enum"
+    return None
+
+
 # Feature Flag
 def _soul_enabled() -> bool:
     try:

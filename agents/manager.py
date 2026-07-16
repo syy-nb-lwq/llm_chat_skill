@@ -253,7 +253,7 @@ class ManagerAgent(BaseAgent):
         skills = self.skill_store.list_all()
 
         # 读取历史教训 hints,拼到 user_input 前面
-        enriched_input = self._enrich_with_hints(user_input)
+        enriched_input = await self._enrich_with_hints(user_input)
 
         try:
             llm_plan = await self.think_json(
@@ -405,31 +405,27 @@ class ManagerAgent(BaseAgent):
             lines.append("")
         return "\n".join(lines)
 
-    def _enrich_with_hints(self, user_input: str) -> str:
+    async def _enrich_with_hints(self, user_input: str) -> str:
         """读取历史教训 hints,拼到 user_input 前面
-        
+
         优先使用语义记忆,回退到普通记忆
         """
         hints: List[str] = []
-        
+
         # 尝试语义记忆
         if self.semantic_memory:
             try:
-                import asyncio
-                # 异步搜索
-                results = asyncio.get_event_loop().run_until_complete(
-                    self.semantic_memory.search_context(user_input, limit=3)
-                )
+                results = await self.semantic_memory.search_context(user_input, limit=3)
                 hints.extend(results)
             except Exception:
                 pass
-        
+
         # 回退到普通记忆
         if not hints:
             hints = self.memory_store.get_skill_hints(user_input)
-        
+
         if not hints:
             return user_input
-        
+
         hints_text = "\n".join(f"- {h}" for h in hints)
         return f"{user_input}\n\n[历史经验提示]:\n{hints_text}"

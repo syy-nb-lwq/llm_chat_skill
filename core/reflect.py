@@ -4,23 +4,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
-
-
-# ---- Feature Flag ----
-SELF_EVOLUTION_ENABLED = False
-
-
-def _load_flag():
-    try:
-        from infra.config import config
-        return bool(config.self_evolution_enabled)
-    except Exception:
-        return False
-
-
-def get_self_evolution_enabled() -> bool:
-    return _load_flag()
 
 
 @dataclass

@@ -284,7 +284,7 @@ class Agent:
     async def _complete_teaching(self, user_input: str, questions: str) -> str:
         """交互式教导: 使用 LLM 补充信息并完成教导"""
         self.logger.info("Agent", "进入交互式教导流程")
-        
+
         # 先询问用户需要补充的信息
         prompt = f"""用户想要教一个技能,但提供的信息不完整。
 
@@ -295,7 +295,8 @@ class Agent:
 请用友好的方式询问用户补充信息:"""
 
         try:
-            response = await self.llm.chat([
+            # Agent 本身不是 BaseAgent,借用 orchestrator 的 LLM 客户端
+            response = await self.orchestrator.llm.chat([
                 {"role": "user", "content": prompt},
             ])
             # 将用户的回复添加到 context 供下一轮使用

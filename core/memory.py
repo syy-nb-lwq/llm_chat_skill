@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
 
 # ---- 数据结构 ----
@@ -53,24 +54,6 @@ class SkillPatch:
     confidence: float = 0.5  # 0.0 ~ 1.0
     status: str = "pending"  # pending / approved / rejected / auto_approved
     reviewed_by: Optional[str] = None
-
-
-# ---- Feature Flag ----
-SELF_EVOLUTION_ENABLED = False  # 启动时由 infra.config 覆盖
-
-
-def _load_flag():
-    """延迟加载 feature flag"""
-    try:
-        from infra.config import config
-        return bool(config.self_evolution_enabled)
-    except Exception:
-        return False
-
-
-def get_self_evolution_enabled() -> bool:
-    """获取 feature flag(延迟加载)"""
-    return _load_flag()
 
 
 class MemoryStore:

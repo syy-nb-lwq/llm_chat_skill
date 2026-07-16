@@ -6,26 +6,9 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from core.memory import FailureRecord, MemoryStore, SkillPatch, get_memory_store
+from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
 from tools.base import ToolResult
-
-
-# ---- Feature Flag ----
-SELF_EVOLUTION_ENABLED = False  # 启动时由 infra.config 覆盖
-
-
-def _load_flag():
-    """延迟加载 feature flag"""
-    try:
-        from infra.config import config
-        return bool(config.self_evolution_enabled)
-    except Exception:
-        return False
-
-
-def get_self_evolution_enabled() -> bool:
-    """获取 feature flag(延迟加载)"""
-    return _load_flag()
 
 
 @dataclass
@@ -64,12 +47,6 @@ class ExecutionContext:
     tasks: List[TaskExecutionSummary]
     latency_ms: float
     user_feedback: Optional[str] = None  # 下一轮用户是否有纠正
-    # 身份 + 多级标识(M0-01)
-    user_id: str = "default"
-    session_id: str = "default"
-    turn_id: str = ""
-    execution_id: str = ""
-    parent_execution_id: Optional[str] = None
 
 
 class ExecutionCritic:
@@ -161,10 +138,6 @@ class ExecutionCritic:
                 diagnosis=diagnosis,
                 suggestion=suggestion,
                 user_corrected=user_corrected,
-                execution_id=context.execution_id or None,
-                user_id=context.user_id,
-                session_id=context.session_id,
-                turn_id=context.turn_id,
             )
             records_generated.append("failure_record")
 
@@ -182,9 +155,11 @@ class ExecutionCritic:
                 status="pending",
             )
 
-            # 高置信度(>0.9)自动生效
+            # 高置信度(>0.9)自动生效:持久化 patch 并尝试自动应用
             if confidence >= 0.9:
                 patch.status = "auto_approved"
+                self.memory.add_pending_patch(patch)
+                await self._apply_patch(patch)
                 records_generated.append("patch_auto_approved")
             else:
                 self.memory.add_pending_patch(patch)
@@ -302,6 +277,39 @@ class ExecutionCritic:
 
         return "未知情况", None, 0.0
 
+    async def _apply_patch(self, patch: "SkillPatch") -> bool:
+        """尝试将 auto_approved patch 直接应用到 skill YAML"""
+        target_skill = patch.target_skill
+        suggestion = patch.suggestion or {}
+        if not target_skill or not suggestion:
+            return False
+
+        # 构建 updates 字典:从 suggestion 中提取可应用字段
+        updates: Dict[str, object] = {}
+        if "method" in suggestion:
+            updates["method"] = suggestion["method"]
+        if "capability" in suggestion:
+            updates["capability"] = suggestion["capability"]
+        if "patterns" in suggestion:
+            updates["patterns"] = suggestion["patterns"]
+
+        if not updates:
+            return False
+
+        try:
+            from skills.manager import get_skill_store
+            store = get_skill_store()
+            applied = store.update_skill(target_skill, updates)
+            if applied:
+                self.logger.info(
+                    "ExecutionCritic",
+                    f"auto_approved patch {patch.id} 已应用: {target_skill} -> {applied}"
+                )
+                return True
+        except Exception as e:
+            self.logger.warning("ExecutionCritic", f"auto_apply patch 失败: {e}")
+        return False
+
     async def suggest_improvements(
         self,
         context: ExecutionContext,
@@ -369,45 +377,20 @@ def build_execution_context(
     tool_results: Dict[str, ToolResult],
     latency_ms: float,
     user_feedback: Optional[str] = None,
-    *,
-    user_id: str = "default",
-    session_id: str = "default",
-    turn_id: str = "",
-    execution_id: str = "",
-    parent_execution_id: Optional[str] = None,
-    task_specs: Optional[Dict[str, Dict]] = None,
 ) -> ExecutionContext:
-    """从工具执行结果构建 ExecutionContext
-
-    Args:
-        task_specs: 可选,key=task_id 的 ToolTask 原始规格,用于回填真实
-            tool 名 / retry / timeout_s。优先于 task_id 推断。
-    """
+    """从工具执行结果构建 ExecutionContext"""
     tasks: List[TaskExecutionSummary] = []
 
     for task_id, result in tool_results.items():
-        spec = (task_specs or {}).get(task_id, {}) if task_specs else {}
-        tool_name = spec.get("type") or (task_id if task_id.startswith("tool:") else f"task_{task_id}")
-        # meta 中如包含 used_fallback / retry_count / retry / timeout_s 也读取
+        # 从 task_id 推断 tool 名(格式: t1, t2...)
+        tool_name = task_id if task_id.startswith("tool:") else f"task_{task_id}"
         meta = getattr(result, "meta", {}) or {}
-        used_fallback = bool(
-            spec.get("fallback_to")
-            or meta.get("used_fallback")
-        )
-        retry_count = int(
-            spec.get("retry", 0) or 0
-            + (meta.get("attempts", 0) or 0) - (1 if meta.get("attempts") else 0)
-            or 0
-        )
-        # 当 meta 里明确给 attempts,用它表示实际重试次数
-        if meta.get("attempts") is not None:
-            retry_count = max(0, int(meta.get("attempts")) - 1)
         tasks.append(TaskExecutionSummary(
             task_id=task_id,
             tool=tool_name,
             success=result.success,
-            used_fallback=used_fallback,
-            retry_count=retry_count,
+            used_fallback=bool(meta.get("used_fallback", False)),
+            retry_count=int(meta.get("retry_count", 0)),
             error=result.error or "",
         ))
 
@@ -419,9 +402,4 @@ def build_execution_context(
         tasks=tasks,
         latency_ms=latency_ms,
         user_feedback=user_feedback,
-        user_id=user_id,
-        session_id=session_id,
-        turn_id=turn_id,
-        execution_id=execution_id or trace_id,
-        parent_execution_id=parent_execution_id,
     )

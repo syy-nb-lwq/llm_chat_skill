@@ -54,13 +54,17 @@ class SessionManager:
     async def gc(self):
         """Remove expired sessions and run disposal callbacks."""
         now = time.time()
-        expired = [
-            client_id
-            for client_id, session in self._sessions.items()
-            if now - session.last_active > self.ttl_s
-        ]
+        # 在锁内收集过期 client_id,避免遍历时 get_or_create 并发修改
+        async with self._lock:
+            expired = [
+                client_id
+                for client_id, session in self._sessions.items()
+                if now - session.last_active > self.ttl_s
+            ]
+
         for client_id in expired:
-            session = self._sessions.pop(client_id, None)
+            async with self._lock:
+                session = self._sessions.pop(client_id, None)
             if session:
                 await self._dispose_session(session)
                 self.logger.info("Session", f"gc: {client_id[:8]}")

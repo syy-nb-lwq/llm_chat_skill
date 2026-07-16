@@ -124,14 +124,8 @@ class LearningAgent:
         task_id: Optional[str] = None,
         retry: int = 0,
         timeout_s: int = 30,
-        fallback_to: Optional[str] = None,
     ) -> ToolResult:
-        """执行单个工具(支持重试 + 超时)
-
-        会把实际执行信息(attempts / latency_ms / timeout_s / fallback_to)写入
-        ``result.meta``,给 ExecutionCritic / 可观测前端使用。
-        """
-        import time
+        """执行单个工具(支持重试 + 超时)"""
         tool_info = self.hub.get_tool(tool_type)
         if not tool_info:
             return ToolResult(success=False, error=f"工具不存在: {tool_type}")
@@ -141,72 +135,47 @@ class LearningAgent:
 
         async def _run_once() -> ToolResult:
             self.logger.info(tool_type, f"执行工具: {local_params}")
-            t0 = time.time()
             try:
                 result = await asyncio.wait_for(
                     self.hub.call_tool(tool_type, local_params),
                     timeout=timeout_s,
                 )
-                result.meta = dict(result.meta or {})
-                result.meta.setdefault("latency_ms", int((time.time() - t0) * 1000))
-                result.meta.setdefault("timeout_s", timeout_s)
                 if result.success:
                     self.logger.info(tool_type, "执行成功")
                 else:
                     self.logger.warning(tool_type, f"执行失败: {result.error}")
                 return result
             except asyncio.TimeoutError:
-                return ToolResult(
-                    success=False,
-                    error=f"超时({timeout_s}s)",
-                    meta={"timeout_s": timeout_s, "timed_out": True,
-                          "latency_ms": int((time.time() - t0) * 1000)},
-                )
+                return ToolResult(success=False, error=f"超时({timeout_s}s)")
             except Exception as e:
-                return ToolResult(
-                    success=False,
-                    error=str(e),
-                    meta={"timeout_s": timeout_s, "latency_ms": int((time.time() - t0) * 1000)},
-                )
+                return ToolResult(success=False, error=str(e))
 
         attempts = max(1, retry + 1)
         last_err = "unknown"
-        last_result: Optional[ToolResult] = None
         for attempt in range(1, attempts + 1):
-            last_result = await _run_once()
-            if last_result.success:
-                # 回填 attempts / fallback_to / retry
-                last_result.meta = dict(last_result.meta or {})
-                last_result.meta["attempts"] = attempt
-                last_result.meta["retry"] = retry
-                if fallback_to:
-                    last_result.meta["fallback_to"] = fallback_to
+            result = await _run_once()
+            if result.success:
+                # 把重试次数写入 meta,供 ExecutionCritic 评估
+                result.meta = {**result.meta, "retry_count": attempt - 1}
                 if on_event:
                     await on_event("tool_result", {
                         "task_id": task_id or tool_type,
                         "tool": tool_type,
-                        "data": last_result.data,
-                        "meta": last_result.meta,
+                        "data": result.data,
+                        "meta": result.meta,
                     })
-                return last_result
-            last_err = last_result.error
+                return result
+            last_err = result.error
             if attempt < attempts:
                 self.logger.warning("Learning", f"{tool_type} 第 {attempt} 次失败: {last_err},重试")
 
-        # 全部失败,记录 attempts / fallback_to
-        if last_result is not None:
-            last_result.meta = dict(last_result.meta or {})
-            last_result.meta["attempts"] = attempts
-            last_result.meta["retry"] = retry
-            if fallback_to:
-                last_result.meta["fallback_to"] = fallback_to
         if on_event:
             await on_event("tool_error", {
                 "task_id": task_id or tool_type,
                 "tool": tool_type,
                 "error": last_err,
             })
-        return last_result or ToolResult(success=False, error=last_err)
+        return ToolResult(success=False, error=last_err, meta={"retry_count": attempts - 1})
 
     async def execute_dag(
         self,
@@ -292,7 +261,6 @@ class LearningAgent:
                         task_id=task.id,
                         retry=task.retry,
                         timeout_s=task.timeout_s,
-                        fallback_to=task.fallback_to,
                     )
                     running[task_id] = asyncio.create_task(coro)
 

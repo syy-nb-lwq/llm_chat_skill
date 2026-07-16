@@ -118,3 +118,8 @@ class Config(BaseSettings):
 
 
 config = Config()
+
+
+def get_self_evolution_enabled() -> bool:
+    """统一的 feature flag 查询入口,所有模块都应使用此函数。"""
+    return bool(getattr(config, "self_evolution_enabled", False))
