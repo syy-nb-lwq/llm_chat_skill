@@ -3,49 +3,44 @@
     <div class="header-row">
       <h4>进化状态</h4>
       <div class="actions">
-        <button class="reload" @click="refresh" :disabled="loading">↻ 刷新</button>
-        <button class="reflect-btn" @click="requestReflection" :disabled="loading">
-          🔄 立即复盘
+        <button class="reload" @click="refresh" :disabled="loading">刷新</button>
+        <button class="reflect-btn" @click="requestReflection" :disabled="loading || !selfEvolutionEnabled">
+          立即复盘
         </button>
       </div>
     </div>
 
-    <!-- 开关 -->
     <div class="feature-toggle">
       <label>
         <input type="checkbox" v-model="selfEvolutionEnabled" @change="toggleFeature" />
         <span>启用自我进化</span>
       </label>
-      <p class="hint">开启后系统会记录失败经验并生成改进建议</p>
+      <p class="hint">开启后系统会记录失败经验并生成改进建议。</p>
     </div>
 
-    <!-- 统计卡片 -->
+    <div v-if="error" class="error">{{ error }}</div>
+
     <div class="stats-grid">
       <div class="stat-card failures">
-        <div class="stat-icon">📊</div>
         <div class="stat-value">{{ stats?.total_failures || 0 }}</div>
         <div class="stat-label">失败记录</div>
       </div>
       <div class="stat-card successes">
-        <div class="stat-icon">✨</div>
         <div class="stat-value">{{ stats?.total_successes || 0 }}</div>
         <div class="stat-label">成功记录</div>
       </div>
       <div class="stat-card patches">
-        <div class="stat-icon">💡</div>
         <div class="stat-value">{{ stats?.pending_patches || 0 }}</div>
-        <div class="stat-label">待审阅建议</div>
+        <div class="stat-label">待审建议</div>
       </div>
       <div class="stat-card reflections">
-        <div class="stat-icon">🔍</div>
         <div class="stat-value">{{ reflectionReports.length }}</div>
-        <div class="stat-label">反思报告</div>
+        <div class="stat-label">复盘报告</div>
       </div>
     </div>
 
-    <!-- 反思报告列表 -->
     <div v-if="reflectionReports.length > 0" class="section">
-      <h5>近期反思报告</h5>
+      <h5>近期复盘报告</h5>
       <div v-for="report in reflectionReports" :key="report.id" class="report-card">
         <div class="report-header">
           <span class="report-id">{{ report.id }}</span>
@@ -55,39 +50,37 @@
 
         <div v-if="report.high_freq_failures?.length" class="report-section">
           <div class="section-title">高频失败场景</div>
-          <div v-for="hf in report.high_freq_failures" :key="hf.scenario" class="failure-item">
-            <span class="scenario">{{ hf.scenario }}</span>
-            <span class="count">{{ hf.count }} 次</span>
-            <span class="diagnosis">{{ hf.common_diagnosis }}</span>
+          <div v-for="item in report.high_freq_failures" :key="item.scenario" class="failure-item">
+            <span class="scenario">{{ item.scenario }}</span>
+            <span class="count">{{ item.count }} 次</span>
+            <span class="diagnosis">{{ item.common_diagnosis }}</span>
           </div>
         </div>
 
         <div v-if="report.skill_suggestions?.length" class="report-section">
           <div class="section-title">技能优化建议</div>
-          <div v-for="(s, i) in report.skill_suggestions" :key="i" class="suggestion-item">
-            <span class="target">{{ s.target_skill }}</span>
-            <span class="recommendation">{{ s.recommendation }}</span>
+          <div v-for="(item, idx) in report.skill_suggestions" :key="idx" class="suggestion-item">
+            <span class="target">{{ item.target_skill }}</span>
+            <span class="recommendation">{{ item.recommendation }}</span>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- 快速操作 -->
+    <div v-else class="empty">暂无复盘报告</div>
+
     <div class="quick-actions">
       <h5>快速操作</h5>
       <div class="action-buttons">
-        <button @click="clearOldRecords" class="action-btn danger">
-          🗑️ 清理旧记录
-        </button>
-        <button @click="exportData" class="action-btn">
-          📥 导出数据
-        </button>
+        <button @click="exportData" class="action-btn">导出数据</button>
       </div>
     </div>
   </div>
 </template>
 
 <script>
+const API_BASE = 'http://localhost:8000'
+
 export default {
   name: 'EvolutionDashboard',
   data() {
@@ -96,91 +89,88 @@ export default {
       stats: null,
       reflectionReports: [],
       loading: false,
+      error: '',
     }
   },
   mounted() {
     this.refresh()
-    this.checkFeatureStatus()
   },
   methods: {
     async refresh() {
       this.loading = true
+      this.error = ''
       try {
-        const [statsRes] = await Promise.all([
-          fetch('http://localhost:8000/api/memory/stats'),
+        const [featureRes, statsRes] = await Promise.all([
+          fetch(`${API_BASE}/api/features`),
+          fetch(`${API_BASE}/api/memory/stats`),
         ])
-        if (statsRes.ok) {
-          this.stats = await statsRes.json()
-        }
-        // 加载反思报告(从本地存储)
-        this.loadReflectionReports()
+
+        if (!featureRes.ok) throw new Error(await featureRes.text())
+        if (!statsRes.ok) throw new Error(await statsRes.text())
+
+        const featureData = await featureRes.json()
+        this.selfEvolutionEnabled = !!featureData.self_evolution_enabled
+        this.stats = await statsRes.json()
+
+        await this.loadReflectionReports()
       } catch (e) {
-        console.error('刷新失败:', e)
+        this.error = `刷新失败: ${e.message}`
       } finally {
         this.loading = false
       }
     },
 
-    loadReflectionReports() {
-      try {
-        const stored = localStorage.getItem('evolution_reports')
-        if (stored) {
-          this.reflectionReports = JSON.parse(stored)
+    async loadReflectionReports() {
+      if (!this.selfEvolutionEnabled) {
+        this.reflectionReports = []
+        return
+      }
+
+      const res = await fetch(`${API_BASE}/api/reflections`)
+      if (!res.ok) {
+        if (res.status === 403) {
+          this.reflectionReports = []
+          return
         }
-      } catch (e) {
-        console.error('加载反思报告失败:', e)
+        throw new Error(await res.text())
       }
-    },
 
-    saveReflectionReports() {
-      try {
-        localStorage.setItem('evolution_reports', JSON.stringify(this.reflectionReports))
-      } catch (e) {
-        console.error('保存反思报告失败:', e)
-      }
-    },
-
-    async checkFeatureStatus() {
-      // 从后端获取状态
-      try {
-        const res = await fetch('http://localhost:8000/api/health')
-        // 暂时通过 localStorage 记录用户偏好
-        const pref = localStorage.getItem('self_evolution_enabled')
-        this.selfEvolutionEnabled = pref === 'true'
-      } catch (e) {
-        console.error('检查特性状态失败:', e)
-      }
+      const data = await res.json()
+      this.reflectionReports = data.reflections || []
     },
 
     async toggleFeature() {
-      localStorage.setItem('self_evolution_enabled', String(this.selfEvolutionEnabled))
-      // TODO: 通知后端更新配置
-      this.$emit('feature-toggled', this.selfEvolutionEnabled)
+      this.loading = true
+      this.error = ''
+      try {
+        const res = await fetch(`${API_BASE}/api/features/self-evolution`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: this.selfEvolutionEnabled, persist: true }),
+        })
+        if (!res.ok) throw new Error(await res.text())
+        const data = await res.json()
+        this.selfEvolutionEnabled = !!data.self_evolution_enabled
+        await this.loadReflectionReports()
+      } catch (e) {
+        this.error = `更新开关失败: ${e.message}`
+        this.selfEvolutionEnabled = !this.selfEvolutionEnabled
+      } finally {
+        this.loading = false
+      }
     },
 
     async requestReflection() {
       this.loading = true
+      this.error = ''
       try {
-        // 通过 WebSocket 发送复盘请求
-        const { wsService } = await import('../websocket')
-        // 暂时用 alert 提示
-        alert('复盘请求已发送,请查看"✨ 进化"标签页查看结果')
+        const res = await fetch(`${API_BASE}/api/reflections/request`, { method: 'POST' })
+        if (!res.ok) throw new Error(await res.text())
+        await this.refresh()
       } catch (e) {
-        console.error('请求复盘失败:', e)
+        this.error = `请求复盘失败: ${e.message}`
       } finally {
         this.loading = false
-      }
-    },
-
-    async clearOldRecords() {
-      if (!confirm('确定要清理旧的失败记录吗?这将删除 30 天前的记录。')) {
-        return
-      }
-      try {
-        // TODO: 调用后端 API
-        alert('功能开发中')
-      } catch (e) {
-        console.error('清理失败:', e)
       }
     },
 
@@ -199,34 +189,31 @@ export default {
         a.click()
         URL.revokeObjectURL(url)
       } catch (e) {
-        console.error('导出失败:', e)
+        this.error = `导出失败: ${e.message}`
       }
     },
 
-    formatTime(t) {
-      if (!t) return ''
+    formatTime(value) {
+      if (!value) return ''
       try {
-        const d = new Date(t)
-        return d.toLocaleString('zh-CN', {
+        return new Date(value).toLocaleString('zh-CN', {
           month: '2-digit',
           day: '2-digit',
           hour: '2-digit',
           minute: '2-digit',
         })
       } catch {
-        return t
+        return value
       }
     },
 
     formatTrigger(reason) {
-      const map = {
-        'high_failure_count': '失败过多',
-        'user_request': '用户请求',
-      }
-      if (reason.startsWith('same_scenario')) {
-        return '同场景重复失败'
-      }
-      return map[reason] || reason
+      if (!reason) return ''
+      if (reason.startsWith('same_scenario')) return '同场景重复失败'
+      return {
+        high_failure_count: '失败过多',
+        user_request: '用户请求',
+      }[reason] || reason
     },
   },
 }
@@ -265,16 +252,19 @@ export default {
   font-weight: 500;
 }
 
-.feature-toggle input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  cursor: pointer;
-}
-
 .hint {
   margin: 4px 0 0 26px;
   font-size: 11px;
   color: #888;
+}
+
+.error {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(239, 83, 80, 0.12);
+  color: #c62828;
+  font-size: 12px;
 }
 
 .stats-grid {
@@ -290,11 +280,6 @@ export default {
   padding: 12px;
   text-align: center;
   border: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.stat-icon {
-  font-size: 20px;
-  margin-bottom: 4px;
 }
 
 .stat-value {
@@ -313,12 +298,9 @@ export default {
 .stat-card.patches .stat-value { color: #ffa726; }
 .stat-card.reflections .stat-value { color: #42a5f5; }
 
-.section {
-  margin-bottom: 16px;
-}
-
-.section h5 {
-  margin: 0 0 8px 0;
+.section h5,
+.quick-actions h5 {
+  margin: 0 0 8px;
   font-size: 12px;
   color: #888;
   text-transform: uppercase;
@@ -357,10 +339,6 @@ export default {
   margin-left: auto;
 }
 
-.report-section {
-  margin-top: 8px;
-}
-
 .section-title {
   font-size: 10px;
   color: #888;
@@ -397,11 +375,10 @@ export default {
   font-size: 11px;
 }
 
-.quick-actions h5 {
-  margin: 0 0 8px 0;
+.empty {
+  color: #999;
+  padding: 12px 0;
   font-size: 12px;
-  color: #888;
-  text-transform: uppercase;
 }
 
 .action-buttons {
@@ -409,41 +386,13 @@ export default {
   gap: 8px;
 }
 
-.action-btn {
-  flex: 1;
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.05);
-  color: inherit;
-}
-
-.action-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.action-btn.danger {
-  border-color: rgba(239, 83, 80, 0.3);
-  color: #ef5350;
-}
-
-.action-btn.danger:hover {
-  background: rgba(239, 83, 80, 0.2);
-}
-
-.actions {
-  display: flex;
-  gap: 4px;
-}
-
+.action-btn,
 .reload,
 .reflect-btn {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
   color: inherit;
-  padding: 4px 10px;
+  padding: 6px 10px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 12px;
@@ -455,8 +404,14 @@ export default {
   color: #667eea;
 }
 
+.actions {
+  display: flex;
+  gap: 4px;
+}
+
 .reload:disabled,
 .reflect-btn:disabled {
   opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

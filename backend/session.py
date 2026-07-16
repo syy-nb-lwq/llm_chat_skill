@@ -1,29 +1,33 @@
-"""Session 管理 - 按 client_id 持久化 Agent 实例"""
+"""Session management keyed by client_id."""
 import asyncio
+import inspect
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List, Callable
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from core.agent import Agent
 from infra.logger import get_logger
 
 
+DisposeCallback = Callable[[], Optional[Awaitable[None]]]
+
+
 @dataclass
 class Session:
-    """一个客户端的会话状态"""
+    """Per-client session state."""
+
     client_id: str
     agent: Agent
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
-    # Session 销毁时要调用的清理钩子(关闭订阅、刷新资源等)
-    dispose_callbacks: List[Callable] = field(default_factory=list)
+    dispose_callbacks: List[DisposeCallback] = field(default_factory=list)
 
     def touch(self):
         self.last_active = time.time()
 
 
 class SessionManager:
-    """Session 池,按 client_id 维护"""
+    """In-memory session pool."""
 
     def __init__(self, ttl_s: int = 3600):
         self._sessions: Dict[str, Session] = {}
@@ -33,44 +37,47 @@ class SessionManager:
 
     async def get_or_create(self, client_id: str) -> Session:
         async with self._lock:
-            sess = self._sessions.get(client_id)
-            if sess is None:
-                sess = Session(client_id=client_id, agent=Agent(session_id=client_id))
-                self._sessions[client_id] = sess
-                self.logger.info("Session", f"创建: {client_id[:8]}")
-            sess.touch()
-            return sess
+            session = self._sessions.get(client_id)
+            if session is None:
+                session = Session(client_id=client_id, agent=Agent(session_id=client_id))
+                self._sessions[client_id] = session
+                self.logger.info("Session", f"created: {client_id[:8]}")
+            session.touch()
+            return session
 
     def get(self, client_id: str) -> Optional[Session]:
-        sess = self._sessions.get(client_id)
-        if sess:
-            sess.touch()
-        return sess
+        session = self._sessions.get(client_id)
+        if session:
+            session.touch()
+        return session
 
-    def gc(self):
-        """清理过期 session"""
+    async def gc(self):
+        """Remove expired sessions and run disposal callbacks."""
         now = time.time()
-        expired = [cid for cid, s in self._sessions.items()
-                   if now - s.last_active > self.ttl_s]
-        for cid in expired:
-            s = self._sessions.pop(cid, None)
-            if s:
-                for cb in s.dispose_callbacks:
-                    try:
-                        cb()
-                    except Exception:
-                        pass
-                self.logger.info("Session", f"GC: {cid[:8]}")
+        expired = [
+            client_id
+            for client_id, session in self._sessions.items()
+            if now - session.last_active > self.ttl_s
+        ]
+        for client_id in expired:
+            session = self._sessions.pop(client_id, None)
+            if session:
+                await self._dispose_session(session)
+                self.logger.info("Session", f"gc: {client_id[:8]}")
 
-    def destroy(self, client_id: str):
-        s = self._sessions.pop(client_id, None)
-        if s:
-            for cb in s.dispose_callbacks:
-                try:
-                    cb()
-                except Exception:
-                    pass
+    async def destroy(self, client_id: str):
+        session = self._sessions.pop(client_id, None)
+        if session:
+            await self._dispose_session(session)
+
+    async def _dispose_session(self, session: Session):
+        for callback in session.dispose_callbacks:
+            try:
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                self.logger.warning("Session", f"dispose callback failed: {exc}")
 
 
-# 全局单例
 sessions = SessionManager()

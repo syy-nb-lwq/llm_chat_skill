@@ -227,6 +227,40 @@ class Agent:
                     if isinstance(r, Exception):
                         self.logger.warning("Agent", f"emit task failed: {r}")
 
+    def chat(
+        self,
+        user_input: str,
+        on_event: Optional[Callable] = None,
+    ) -> str:
+        """Sync wrapper used by CLI and Streamlit entry points."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.handle(user_input, on_event))
+
+        result: Dict[str, Any] = {}
+        error: Dict[str, BaseException] = {}
+
+        def runner():
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                result["value"] = loop.run_until_complete(self.handle(user_input, on_event))
+            except BaseException as exc:  # pragma: no cover - defensive sync bridge
+                error["value"] = exc
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+
+        import threading
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        thread.join()
+        if "value" in error:
+            raise error["value"]
+        return result.get("value", "")
+
     def reset(self):
         self.context.clear()
         self.logger.info("Agent", "RESET")

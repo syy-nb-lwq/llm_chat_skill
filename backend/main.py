@@ -1,16 +1,18 @@
-"""FastAPI 后端服务"""
+"""FastAPI backend service."""
 import asyncio
+import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backend.session import sessions
 from backend.websocket_handler import endpoint, register_handlers
-from infra.config import config, ConfigError
+from infra.config import ConfigError, config
 from infra.logger import get_logger
 
 
@@ -25,22 +27,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册 WebSocket 路由（模块级，注册必须在 app 启动前）
 endpoint.register_route(app, "/pubsub")
+
+
+class FeatureFlagUpdate(BaseModel):
+    enabled: bool
+    persist: bool = True
+
+
+async def _gc_loop():
+    while True:
+        await asyncio.sleep(60)
+        await sessions.gc()
+
+
+async def _start_reflect_loop() -> bool:
+    from core.reflect import SelfReflectLoop
+
+    if getattr(app.state, "reflect_loop", None) is None:
+        app.state.reflect_loop = SelfReflectLoop()
+    await app.state.reflect_loop.start()
+    return True
+
+
+async def _stop_reflect_loop():
+    reflect_loop = getattr(app.state, "reflect_loop", None)
+    if reflect_loop is not None:
+        await reflect_loop.stop()
+        app.state.reflect_loop = None
 
 
 @app.on_event("startup")
 async def _startup():
     try:
         config.validate()
-    except ConfigError as e:
-        logger.error("startup", f"配置错误: {e}")
-    
-    # 在事件循环中注册 PubSub 订阅处理器
+    except ConfigError as exc:
+        logger.error("startup", f"config validation failed: {exc}")
+        raise
+
+    sessions.ttl_s = int(config.session_ttl_s)
     await register_handlers()
-    
-    # 初始化 Provider
+
     from infra.providers.registry import init_providers
+
     init_providers(
         openai_api_key=config.openai_api_key,
         openai_base_url=config.openai_base_url,
@@ -51,46 +80,58 @@ async def _startup():
         local_model=config.local_model,
         default_provider=config.default_provider,
     )
-    
-    # 启动 Session GC 后台任务
-    async def gc_loop():
-        while True:
-            await asyncio.sleep(60)
-            sessions.gc()
-    asyncio.create_task(gc_loop())
-    
-    # 初始化工具中枢 Hub
+
+    app.state.gc_task = asyncio.create_task(_gc_loop())
+    app.state.reflect_loop = None
+
     from tools.hub import get_tool_hub
     from tools.sources.python_source import create_python_source
-    from tools.sources.mcp_source import create_mcp_source
+
     hub = get_tool_hub()
-    
-    # 注册 Python 内置工具源
-    python_source = create_python_source(
-        name="builtin",
-        directories=[str(Path(__file__).parent.parent / "tools")],
-    )
-    hub.register_source(python_source)
-    
-    # 连接所有工具源
+    try:
+        hub.register_source(
+            create_python_source(
+                name="builtin",
+                directories=[str(Path(__file__).parent.parent / "tools")],
+            )
+        )
+    except ValueError:
+        pass
+
     try:
         await hub.connect_all()
-        logger.info("startup", f"工具中枢已初始化,工具数: {len(hub.names())}")
-    except Exception as e:
-        logger.warning("startup", f"工具源连接失败: {e}")
-    
-    # 启动自我反思循环(如果启用)
+        logger.info("startup", f"tool hub initialized with {len(hub.names())} tools")
+    except Exception as exc:
+        logger.warning("startup", f"tool hub connect failed: {exc}")
+
+    if config.self_evolution_enabled:
+        try:
+            await _start_reflect_loop()
+            logger.info("startup", "self reflection loop started")
+        except Exception as exc:
+            logger.warning("startup", f"self reflection loop start failed: {exc}")
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    gc_task = getattr(app.state, "gc_task", None)
+    if gc_task is not None:
+        gc_task.cancel()
+        try:
+            await gc_task
+        except asyncio.CancelledError:
+            pass
+
+    await _stop_reflect_loop()
+
+    from tools.hub import get_tool_hub
+
     try:
-        from core.reflect import SelfReflectLoop, get_self_evolution_enabled
-        if get_self_evolution_enabled():
-            reflect_loop = SelfReflectLoop()
-            asyncio.create_task(reflect_loop.start())
-            logger.info("startup", "自我反思循环已启动")
-    except Exception as e:
-        logger.warning("startup", f"启动自我反思循环失败: {e}")
+        await get_tool_hub().disconnect_all()
+    except Exception as exc:
+        logger.warning("shutdown", f"tool hub shutdown failed: {exc}")
 
 
-# ===== REST API =====
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "Skill Agent", "version": "1.0"}
@@ -98,72 +139,88 @@ async def root():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "self_evolution_enabled": bool(config.self_evolution_enabled),
+    }
+
+
+@app.get("/api/features")
+async def get_features():
+    return {
+        "self_evolution_enabled": bool(config.self_evolution_enabled),
+        "skill_dag_enabled": bool(config.skill_dag_enabled),
+        "semantic_memory_enabled": bool(config.semantic_memory_enabled),
+    }
+
+
+@app.post("/api/features/self-evolution")
+async def set_self_evolution(payload: FeatureFlagUpdate):
+    enabled = config.set_feature_flag(
+        "self_evolution_enabled",
+        payload.enabled,
+        persist=payload.persist,
+    )
+    if enabled:
+        await _start_reflect_loop()
+    else:
+        await _stop_reflect_loop()
+    return {"self_evolution_enabled": enabled, "persisted": payload.persist}
 
 
 @app.get("/api/skills")
 async def list_skills():
     from skills.manager import get_skill_store
+
     store = get_skill_store()
     skills = store.list_all()
     return {
-        "skills": [{
-            "id": getattr(s, "id", None),
-            "name": s.name,
-            "version": getattr(s, "version", "1.0.0"),
-            "capability": s.capability,
-            "patterns": s.patterns,
-            "tags": s.tags,
-            "method": s.method,
-            "source": getattr(s, "source", "builtin"),
-        } for s in skills]
+        "skills": [
+            {
+                "id": getattr(skill, "id", None),
+                "name": skill.name,
+                "version": getattr(skill, "version", "1.0.0"),
+                "capability": skill.capability,
+                "patterns": skill.patterns,
+                "tags": skill.tags,
+                "method": skill.method,
+                "source": getattr(skill, "source", "builtin"),
+                "author": getattr(skill, "author", None),
+                "created_at": getattr(skill, "created_at", None),
+                "updated_at": getattr(skill, "updated_at", None),
+                "steps": [step.to_dict() for step in skill.steps],
+            }
+            for skill in skills
+        ]
     }
 
 
 @app.delete("/api/skills/{name}")
 async def delete_skill(name: str):
     from skills.manager import get_skill_store
+
     store = get_skill_store()
-    removed = []
-    # 从内存移除
-    skill = store._registry._by_name.pop(name, None)
-    if skill:
-        # 同步移除 by_id
-        store._registry._by_id.pop(skill.id, None)
-        store._skills.pop(name, None)
-    # 从文件删除(扫描所有可能目录)
-    for d in [store.base_path, store.base_path / "builtin", store.base_path / "user"]:
-        if d.exists():
-            for f in d.rglob(f"{name}*.yaml"):
-                try:
-                    f.unlink()
-                    removed.append(str(f))
-                except Exception as e:
-                    logger.error("skills", f"删除失败: {e}")
-            for f in d.rglob(f"{name}*.md"):
-                try:
-                    f.unlink()
-                    removed.append(str(f))
-                except Exception as e:
-                    logger.error("skills", f"删除失败: {e}")
-    # 额外:backend/skills/ 也可能存了 MD
-    root = store.base_path.parent
-    backend_skills = root / "backend" / "skills"
-    if backend_skills.exists():
-        for f in backend_skills.rglob(f"{name}*.md"):
-            try:
-                f.unlink()
-                removed.append(str(f))
-            except Exception as e:
-                logger.error("skills", f"删除失败: {e}")
-    if not removed and skill is None:
-        raise HTTPException(status_code=404, detail=f"技能 {name} 不存在")
+    removed = store.delete_by_name(name)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"skill not found: {name}")
     return {"deleted": name, "files": removed}
+
+
+@app.delete("/api/skills/{name}/{version}")
+async def delete_skill_version(name: str, version: str):
+    from skills.manager import get_skill_store
+
+    store = get_skill_store()
+    removed = store.delete_version(name, version)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"skill version not found: {name}@{version}")
+    return {"deleted": name, "version": version, "files": removed}
 
 
 @app.post("/api/skills/reload")
 async def reload_skills():
     from skills.manager import get_skill_store
+
     store = get_skill_store()
     store.reload()
     return {"reloaded": True, "count": len(store.list_all())}
@@ -172,152 +229,132 @@ async def reload_skills():
 @app.get("/api/tools")
 async def list_tools():
     from agents.learning import LearningAgent
+    from tools.base import get_tool_registry
+
     learning = LearningAgent()
-    # 尝试从 Hub 获取工具
-    tools = learning.tools.all()
-    if not tools:
-        # 兼容:如果 Hub 没有工具,尝试从旧注册表获取
-        from tools.base import get_tool_registry
-        tools = get_tool_registry().all()
+    tools = learning.tools.all() or get_tool_registry().all()
     return {
-        "tools": [
-            {"name": tool.name, "description": tool.description}
-            for tool in tools
-        ]
+        "tools": [{"name": tool.name, "description": tool.description} for tool in tools]
     }
 
 
-# ===== Patch 管理 API =====
 @app.get("/api/patches")
 async def list_patches():
-    """获取所有待审阅的改进建议"""
     from core.memory import get_memory_store
+
     store = get_memory_store()
     patches = store.get_pending_patches()
     return {
         "patches": [
             {
-                "id": p.id,
-                "trace_id": p.trace_id,
-                "timestamp": p.timestamp,
-                "target_skill": p.target_skill,
-                "patch_type": p.patch_type,
-                "diagnosis": p.diagnosis,
-                "suggestion": p.suggestion,
-                "confidence": p.confidence,
-                "status": p.status,
+                "id": patch.id,
+                "trace_id": patch.trace_id,
+                "timestamp": patch.timestamp,
+                "target_skill": patch.target_skill,
+                "patch_type": patch.patch_type,
+                "diagnosis": patch.diagnosis,
+                "suggestion": patch.suggestion,
+                "confidence": patch.confidence,
+                "status": patch.status,
             }
-            for p in patches
+            for patch in patches
         ]
     }
 
 
 @app.post("/api/patches/{patch_id}/approve")
 async def approve_patch(patch_id: str):
-    """批准一个 SkillPatch,使其生效"""
     from core.memory import get_memory_store
-    from core.merger import get_self_evolution_enabled
     from skills.manager import get_skill_store
-    from pathlib import Path
-    import json
 
-    if not get_self_evolution_enabled():
-        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+    if not config.self_evolution_enabled:
+        raise HTTPException(status_code=403, detail="self evolution disabled")
 
     store = get_memory_store()
-    store.approve_patch(patch_id, "human")
+    if not store.approve_patch(patch_id, "human"):
+        raise HTTPException(status_code=404, detail=f"patch not found: {patch_id}")
 
-    applied = False
-    # 如果是 improve_skill 类型,尝试应用修改
-    patch_file = Path(__file__).parent.parent / "memory" / "skill_patches" / "pending" / f"{patch_id}.json"
-    if patch_file.exists():
-        data = json.loads(patch_file.read_text(encoding="utf-8"))
-        if data.get("status") == "approved":
-            suggestion = data.get("suggestion", {})
-            if suggestion.get("type") == "improve_skill" and suggestion.get("target_skill"):
-                # 尝试应用修改到目标技能
-                skill_store = get_skill_store()
-                skill = skill_store.get_by_name(suggestion["target_skill"])
-                if skill:
-                    # 更新技能的 method
-                    if "method" in suggestion:
-                        skill.method = suggestion["method"]
-                    # 重新加载
-                    skill_store.reload()
-                    applied = True
+    patch_file = store.patches_dir / f"{patch_id}.json"
+    if not patch_file.exists():
+        return {"approved": patch_id, "applied": False, "files": []}
 
-    return {"approved": patch_id, "applied": applied}
+    data = json.loads(patch_file.read_text(encoding="utf-8"))
+    suggestion = data.get("suggestion", {}) or {}
+    target_skill = suggestion.get("target_skill") or data.get("target_skill")
+    updates = {}
+    if "method" in suggestion:
+        updates["method"] = suggestion["method"]
+
+    applied_files = []
+    if target_skill and updates:
+        applied_files = get_skill_store().update_skill(target_skill, updates)
+
+    return {
+        "approved": patch_id,
+        "applied": bool(applied_files),
+        "files": applied_files,
+    }
 
 
 @app.post("/api/patches/{patch_id}/reject")
 async def reject_patch(patch_id: str):
-    """拒绝一个 SkillPatch"""
     from core.memory import get_memory_store
-    from core.merger import get_self_evolution_enabled
 
-    if not get_self_evolution_enabled():
-        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+    if not config.self_evolution_enabled:
+        raise HTTPException(status_code=403, detail="self evolution disabled")
 
     store = get_memory_store()
-    store.reject_patch(patch_id, "human")
+    if not store.reject_patch(patch_id, "human"):
+        raise HTTPException(status_code=404, detail=f"patch not found: {patch_id}")
     return {"rejected": patch_id}
 
 
 @app.get("/api/memory/stats")
 async def memory_stats():
-    """获取记忆统计"""
     from core.memory import get_memory_store
-    store = get_memory_store()
-    stats = store.get_stats()
-    return stats
+
+    return get_memory_store().get_stats()
 
 
 @app.get("/api/reflections")
 async def list_reflections():
-    """获取反思报告列表"""
-    from core.merger import get_self_evolution_enabled
-    from pathlib import Path
-    import json
-
-    if not get_self_evolution_enabled():
-        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+    if not config.self_evolution_enabled:
+        raise HTTPException(status_code=403, detail="self evolution disabled")
 
     base = Path(__file__).parent.parent / "memory" / "reflections"
-    reports = []
+    if not base.exists():
+        return {"reflections": []}
 
+    reports = []
     for month_dir in sorted(base.iterdir(), reverse=True):
         if not month_dir.is_dir():
             continue
         for path in sorted(month_dir.glob("*.json"), reverse=True):
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                reports.append(data)
+                reports.append(json.loads(path.read_text(encoding="utf-8")))
             except Exception:
-                pass
-            if len(reports) >= 20:  # 最多 20 条
+                continue
+            if len(reports) >= 20:
                 break
         if len(reports) >= 20:
             break
-
     return {"reflections": reports}
 
 
 @app.post("/api/reflections/request")
 async def request_reflection():
-    """请求立即生成反思报告"""
-    from core.reflect import SelfReflectLoop, get_self_evolution_enabled
+    from core.reflect import SelfReflectLoop
 
-    if not get_self_evolution_enabled():
-        raise HTTPException(status_code=403, detail="自我进化功能未启用")
+    if not config.self_evolution_enabled:
+        raise HTTPException(status_code=403, detail="self evolution disabled")
 
-    loop = SelfReflectLoop()
-    report = await loop.request_reflection()
-
+    report = await SelfReflectLoop().request_reflection()
     if report:
         return {"success": True, "report_id": report.id}
-    return {"success": False, "message": "无需反思"}
+    return {"success": False, "message": "no reflection generated"}
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

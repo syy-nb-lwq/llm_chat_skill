@@ -334,3 +334,14 @@ async def test_agent_handle_drains_pending_async_on_exception(monkeypatch):
 
     # 异常分支也 emit 了 error,必须被 drain
     assert "error" in received
+
+
+def test_agent_chat_sync_wrapper(monkeypatch):
+    from core.agent import Agent
+
+    async def fake_handle(self, user_input, on_event=None):
+        return f"echo:{user_input}"
+
+    monkeypatch.setattr(Agent, "handle", fake_handle)
+    agent = Agent(session_id="sync")
+    assert agent.chat("hello") == "echo:hello"
