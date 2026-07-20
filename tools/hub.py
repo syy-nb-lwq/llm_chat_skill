@@ -1,5 +1,6 @@
 """Unified tool hub for Python and external tool sources."""
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -21,16 +22,35 @@ class ToolInfo:
 class ToolHub:
     """Registry and executor for tools from multiple sources."""
 
+    # 工具源状态机(M0-06):
+    #   registered  → 已注册但尚未尝试连接
+    #   connecting  → 正在连接(短暂)
+    #   connected   → 连接成功,工具可用
+    #   connect_failed → 连接失败(异常或返回 False),记录最近一次错误
+    #   disconnected → 已主动断开
+    SOURCE_STATE_REGISTERED = "registered"
+    SOURCE_STATE_CONNECTING = "connecting"
+    SOURCE_STATE_CONNECTED = "connected"
+    SOURCE_STATE_FAILED = "connect_failed"
+    SOURCE_STATE_DISCONNECTED = "disconnected"
+
     def __init__(self):
         self.logger = get_logger()
         self._sources: Dict[str, ToolSourceBase] = {}
         self._tools: Dict[str, ToolInfo] = {}
         self._initialized = False
+        # M0-06: 记录每个源最近一次连接状态 + 错误信息
+        self._source_state: Dict[str, str] = {}
+        self._source_last_error: Dict[str, str] = {}
+        self._source_connected_at: Dict[str, float] = {}
 
     def register_source(self, source: ToolSourceBase):
         if source.source.name in self._sources:
             raise ValueError(f"Tool source already exists: {source.source.name}")
         self._sources[source.source.name] = source
+        self._source_state[source.source.name] = self.SOURCE_STATE_REGISTERED
+        self._source_last_error.pop(source.source.name, None)
+        self._source_connected_at.pop(source.source.name, None)
         self.logger.info("ToolHub", f"registered source {source.source.name}")
 
     def unregister_source(self, source_name: str) -> bool:
@@ -48,24 +68,44 @@ class ToolHub:
         if not source:
             raise ValueError(f"Tool source not found: {source_name}")
 
-        ok = await source.connect()
+        # M0-06: 记录 connecting 状态
+        self._source_state[source_name] = self.SOURCE_STATE_CONNECTING
+        self._source_last_error[source_name] = ""
+        try:
+            ok = await source.connect()
+        except Exception as exc:
+            self._source_state[source_name] = self.SOURCE_STATE_FAILED
+            self._source_last_error[source_name] = f"{type(exc).__name__}: {exc}"
+            self.logger.warning("ToolHub", f"connect_source {source_name} raised: {exc}")
+            raise
         if ok:
             await self._load_tools_from_source(source)
+            self._source_state[source_name] = self.SOURCE_STATE_CONNECTED
+            self._source_last_error[source_name] = ""
+            self._source_connected_at[source_name] = time.time()
             self.logger.info("ToolHub", f"connected source {source_name}")
+        else:
+            self._source_state[source_name] = self.SOURCE_STATE_FAILED
+            self._source_last_error[source_name] = "connect() returned False"
+            self.logger.warning("ToolHub", f"connect_source {source_name} returned False")
         return ok
 
     async def disconnect_source(self, source_name: str):
         source = self._sources.get(source_name)
         if source:
             await source.disconnect()
+            self._source_state[source_name] = self.SOURCE_STATE_DISCONNECTED
+            self._source_connected_at.pop(source_name, None)
 
     async def connect_all(self):
         for name, source in list(self._sources.items()):
             if not source.source.enabled:
+                # 未启用的源:状态保持 registered,不算失败
                 continue
             try:
                 await self.connect_source(name)
             except Exception as exc:
+                # connect_source 内部已记录 FAILED + last_error,这里仅补充 warning
                 self.logger.warning("ToolHub", f"failed connecting {name}: {exc}")
         self._initialized = True
 
@@ -219,17 +259,53 @@ class ToolHub:
         return [source.source for source in self._sources.values()]
 
     def get_source_status(self) -> Dict[str, Dict]:
+        """返回每个工具源的状态(M0-06)。
+
+        state 取值:
+          - registered: 已注册,未尝试连接
+          - connecting: 正在连接(通常极短,API 拉取时少见)
+          - connected:  已连接,工具可用
+          - connect_failed: 连接失败(异常或返回 False)
+          - disconnected: 已主动断开
+        """
         return {
             name: {
                 "name": source.source.name,
                 "type": source.source.type.value,
                 "enabled": source.source.enabled,
                 "connected": source.is_connected(),
+                "state": self._source_state.get(name, self.SOURCE_STATE_REGISTERED),
+                "error": self._source_last_error.get(name, "") or None,
+                "connected_at": self._source_connected_at.get(name),
                 "tool_count": len(
                     [tool for tool in self._tools.values() if tool.source_name == name]
                 ),
             }
             for name, source in self._sources.items()
+        }
+
+    def health_summary(self) -> Dict[str, Any]:
+        """汇总健康状态,供 /api/health 暴露(M0-06)。
+
+        返回字段:
+          - total_sources: 已注册的源数量
+          - connected: 已连接数量
+          - failed: 连接失败数量
+          - disconnected: 已断开数量
+          - sources: 每个源的详细状态(同 get_source_status)
+          - has_failures: 是否有任何源处于失败状态
+        """
+        statuses = self.get_source_status()
+        connected = sum(1 for s in statuses.values() if s["state"] == self.SOURCE_STATE_CONNECTED)
+        failed = sum(1 for s in statuses.values() if s["state"] == self.SOURCE_STATE_FAILED)
+        disconnected = sum(1 for s in statuses.values() if s["state"] == self.SOURCE_STATE_DISCONNECTED)
+        return {
+            "total_sources": len(statuses),
+            "connected": connected,
+            "failed": failed,
+            "disconnected": disconnected,
+            "sources": statuses,
+            "has_failures": failed > 0,
         }
 
 

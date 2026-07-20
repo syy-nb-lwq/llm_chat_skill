@@ -8,6 +8,46 @@ from typing import Any, Callable, List, Optional
 from infra.config import config
 
 
+# ===== UTF-8 stdout 包装器 (M0-05) =====
+# 在 Windows 中文/日文等非 UTF-8 系统的默认代码页 (cp936 / cp932 / cp1252) 下,
+# logging.StreamHandler 直接写入 sys.stdout 会把中文切成 mojibake。
+# 用一个"重新编码字节再回写"的包装类,使 stdout 行为统一为 UTF-8。
+
+class _Utf8Stream:
+    """把字符串先编码为 UTF-8,再写入底层二进制流。
+
+    这样 logging.StreamHandler 在写入前调用 self.stream.write(record.msg + "\n"),
+    会经过 UTF-8 编码,避免 GBK/CP932 等窄代码页下中文被替换为 "?"。
+    """
+
+    def __init__(self, raw, encoding: str = "utf-8"):
+        self._raw = raw
+        self._encoding = encoding
+
+    def write(self, s: str) -> int:
+        if isinstance(s, str):
+            data = s.encode(self._encoding, errors="replace")
+        else:
+            data = s
+        return self._raw.write(data)
+
+    def flush(self) -> None:
+        try:
+            self._raw.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        try:
+            return bool(self._raw.isatty())
+        except Exception:
+            return False
+
+    @property
+    def closed(self) -> bool:
+        return getattr(self._raw, "closed", False)
+
+
 # ===== 日志级别映射 =====
 
 _LEVEL_MAP = {
@@ -48,7 +88,8 @@ class SimpleLogger:
                 fmt="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
                 datefmt="%H:%M:%S",
             )
-            stream = logging.StreamHandler(sys.stdout)
+            stream_target = sys.stdout.buffer if hasattr(sys.stdout, "buffer") else sys.stdout
+            stream = logging.StreamHandler(_Utf8Stream(stream_target))
             stream.setFormatter(fmt)
             self._logger.addHandler(stream)
             if config.log_to_file:

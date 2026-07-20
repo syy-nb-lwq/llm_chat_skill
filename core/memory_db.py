@@ -124,11 +124,11 @@ class MemoryDB:
             entry.id,
             entry.type,
             entry.content,
-            json.dumps(entry.metadata),
+            json.dumps(entry.metadata, ensure_ascii=False),
             json.dumps(entry.embedding) if entry.embedding else None,
             entry.created_at,
             entry.updated_at,
-            json.dumps(entry.tags),
+            json.dumps(entry.tags, ensure_ascii=False),
             entry.user_id,
         ))
         
@@ -279,7 +279,7 @@ class MemoryDB:
         
         if metadata:
             updates.append("metadata = ?")
-            params.append(json.dumps(metadata))
+            params.append(json.dumps(metadata, ensure_ascii=False))
         
         updates.append("updated_at = ?")
         params.append(datetime.now().isoformat())

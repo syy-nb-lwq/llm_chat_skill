@@ -139,9 +139,44 @@ async def root():
 
 @app.get("/api/health")
 async def health():
+    """健康检查端点(M0-06:暴露工具源状态)。
+
+    字段:
+      - status: 顶层健康状态("ok" / "degraded")
+      - self_evolution_enabled: 是否开启自演化
+      - tool_sources: 工具源汇总(total_sources / connected / failed / disconnected / has_failures)
+      - sources: 每个源的详细状态(name / type / enabled / connected / state / error / tool_count)
+    """
+    from tools.hub import get_tool_hub
+
+    try:
+        tool_health = get_tool_hub().health_summary()
+    except Exception as exc:
+        # hub 自身异常不应让健康检查失败,降级返回
+        logger.warning("health", f"tool hub health failed: {exc}")
+        tool_health = {
+            "total_sources": 0,
+            "connected": 0,
+            "failed": 0,
+            "disconnected": 0,
+            "sources": {},
+            "has_failures": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    overall = "degraded" if tool_health.get("has_failures") else "ok"
+
     return {
-        "status": "ok",
+        "status": overall,
         "self_evolution_enabled": bool(config.self_evolution_enabled),
+        "tool_sources": {
+            "total_sources": tool_health["total_sources"],
+            "connected": tool_health["connected"],
+            "failed": tool_health["failed"],
+            "disconnected": tool_health["disconnected"],
+            "has_failures": tool_health["has_failures"],
+        },
+        "sources": tool_health["sources"],
     }
 
 

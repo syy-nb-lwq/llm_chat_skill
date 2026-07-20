@@ -15,6 +15,8 @@
 
 - `GET /`
 - `GET /api/health`
+  - 返回 `status` / `self_evolution_enabled` / `tool_sources` 聚合 / `sources` 详情（M0-06）
+  - 工具源失败时顶层 status 降级为 `degraded`
 - `GET /api/features`
 - `POST /api/features/self-evolution`
 

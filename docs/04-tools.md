@@ -103,7 +103,23 @@ LearningAgent.execute_tool()
 
 ## 6. 当前缺陷
 
-- `ToolHub.connect_all()` 对连接失败只做 warning，排障成本偏高
 - 工具源的健康状态暴露有限，没有专门诊断页面
 - `web_search` 的公网依赖较多，稳定性受外部服务影响
 - 没有统一缓存层，重复查询会直接打外部接口
+
+## 7. 启动可观测性（M0-06）
+
+`ToolHub` 维护每个工具源的状态机：
+
+| state | 含义 | 触发 |
+|---|---|---|
+| `registered` | 已注册,未尝试连接 | `register_source()` |
+| `connecting` | 正在连接 | `connect_source()` 入口 |
+| `connected` | 已连接,工具可用 | `source.connect()` 返回 True |
+| `connect_failed` | 连接失败 | 返回 False 或抛异常 |
+| `disconnected` | 已主动断开 | `disconnect_source()` |
+
+- `ToolHub.get_source_status()` 返回每个源的 `state / error / connected_at / tool_count`
+- `ToolHub.health_summary()` 汇总 `total_sources / connected / failed / disconnected / has_failures`
+- `GET /api/health` 暴露 `tool_sources` 聚合字段 + `sources` 详情;顶层 `status` 在 `has_failures=True` 时降级为 `degraded`
+- `connect_all()` 单源失败不影响其他源,失败状态被显式记录

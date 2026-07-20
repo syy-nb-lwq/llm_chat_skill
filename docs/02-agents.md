@@ -145,4 +145,3 @@
 
 - `ManagerAgent` 仍较依赖 prompt + JSON 输出稳定性
 - TeachingSession 状态机已落地，前端对交互式问答体验仍比较基础（M1-08 未完成）
-- M1-10 e2e 教学闭环尚待验证
