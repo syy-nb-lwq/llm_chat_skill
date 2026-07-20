@@ -1,4 +1,13 @@
-"""技能注册表 - 加权打分匹配 / 失效检测 / 版本管理"""
+"""技能注册表 - 加权打分匹配 / 失效检测 / 版本管理(M1-03/M1-04)
+
+设计:
+- 内存中可同时存在同名多版本,key=``name@version`` → Skill
+- ``active_versions`` 字典: ``{name: version_str}`` 显式记录当前激活版本
+- 加载时:若 YAML 内含 ``active: true``,该 version 成为 active;
+         若同 name 多个 active 版本同时存在,记录冲突;
+         若无 active,默认激活 version 字符串最大的一个。
+- match() 只返回 active 版本。
+"""
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -12,9 +21,14 @@ class SkillConflictError(Exception):
 
 
 class SkillRegistry:
-    """技能注册表"""
+    """技能注册表(支持多版本 + active 指针)"""
 
     def __init__(self, skills: Optional[List[Skill]] = None):
+        # name -> { version: Skill }  (允许同名多版本)
+        self._by_version: Dict[str, Dict[str, Skill]] = defaultdict(dict)
+        # name -> active version
+        self._active_versions: Dict[str, str] = {}
+        # 兼容旧 API
         self._by_name: Dict[str, Skill] = {}
         self._by_id: Dict[str, Skill] = {}
         self._pattern_index: Dict[str, List[str]] = defaultdict(list)
@@ -23,42 +37,99 @@ class SkillRegistry:
             for s in skills:
                 self._index(s)
 
+    # ===== 索引 =====
+
     def _index(self, skill: Skill):
-        self._by_name[skill.name] = skill
+        versions = self._by_version[skill.name]
+        versions[skill.version] = skill
+        # 兼容旧 by_name
+        self._by_name[skill.name] = skill  # 最后写入的胜出(通常顺序加载)
         self._by_id[skill.id] = skill
         for p in skill.patterns:
             self._pattern_index[p.lower()].append(skill.name)
+        # 加载时遇到 active=true 标记
+        if getattr(skill, "active", False):
+            self._active_versions[skill.name] = skill.version
 
     def add(self, skill: Skill, persist: bool = False, base_path: Optional[Path] = None) -> None:
-        existing = self._by_name.get(skill.name)
-        if existing and existing.version == skill.version:
+        existing = self._by_version.get(skill.name, {}).get(skill.version)
+        if existing:
             raise SkillConflictError(
                 f"技能 {skill.name} v{skill.version} 已存在,请升级 version 或换 name"
             )
         self._index(skill)
+        # 新加入的版本若声明 active,则切换指针
+        if getattr(skill, "active", False):
+            self._active_versions[skill.name] = skill.version
         self.logger.info("Skills", f"新增技能: {skill.name} v{skill.version}")
         if persist and base_path:
             self._save_yaml(skill, base_path)
 
     def get(self, name: str) -> Optional[Skill]:
-        return self._by_name.get(name)
+        """获取 name 的 active 版本(兼容旧 API)。"""
+        v = self._active_versions.get(name)
+        if v is None:
+            # 没有 active 指针时,返回该 name 下最大 version
+            versions = list(self._by_version.get(name, {}).keys())
+            if not versions:
+                return None
+            v = max(versions)
+        return self._by_version.get(name, {}).get(v)
+
+    def get_version(self, name: str, version: str) -> Optional[Skill]:
+        return self._by_version.get(name, {}).get(version)
+
+    def list_versions(self, name: str) -> List[str]:
+        return list(self._by_version.get(name, {}).keys())
+
+    def set_active(self, name: str, version: str) -> bool:
+        if version not in self._by_version.get(name, {}):
+            return False
+        self._active_versions[name] = version
+        return True
+
+    def active_versions(self) -> Dict[str, str]:
+        return dict(self._active_versions)
 
     def all(self) -> List[Skill]:
-        return list(self._by_name.values())
+        """返回所有 active 版本。"""
+        out: List[Skill] = []
+        for name, versions in self._by_version.items():
+            v = self._active_versions.get(name)
+            if v is None:
+                v = max(versions.keys())
+            s = versions.get(v)
+            if s is not None:
+                out.append(s)
+        return out
+
+    def all_versions(self) -> List[Skill]:
+        """返回所有版本(给管理 UI / 测试用)。"""
+        out: List[Skill] = []
+        for versions in self._by_version.values():
+            out.extend(versions.values())
+        return out
 
     def reload(self, skills: List[Skill]):
+        self._by_version.clear()
         self._by_name.clear()
         self._by_id.clear()
         self._pattern_index.clear()
+        self._active_versions.clear()
         for s in skills:
             self._index(s)
+        # 自动选择每个 name 的最新 version 作 active(若 YAML 未声明)
+        for name, versions in self._by_version.items():
+            if name not in self._active_versions:
+                self._active_versions[name] = max(versions.keys())
 
     def match(self, user_input: str, top_k: int = 3) -> List[Skill]:
         text = user_input.lower().strip()
         if not text:
             return []
         scores: List[Tuple[float, Skill]] = []
-        for skill in self._by_name.values():
+        # 只对 active 版本做匹配
+        for skill in self.all():
             score = self._score(skill, text)
             if score > 0:
                 scores.append((score, skill))
@@ -83,7 +154,7 @@ class SkillRegistry:
 
     def validate(self, tool_names: List[str]) -> List[str]:
         issues: List[str] = []
-        for s in self._by_name.values():
+        for s in self.all():
             issues.extend(self._validate_one(s, tool_names))
         return issues
 

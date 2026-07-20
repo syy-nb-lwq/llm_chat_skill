@@ -64,6 +64,12 @@ class ExecutionContext:
     tasks: List[TaskExecutionSummary]
     latency_ms: float
     user_feedback: Optional[str] = None  # 下一轮用户是否有纠正
+    # 身份 + 多级标识(M0-01)
+    user_id: str = "default"
+    session_id: str = "default"
+    turn_id: str = ""
+    execution_id: str = ""
+    parent_execution_id: Optional[str] = None
 
 
 class ExecutionCritic:
@@ -155,6 +161,10 @@ class ExecutionCritic:
                 diagnosis=diagnosis,
                 suggestion=suggestion,
                 user_corrected=user_corrected,
+                execution_id=context.execution_id or None,
+                user_id=context.user_id,
+                session_id=context.session_id,
+                turn_id=context.turn_id,
             )
             records_generated.append("failure_record")
 
@@ -359,19 +369,45 @@ def build_execution_context(
     tool_results: Dict[str, ToolResult],
     latency_ms: float,
     user_feedback: Optional[str] = None,
+    *,
+    user_id: str = "default",
+    session_id: str = "default",
+    turn_id: str = "",
+    execution_id: str = "",
+    parent_execution_id: Optional[str] = None,
+    task_specs: Optional[Dict[str, Dict]] = None,
 ) -> ExecutionContext:
-    """从工具执行结果构建 ExecutionContext"""
+    """从工具执行结果构建 ExecutionContext
+
+    Args:
+        task_specs: 可选,key=task_id 的 ToolTask 原始规格,用于回填真实
+            tool 名 / retry / timeout_s。优先于 task_id 推断。
+    """
     tasks: List[TaskExecutionSummary] = []
 
     for task_id, result in tool_results.items():
-        # 从 task_id 推断 tool 名(格式: t1, t2...)
-        tool_name = task_id if task_id.startswith("tool:") else f"task_{task_id}"
+        spec = (task_specs or {}).get(task_id, {}) if task_specs else {}
+        tool_name = spec.get("type") or (task_id if task_id.startswith("tool:") else f"task_{task_id}")
+        # meta 中如包含 used_fallback / retry_count / retry / timeout_s 也读取
+        meta = getattr(result, "meta", {}) or {}
+        used_fallback = bool(
+            spec.get("fallback_to")
+            or meta.get("used_fallback")
+        )
+        retry_count = int(
+            spec.get("retry", 0) or 0
+            + (meta.get("attempts", 0) or 0) - (1 if meta.get("attempts") else 0)
+            or 0
+        )
+        # 当 meta 里明确给 attempts,用它表示实际重试次数
+        if meta.get("attempts") is not None:
+            retry_count = max(0, int(meta.get("attempts")) - 1)
         tasks.append(TaskExecutionSummary(
             task_id=task_id,
             tool=tool_name,
             success=result.success,
-            used_fallback=False,  # TODO: 从 meta 中读取
-            retry_count=0,  # TODO: 从 meta 中读取
+            used_fallback=used_fallback,
+            retry_count=retry_count,
             error=result.error or "",
         ))
 
@@ -383,4 +419,9 @@ def build_execution_context(
         tasks=tasks,
         latency_ms=latency_ms,
         user_feedback=user_feedback,
+        user_id=user_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        execution_id=execution_id or trace_id,
+        parent_execution_id=parent_execution_id,
     )

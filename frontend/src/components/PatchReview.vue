@@ -55,6 +55,8 @@
 </template>
 
 <script>
+import { API_BASE } from '../config'  // M0-04
+
 export default {
   name: 'PatchReview',
   data() {
@@ -72,7 +74,7 @@ export default {
     async loadPatches() {
       this.loading = true
       try {
-        const res = await fetch('http://localhost:8000/api/patches')
+        const res = await fetch(`${API_BASE}/api/patches`)
         const data = await res.json()
         this.patches = data.patches || []
       } catch (e) {
@@ -84,7 +86,7 @@ export default {
 
     async loadStats() {
       try {
-        const res = await fetch('http://localhost:8000/api/memory/stats')
+        const res = await fetch(`${API_BASE}/api/memory/stats`)
         const data = await res.json()
         this.stats = data
       } catch (e) {
@@ -94,7 +96,7 @@ export default {
 
     async approve(patchId) {
       try {
-        const res = await fetch(`http://localhost:8000/api/patches/${patchId}/approve`, {
+        const res = await fetch(`${API_BASE}/api/patches/${patchId}/approve`, {
           method: 'POST',
         })
         if (!res.ok) throw new Error(await res.text())
@@ -107,7 +109,7 @@ export default {
 
     async reject(patchId) {
       try {
-        const res = await fetch(`http://localhost:8000/api/patches/${patchId}/reject`, {
+        const res = await fetch(`${API_BASE}/api/patches/${patchId}/reject`, {
           method: 'POST',
         })
         if (!res.ok) throw new Error(await res.text())

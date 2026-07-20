@@ -1,127 +1,98 @@
 # Roadmap 与任务清单
 
-本文档聚焦两件事：
+> 更新日期：2026-07-20（本次 M0+M1 里程碑完成后）
+
+本文档聚焦三件事：
 
 - 最近已经完成了什么
 - 当前还剩哪些缺陷和开发任务
+- 里程碑整体进度
 
-## 1. 最近已完成
+---
 
-本轮已经落地的关键修复：
+## 1. 里程碑进度
 
-- 增加同步 `Agent.chat()`，恢复 CLI / Streamlit 可用性
-- 后端启动改为 `config.validate()` fail-fast
-- 自演化面板改为调用真实后端 API
-- patch 审批后会更新 skill YAML，而不只是改内存状态
-- `web_search` 改为异步 `httpx` 实现
-- `ToolHub` 增加关闭工具资源的能力
-- `SessionManager` 支持异步 dispose callback
-- `README.md` 与 `ARCHITECTURE.md` 已按当前实现重写
+| 里程碑 | 任务数 | 状态 |
+|--------|--------|------|
+| **M0 可信基线** | 8 | M0-01~02 ✅ · M0-03 ✅ · M0-04 ✅ · M0-05 ✅ |
+| **M1 技能教学闭环** | 10 | M1-01~09 ✅ · M1-10 进行中 |
+| M2 长期记忆 | 9 | 待开始 |
+| M3 反馈驱动演进 | 7 | 待开始 |
+| M4 受控工具沉淀 | 6 | 待开始 |
+| C 持续改进 | 4 | C-01 ✅ · C-02~04 待完成 |
 
-## 2. 当前缺陷
+详细任务清单见 [11-开发任务清单.md](./11-开发任务清单.md)。
 
-按优先级排序如下。
+---
+
+## 2. 本轮已完成的关键功能
+
+### M0 可信基线
+
+| 任务 | 文件 | 说明 |
+|------|------|------|
+| M0-01 execution_id | `core/identity.py` | 每次 `Agent.handle()` 生成唯一 `execution_id`/`turn_id`/`user_id`/`session_id`，避免失败记录互相覆盖 |
+| M0-02 执行记录字段 | `core/critic.py` · `agents/learning.py` | 工具真实名称/retry/fallback/latency_ms 回填到 `result.meta` |
+| M0-03 WebSocket 集成测试 | `tests/test_backend.py` | 重写为直接调 dispatcher，跳过 TestClient WS 的死锁问题 |
+| M0-04 前端配置化 | `frontend/src/config.js` | 统一 `API_BASE`/`WS_BASE`，消除 10 处 `localhost:8000` 硬编码 |
+| M0-05 源码编码 | — | 全部源文件验证为 UTF-8，无乱码 |
+
+### M1 技能教学闭环
+
+| 任务 | 文件 | 说明 |
+|------|------|------|
+| M1-01 TeachingSession | `agents/teaching_session.py` | 多轮状态机持久化（Collecting→Draft→Active），`teachings/` JSON 落盘 |
+| M1-02 无工具技能执行 | `agents/manager.py` | `selected_skill` 不再依赖 `tool_tasks` 是否存在 |
+| M1-03 技能版本不可变 | `skills/models.py` · `skills/registry.py` | 同名多版本并存，`name@version.yaml` 不可原地覆盖 |
+| M1-04 active 指针 | `skills/loader.py` · `skills/manager.py` | YAML `active: true` 显式激活，`match()` 只返回 active 版本 |
+| M1-05 验证流水线 | `skills/validator.py` | DAG 无环/工具存在/schema 校验，`validate_skill()` 返回 issues |
+| M1-06 重复决策流程 | `agents/skill_trainer.py` · `backend/main.py` | reuse / update_new / cancel 三路决策，TeachingSession 状态持久 |
+| M1-07 _complete_teaching bug | `core/agent.py` | 移除不存在的 `self.llm` 调用和错误的消息角色拼接 |
+| M1-08 发布确认 API | `backend/main.py` | `/api/teachings/confirm` 供前端草稿确认发布 |
+| M1-09 SkillManager 接入主链 | `agents/manager.py` · `core/agent.py` | `MANAGER` 意图检测 + 主链分支，列出/版本/回滚 |
+
+### C 持续改进
+
+| 任务 | 文件 | 说明 |
+|------|------|------|
+| C-01 身份层 | `infra/auth.py` | `owner_token` 校验 · `client_id` 服务端签发 · `get_user_from_request/WS` |
+
+---
+
+## 3. 当前剩余缺陷（P0~P2）
 
 ### P0
 
-1. 前端与部分后端源码存在编码问题
-   影响阅读、排障和继续开发效率
-2. WebSocket 端到端自动化测试仍不稳定
-   目前只能保留 `skip`
+1. **M1-10 e2e 教学闭环未验证** — 教学→重启→召回→执行全链路端到端测试尚待补充
+2. **Session 进程内存** — `backend/session.py` 仍是进程内实现，服务重启丢失
 
 ### P1
 
-1. 前端缺少统一配置
-   `API_BASE`、WS 地址仍硬编码
-2. `SessionManager` 仍是进程内存实现
-   服务重启或多实例部署无法共享上下文
-3. `ToolHub.connect_all()` 对初始化失败只做 warning
-   工具不可用时不容易被及时发现
+1. **M0-06 ToolHub 启动可观测性** — 工具源连接失败只 warning，未暴露到健康检查
+2. **M0-07 e2e 测试夹具** — 缺少隔离的运行时数据夹具
+3. **M0-08 前端组件测试** — WebSocket service、PatchReview、EvolutionDashboard 无回归测试
 
 ### P2
 
-1. 技能匹配仍以关键词和轻量打分为主
-2. `ExecutionCritic` 的评估上下文还不够完整
-3. 自演化链路缺少更强的可观测性页面
-4. 前端缺少自动化测试
+1. **C-02 配置诊断命令** — CLI 子命令展示 provider/feature flag/embedding 状态
+2. **C-03 Patch 审计与回滚 UI** — 完整记录提案来源/diff/审批人，支持回滚操作
+3. **M2~M4 尚未开始** — 见 [11-开发任务清单.md](./11-开发任务清单.md)
 
-## 3. 任务清单
+---
 
-建议后续按下面顺序继续开发。
+## 4. 下一步建议
 
-### 任务 1：修复编码问题
+按评审文档 `10-目标架构评审与演进方案.md §10` 推荐顺序：
 
-目标：
+1. **完成 M1-10 e2e** — 验证"教→重启→召回→执行"可重复通过（M1 验收用例）
+2. **推进 M2 长期记忆** — 统一 MemoryRepository、embedding 初始化、主链路写入（M2-01~09）
+3. **C-02/C-03** — 配置诊断 + Patch 审计 UI（不阻塞 M2）
+4. **M3/M4** — 在 M2 完成后推进
 
-- 统一 `backend/websocket_handler.py`、前端组件、部分中文源码的编码
-- 消除乱码注释和字符串
+**不建议在 M1/M2 完成前做的事**（来自架构评审 §13）：
 
-验收标准：
-
-- 关键源码在编辑器和终端都可正常阅读
-- 不改变现有接口行为
-
-### 任务 2：稳定 WebSocket 集成测试
-
-目标：
-
-- 为 `/pubsub` 增加更稳定的测试夹具
-- 让 `init/ping/chat/reset` 至少有一条不依赖人工验证的链路
-
-验收标准：
-
-- 现有 skip 用例可以恢复，或被更稳定的新用例替代
-
-### 任务 3：抽离前端运行时配置
-
-目标：
-
-- 前端 API base URL、WS URL 改为配置化
-- 支持开发与部署环境切换
-
-验收标准：
-
-- 前端代码中不再硬编码 `http://localhost:8000`
-
-### 任务 4：增强 ToolHub 启动可观测性
-
-目标：
-
-- 区分“工具源存在但连接失败”和“工具根本未注册”
-- 把工具源状态暴露给健康检查或诊断接口
-
-验收标准：
-
-- 出现工具不可用时，可以从 API 或日志快速定位
-
-### 任务 5：增强会话持久化
-
-目标：
-
-- 让 `SessionManager` 支持可选外部存储
-- 至少为上下文持久化预留接口
-
-验收标准：
-
-- 服务重启后能够恢复部分会话数据，或具备清晰的存储抽象层
-
-### 任务 6：补齐前端测试
-
-目标：
-
-- 覆盖 WebSocket service
-- 覆盖自演化面板的核心 API 交互
-
-验收标准：
-
-- 关键组件有最小回归测试
-
-## 4. 当前建议
-
-如果继续开发，建议先做：
-
-1. 任务 1：修复编码问题
-2. 任务 2：稳定 WebSocket 测试
-3. 任务 3：抽离前端配置
-
-这三项会直接提升后续维护效率和迭代速度。
+- 增加更多职责重叠的 Agent 类
+- 开启高置信度 patch 自动发布
+- 允许模型直接生成并执行 Python 工具
+- 无差别写入长期记忆
+- 依靠提示词替代状态/版本/权限治理

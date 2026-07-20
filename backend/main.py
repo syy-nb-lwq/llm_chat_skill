@@ -226,6 +226,80 @@ async def reload_skills():
     return {"reloaded": True, "count": len(store.list_all())}
 
 
+# ===== M1-06 / M1-08: TeachingSession API =====
+
+@app.get("/api/teachings")
+async def list_teachings(user_id: str = "default", session_id: str = "default"):
+    """列出当前 session 上的活跃教学会话(用于重复技能决策 UI)。"""
+    from agents.teaching_session import get_teaching_store
+    store = get_teaching_store()
+    ts = store.find_active_for(user_id, session_id)
+    if not ts:
+        return {"active": None}
+    return {
+        "active": {
+            "teaching_session_id": ts.teaching_session_id,
+            "status": ts.status,
+            "missing_fields": ts.missing_fields,
+            "current_question": ts.current_question,
+            "duplicate_of": ts.duplicate_of,
+            "user_choice": ts.user_choice,
+            "draft": ts.draft_skill,
+        }
+    }
+
+
+@app.post("/api/teachings/cancel")
+async def cancel_teaching(user_id: str = "default", session_id: str = "default"):
+    from agents.skill_trainer import SkillTrainer
+    t = SkillTrainer()
+    ok = t.cancel(user_id, session_id)
+    return {"cancelled": ok}
+
+
+@app.post("/api/teachings/choose")
+async def choose_teaching_decision(
+    choice: str,
+    user_id: str = "default",
+    session_id: str = "default",
+):
+    """处理用户在重复技能上的决策:reuse / update_new / cancel。"""
+    from agents.teaching_session import get_teaching_store, TeachingStatus
+    store = get_teaching_store()
+    ts = store.find_active_for(user_id, session_id)
+    if not ts:
+        return {"ok": False, "error": "no active teaching"}
+    ts.user_choice = choice
+    if choice == "cancel":
+        ts.status = TeachingStatus.CANCELLED
+    elif choice == "reuse":
+        ts.status = TeachingStatus.ACTIVE
+    elif choice == "update_new":
+        # 标记后续 start_or_continue 走新版本流程
+        ts.status = TeachingStatus.COLLECTING
+    store.save(ts)
+    return {"ok": True, "status": ts.status, "user_choice": ts.user_choice}
+
+
+@app.post("/api/teachings/confirm")
+async def confirm_teaching(user_id: str = "default", session_id: str = "default"):
+    """用户在草稿 UI 上点确认发布时调用。"""
+    from agents.skill_trainer import SkillTrainer
+    t = SkillTrainer()
+    ok, msg, skill = t.confirm_and_publish(user_id, session_id)
+    if not ok:
+        return {"ok": False, "error": msg}
+    return {
+        "ok": True,
+        "message": msg,
+        "skill": {
+            "name": skill.name,
+            "version": skill.version,
+            "capability": skill.capability,
+        } if skill else None,
+    }
+
+
 @app.get("/api/tools")
 async def list_tools():
     from agents.learning import LearningAgent

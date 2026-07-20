@@ -73,6 +73,8 @@
 </template>
 
 <script>
+import { API_BASE } from '../config'  // M0-04
+
 export default {
   name: 'SkillManager',
   props: {
@@ -116,8 +118,8 @@ export default {
       if (!confirm(`确定删除 ${label} ?`)) return
       try {
         const url = version
-          ? `http://localhost:8000/api/skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
-          : `http://localhost:8000/api/skills/${encodeURIComponent(name)}`
+          ? `${API_BASE}/api/skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+          : `${API_BASE}/api/skills/${encodeURIComponent(name)}`
         const r = await fetch(url, { method: 'DELETE' })
         if (!r.ok) throw new Error(await r.text())
         this.reload()

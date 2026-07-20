@@ -78,4 +78,5 @@ class Skill:
             "author": self.author,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "active": bool(getattr(self, "active", False)),
         }

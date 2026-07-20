@@ -65,14 +65,16 @@
 
 文件：`skills/registry.py`
 
-`SkillRegistry` 当前职责：
+`SkillRegistry` 当前职责（M1-03/M1-04）：
 
-- 维护 `name -> skill`
-- 维护 `id -> skill`
+- 维护 `name -> {version -> Skill}`（同名多版本并存）
+- 维护 `active_versions[name] = version` 显式指针
+- `match()` 只返回 active 版本
 - 基于 `patterns`、`capability`、`method` 做轻量匹配
-- 校验 step 工具引用和依赖关系
+- YAML 含 `active: true` 时自动切换指针
+- 冲突检测：同名同版本不可重复注册
 
-当前不是语义检索主导，而是规则和关键词打分主导。
+版本不可变原则：更新必须生成新版本，切换 active 指针后才能生效。
 
 ## 4. 存储外观层
 
@@ -121,6 +123,7 @@
 ## 7. 当前缺陷
 
 - `SkillRegistry.match()` 仍是轻量打分，不适合复杂技能路由
+- 版本治理（冲突检测/迁移工具）偏弱，M1-03/M1-04 仅解决"不可变注册"问题
 - `update_skill()` 目前只做浅层字段覆盖，不支持精细修改 step
-- 版本治理仍偏弱，没有冲突解决和迁移工具
 - Markdown 技能格式仍是兼容模式，不建议继续扩展
+- M1-10 e2e 教学闭环验证尚未完成

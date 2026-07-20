@@ -35,8 +35,15 @@ class SkillStore:
         self._registry.reload(skills)
         self._skills = self._registry._by_name
 
-    def add(self, skill: Skill) -> str:
+    def add(self, skill: Skill, *, set_active: bool = False) -> str:
+        """新增一个技能版本。
+
+        Args:
+            set_active: 若 True,把这个版本切到 active 指针(M1-04)。
+        """
         self._registry.add(skill)
+        if set_active:
+            self._registry.set_active(skill.name, skill.version)
         self._skills = self._registry._by_name
         return skill.id
 
@@ -48,6 +55,15 @@ class SkillStore:
 
     def list_all(self) -> List[Skill]:
         return self._registry.all()
+
+    def list_tool_names(self) -> List[str]:
+        """当前 ToolHub 中可用的工具名(给 Skill 校验流水线用)。"""
+        try:
+            from tools.hub import get_tool_hub
+
+            return list(get_tool_hub().names() or [])
+        except Exception:
+            return []
 
     def delete(self, skill_id: str) -> bool:
         skill = self._registry._by_id.get(skill_id)

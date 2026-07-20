@@ -112,7 +112,7 @@ class SkillLoader:
                 timeout_s=int(s.get("timeout_s", 30) or 30),
             ))
 
-        return Skill(
+        skill = Skill(
             name=data.get("name", ""),
             version=data.get("version", "1.0.0"),
             capability=data.get("capability", ""),
@@ -126,3 +126,6 @@ class SkillLoader:
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
+        # M1-04: 把 YAML 的 active 标记挂到 skill 上,Registry 加载时识别
+        setattr(skill, "active", bool(data.get("active", False)))
+        return skill

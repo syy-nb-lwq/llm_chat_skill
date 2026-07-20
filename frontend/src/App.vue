@@ -53,6 +53,7 @@
 
 <script>
 import { wsService } from './websocket'
+import { API_BASE } from './config'  // M0-04
 import ToolList from './components/ToolList.vue'
 import SkillList from './components/SkillList.vue'
 import SkillManager from './components/SkillManager.vue'
@@ -92,8 +93,8 @@ export default {
       this.loading = true
       try {
         const [toolsRes, skillsRes] = await Promise.all([
-          fetch('http://localhost:8000/api/tools'),
-          fetch('http://localhost:8000/api/skills')
+          fetch(`${API_BASE}/api/tools`),
+          fetch(`${API_BASE}/api/skills`)
         ])
         const toolsData = await toolsRes.json()
         const skillsData = await skillsRes.json()

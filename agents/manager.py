@@ -44,6 +44,7 @@ class IntentType:
     SKILL = "skill"           # 技能需求:需要执行工具完成任务
     TEACH = "teach"           # 教导:用户教 Agent 新技能
     RETRY = "retry"          # 重试:重新执行上次的任务
+    MANAGER = "manager"       # 技能管理:列出/查看/版本/回滚(M1-09)
     UNKNOWN = "unknown"        # 未知:需要进一步分析
 
 
@@ -53,6 +54,18 @@ _TEACHING_KEYWORDS = [
     "教你", "应该", "步骤是", "正确做法", "这么做",
     "遇到", "情况", "要", "才能",
 ]
+
+# ===== 技能管理意图关键词(M1-09) =====
+_MANAGEMENT_KEYWORDS = [
+    "列出", "查看", "有哪些技能", "技能列表", "版本", "回滚",
+    "禁用", "启用", "切换版本", "技能详情", "skill list", "skill version",
+    "skills", "show me skills", "what skills",
+]
+
+
+def _is_management_intent(text: str) -> bool:
+    t = text.strip().lower()
+    return any(kw in t for kw in _MANAGEMENT_KEYWORDS)
 
 
 class ManagerAgent(BaseAgent):
@@ -186,7 +199,18 @@ class ManagerAgent(BaseAgent):
                 selected_skill=None,
                 tool_tasks=[],
             )
-        
+
+        # 技能管理意图检测(M1-09)
+        if _is_management_intent(user_input):
+            self.logger.info("Manager", "技能管理意图检测")
+            return PlanResult(
+                intent=IntentType.MANAGER,
+                intent_detail="技能管理操作",
+                selected_skill=None,
+                tool_tasks=[],
+                need_llm=False,
+            )
+
         # 重试类 → 标记并继续
         if intent_result.category == IntentCategory.RETRY:
             self.logger.info("Manager", "重试检测: 检测到重试意图")
@@ -284,7 +308,17 @@ class ManagerAgent(BaseAgent):
                 tool_tasks=tool_tasks,
             )
 
-        # 没有工具,但意图明确
+        # M1-02: 即使没有 tool_tasks,只要选中了 selected_skill
+        # (纯方法论技能)就允许以 SKILL 计划返回。
+        if selected_skill is not None:
+            return PlanResult(
+                intent=IntentType.SKILL,
+                intent_detail=intent_detail,
+                selected_skill=selected_skill,
+                tool_tasks=[],
+            )
+
+        # 没有工具,也没有技能,但意图明确 → 闲聊
         if self._is_simple_intent(intent_detail):
             return PlanResult(
                 intent=IntentType.CHITCHAT,

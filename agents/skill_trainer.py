@@ -1,11 +1,29 @@
-"""SkillTrainer - 教导意图识别 + 抽取为 Skill + 沉淀"""
+"""SkillTrainer - 教导意图识别 + 抽取为 Skill + 沉淀(支持多轮状态,M1-01/M1-06)
+
+变更:
+- 引入 TeachingSession 状态机,可在多轮对话中补全 name/method/capability
+- 不再调用 Agent 上不存在的 self.llm(M1-07)
+- 重复技能决策:reuse / update_new / cancel
+- 草稿生成走 validate 流水线(M1-05)
+"""
+from __future__ import annotations
+
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.agent_base import BaseAgent
 from skills.manager import get_skill_store, SkillStore
 from skills.models import Skill, SkillStep
+from skills.validator import validate_skill
+
+from agents.teaching_session import (
+    REQUIRED_FIELDS,
+    TeachingSession,
+    TeachingSessionStore,
+    TeachingStatus,
+    get_teaching_store,
+)
 
 
 _TEACHING_KEYWORDS = [
@@ -55,16 +73,19 @@ CONFIRM_SCHEMA = {
 
 
 class SkillTrainer(BaseAgent):
-    """教导闭环 Agent"""
+    """教导闭环 Agent(支持多轮)"""
 
     name = "SkillTrainer"
 
-    def __init__(self):
+    def __init__(self, teaching_store: Optional[TeachingSessionStore] = None):
         super().__init__()
         self.skill_store: SkillStore = get_skill_store()
+        self.teaching_store = teaching_store or get_teaching_store()
 
     def system_prompt(self) -> str:
         return """你是一个技能训练助手,负责从用户的教导中抽取技能规格。"""
+
+    # ===== 入口 =====
 
     def _heuristic_teaching(self, text: str) -> bool:
         return any(kw in text for kw in _TEACHING_KEYWORDS)
@@ -83,7 +104,227 @@ class SkillTrainer(BaseAgent):
             self.logger.warning("SkillTrainer", f"LLM 确认失败: {e},降级为启发式结果")
             return self._heuristic_teaching(user_input), 0.5, "LLM 确认失败"
 
+    async def start_or_continue(
+        self,
+        user_input: str,
+        user_id: str = "default",
+        session_id: str = "default",
+    ) -> TeachingSession:
+        """处理一轮用户输入,推进教学状态机。
+
+        返回最新的 TeachingSession 状态(已保存)。
+        """
+        # 1) 找当前活跃教学会话
+        ts = self.teaching_store.find_active_for(user_id, session_id)
+        if ts is None:
+            ts = TeachingSession.new(user_id=user_id, session_id=session_id)
+
+        # 2) 记录本轮证据
+        ts.evidence_turns.append({"role": "user", "content": user_input})
+        ts.touch()
+
+        # 3) 处理重复技能决策(用户输入以特殊前缀选择)
+        choice = self._parse_user_choice(user_input)
+        if choice and ts.duplicate_of:
+            ts.user_choice = choice
+            if choice == "cancel":
+                ts.status = TeachingStatus.CANCELLED
+                self.teaching_store.save(ts)
+                return ts
+            if choice == "reuse":
+                # 直接复用已有技能:状态设为 active 但不再创建新版本
+                ts.status = TeachingStatus.ACTIVE
+                self.teaching_store.save(ts)
+                return ts
+            # update_new: 继续走到 draft 流程,使用新版本
+            ts.user_choice = "update_new"
+
+        # 4) 用 LLM 抽取增量字段
+        try:
+            extracted = await self.extract_skill(user_input)
+        except Exception as e:
+            self.logger.error("SkillTrainer", f"抽取失败: {e}")
+            extracted = None
+
+        if extracted:
+            # merge 到 partial_skill(只覆盖 LLM 真实给出的字段)
+            for f in ("name", "method", "capability"):
+                v = getattr(extracted, f, "")
+                if v and (f not in ts.partial_skill or not ts.partial_skill.get(f)):
+                    ts.partial_skill[f] = v
+            for f in ("patterns", "tags"):
+                vals = getattr(extracted, f, None) or []
+                if vals:
+                    merged = list(ts.partial_skill.get(f, []) or [])
+                    for v in vals:
+                        if v not in merged:
+                            merged.append(v)
+                    ts.partial_skill[f] = merged
+            if extracted.steps:
+                ts.partial_skill.setdefault("steps", [])
+                existing_ids = {s.get("id") for s in ts.partial_skill["steps"]}
+                for s in extracted.steps:
+                    if s.id in existing_ids:
+                        continue
+                    ts.partial_skill["steps"].append({
+                        "id": s.id,
+                        "name": s.name,
+                        "description": s.description,
+                        "tool": s.tool,
+                        "params": s.params,
+                        "depends_on": s.depends_on,
+                    })
+                    existing_ids.add(s.id)
+
+        # 5) 算 missing_fields
+        ts.missing_fields = [
+            f for f in REQUIRED_FIELDS
+            if not (ts.partial_skill.get(f) or "").strip()
+        ]
+
+        # 6) 检测重复
+        name = ts.partial_skill.get("name") or ""
+        if name and not ts.duplicate_of:
+            existing = self.skill_store.get_by_name(name)
+            if existing:
+                ts.duplicate_of = existing.name
+
+        # 7) 决定状态
+        if ts.missing_fields:
+            ts.status = TeachingStatus.COLLECTING
+            ts.current_question = self._next_question(ts)
+        else:
+            # 信息完整,生成草稿并校验
+            ts.draft_skill = dict(ts.partial_skill)
+            skill_obj = self._build_skill_obj(ts)
+            issues = validate_skill(skill_obj, tool_names=self.skill_store.list_tool_names())
+            if issues:
+                ts.status = TeachingStatus.COLLECTING
+                ts.current_question = "草稿校验未通过:\n" + "\n".join(f"- {i}" for i in issues)
+            else:
+                ts.status = TeachingStatus.DRAFT
+                ts.current_question = self._render_draft(ts)
+
+        self.teaching_store.save(ts)
+        return ts
+
+    def cancel(self, user_id: str, session_id: str) -> bool:
+        ts = self.teaching_store.find_active_for(user_id, session_id)
+        if not ts:
+            return False
+        ts.status = TeachingStatus.CANCELLED
+        self.teaching_store.save(ts)
+        return True
+
+    def confirm_and_publish(self, user_id: str, session_id: str) -> Tuple[bool, str, Optional[Skill]]:
+        """用户在草稿阶段确认 → 校验 → 写盘 → 注册。"""
+        ts = self.teaching_store.find_active_for(user_id, session_id)
+        if not ts or ts.status not in (TeachingStatus.DRAFT,):
+            return False, "当前没有可发布的草稿", None
+        if not ts.draft_skill:
+            return False, "草稿为空", None
+
+        skill = self._build_skill_obj(ts)
+        # 决定版本:
+        # - 如果是 update_new 模式且同名,版本号 +0.0.1
+        if ts.duplicate_of and ts.user_choice == "update_new":
+            existing = self.skill_store.get_by_name(ts.duplicate_of)
+            skill.version = self._bump_version(existing.version if existing else "1.0.0")
+        else:
+            existing = self.skill_store.get_by_name(skill.name)
+            if existing and existing.version == skill.version:
+                skill.version = self._bump_version(existing.version)
+
+        issues = validate_skill(skill, tool_names=self.skill_store.list_tool_names())
+        if issues:
+            return False, "发布前校验失败:\n" + "\n".join(f"- {i}" for i in issues), None
+
+        ok, path_or_err = self.persist(skill)
+        if not ok:
+            return False, f"保存失败: {path_or_err}", None
+
+        ts.status = TeachingStatus.ACTIVE
+        self.teaching_store.save(ts)
+        msg = f"已发布技能: **{skill.name}** v{skill.version}"
+        return True, msg, skill
+
+    # ===== helpers =====
+
+    def _parse_user_choice(self, user_input: str) -> Optional[str]:
+        u = user_input.strip().lower()
+        if u in ("1", "reuse", "复用", "用现有的", "用已有"):
+            return "reuse"
+        if u in ("2", "update_new", "新建版本", "创建新版本", "新版本"):
+            return "update_new"
+        if u in ("3", "cancel", "取消"):
+            return "cancel"
+        return None
+
+    def _next_question(self, ts: TeachingSession) -> str:
+        f = ts.missing_fields[0]
+        prompts = {
+            "name": "请给这个技能起个名字(英文短名或简短中文),例如 `DailyReport`。",
+            "method": "请描述这个技能的处理方法论/步骤(如果分步,可用 1) 2) 3)。",
+            "capability": "请用一句话描述这个技能能做什么(供后续检索匹配)。",
+        }
+        return prompts.get(f, f"请补充字段: {f}")
+
+    def _render_draft(self, ts: TeachingSession) -> str:
+        d = ts.draft_skill or {}
+        lines = [
+            "已收集到完整信息,草稿如下:",
+            f"**名称**: {d.get('name','')}",
+            f"**能力**: {d.get('capability','')}",
+            f"**方法**: {(d.get('method','') or '')[:200]}",
+            f"**关键词**: {', '.join(d.get('patterns', []) or []) or '(无)'}",
+            f"**步骤**: {len(d.get('steps', []) or [])} 条",
+            "",
+            "请确认(回复「确认」/「确认发布」)或继续补充修改。",
+        ]
+        return "\n".join(lines)
+
+    def _build_skill_obj(self, ts: TeachingSession) -> Skill:
+        d = ts.draft_skill or {}
+        steps_raw = d.get("steps", []) or []
+        steps = [
+            SkillStep(
+                id=s.get("id") or f"step{i+1}",
+                name=s.get("name", ""),
+                description=s.get("description", ""),
+                tool=s.get("tool"),
+                params=s.get("params", {}) or {},
+                depends_on=s.get("depends_on", []) or [],
+            )
+            for i, s in enumerate(steps_raw)
+        ]
+        return Skill(
+            name=d.get("name", "").strip(),
+            version=d.get("version") or "1.0.0",
+            capability=d.get("capability", "").strip(),
+            method=d.get("method", "").strip(),
+            patterns=d.get("patterns", []) or [],
+            tags=d.get("tags", []) or [],
+            steps=steps,
+            examples=[t["content"][:200] for t in ts.evidence_turns if t.get("role") == "user"][:3],
+            source="taught",
+            author=ts.user_id,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    def _bump_version(self, version: str) -> str:
+        try:
+            parts = version.split(".")
+            major = int(parts[0])
+            minor = int(parts[1]) if len(parts) > 1 else 0
+            patch = int(parts[2]) if len(parts) > 2 else 0
+            return f"{major}.{minor}.{patch + 1}"
+        except Exception:
+            return "1.0.1"
+
+    # ===== 兼容旧 API =====
+
     async def extract_skill(self, user_input: str) -> Optional[Skill]:
+        """从单轮输入抽取一个 Skill(不写盘,供 start_or_continue 内部使用)。"""
         prompt = f"""从教导内容中抽取技能规格:
 教导内容: {user_input}
 
@@ -105,26 +346,10 @@ class SkillTrainer(BaseAgent):
                 tool=s.get("tool"),
                 params=s.get("params_hint", {}) or s.get("params", {}) or {},
                 depends_on=s.get("depends_on", []) or [],
-                retry=int(s.get("retry", 0) or 0),
-                timeout_s=int(s.get("timeout_s", 30) or 30),
             ))
-
-        existing = self.skill_store.get_by_name(obj["name"])
-        if existing:
-            try:
-                parts = existing.version.split(".")
-                major = int(parts[0])
-                minor = int(parts[1]) if len(parts) > 1 else 0
-                patch = int(parts[2]) if len(parts) > 2 else 0
-                version = f"{major}.{minor}.{patch + 1}"
-            except (ValueError, IndexError, AttributeError):
-                version = "1.1.0"
-        else:
-            version = "1.0.0"
-
         return Skill(
-            name=obj["name"],
-            version=version,
+            name=obj.get("name", "").strip(),
+            version="1.0.0",
             capability=obj.get("capability", ""),
             method=obj.get("method", ""),
             patterns=obj.get("patterns", []) or [],
@@ -133,7 +358,6 @@ class SkillTrainer(BaseAgent):
             examples=[user_input[:200]],
             source="taught",
             author="user",
-            updated_at=datetime.now().isoformat(),
         )
 
     def persist(self, skill: Skill) -> Tuple[bool, str]:
@@ -147,9 +371,11 @@ class SkillTrainer(BaseAgent):
             path = target_dir / fname
 
             data = skill.to_dict()
+            data["active"] = True  # 新发布的版本默认就是 active
             path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-            self.skill_store.add(skill)
+            self.skill_store.add(skill, set_active=True)
+            self.skill_store.reload()
 
             self.logger.info("SkillTrainer", f"沉淀技能: {skill.name} v{skill.version} → {path.name}")
             return True, str(path)
@@ -157,104 +383,23 @@ class SkillTrainer(BaseAgent):
             self.logger.error("SkillTrainer", f"持久化失败: {e}")
             return False, str(e)
 
-    async def teach(self, user_input: str) -> Tuple[bool, str, Optional[Skill]]:
-        is_teach, conf, reason = await self.detect(user_input)
-        if not is_teach:
-            return False, f"未识别为教导意图({reason})", None
+    async def teach(self, user_input: str, user_id: str = "default",
+                    session_id: str = "default") -> Tuple[bool, str, Optional[Skill]]:
+        """兼容旧单轮 teach()。
 
-        # 先尝试从输入中抽取技能信息
-        skill = await self.extract_skill(user_input)
-        
-        # 检查是否已有相似技能（基于 capability 相似度）
-        if skill:
-            similar = await self._find_similar_skill(skill)
-            if similar:
-                # 询问用户是要更新还是创建新技能
-                msg = (f"技能库中已有相似技能:\n"
-                       f"**{similar.name}** (v{similar.version})\n"
-                       f"能力: {similar.capability}\n\n"
-                       f"你要:\n"
-                       f"1. 更新现有技能\n"
-                       f"2. 创建新技能\n"
-                       f"3. 取消")
-                return False, msg, None
-        
-        # 如果信息不完整，询问用户补充
-        if not skill or not self._is_skill_complete(skill):
-            # 构建交互式教导问题
-            questions = self._generate_teach_questions(user_input, skill)
-            if questions:
-                # 返回交互式问题，让 Agent 询问用户
-                return False, questions, None
-
-        if not skill:
-            return False, "技能抽取失败", None
-
-        ok, path_or_err = self.persist(skill)
-        if not ok:
-            return False, f"保存失败: {path_or_err}", None
-
-        msg = f"已记住新技能: **{skill.name}** v{skill.version}"
-        return True, msg, skill
-
-    def _is_skill_complete(self, skill: Skill) -> bool:
-        """检查技能信息是否完整"""
-        if not skill.name or len(skill.name) < 2:
-            return False
-        if not skill.capability or len(skill.capability) < 5:
-            return False
-        return True
-
-    def _generate_teach_questions(self, user_input: str, partial_skill: Optional[Skill]) -> str:
-        """生成交互式教导问题"""
-        questions = []
-        
-        if not partial_skill or not partial_skill.name:
-            questions.append("这个技能叫什么名字？（用简短的英文或中文命名）")
-        elif not partial_skill.capability:
-            questions.append(f"【{partial_skill.name}】是用来做什么的？")
-        elif not partial_skill.steps:
-            questions.append(f"【{partial_skill.name}】需要哪些步骤？请描述一下处理流程。")
-        else:
-            questions.append("这个技能还有什么需要注意的地方吗？直接告诉我，或者输入'没有了'结束。")
-        
-        return "请帮我完善这个技能的信息：\n" + "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
-
-    async def _find_similar_skill(self, skill: Skill) -> Optional[Skill]:
-        """查找相似的技能（使用 LLM 判断语义相似度）"""
-        if not skill.capability:
-            return None
-        
-        all_skills = self.skill_store.list_all()
-        for existing in all_skills:
-            if not existing.capability:
-                continue
-            # 使用 LLM 判断是否相似
-            try:
-                is_similar = await self._is_capability_similar(
-                    skill.capability, existing.capability
-                )
-                if is_similar:
-                    return existing
-            except Exception:
-                continue
-        
-        return None
-    
-    async def _is_capability_similar(self, cap1: str, cap2: str) -> bool:
-        """使用 LLM 判断两个 capability 是否相似"""
-        prompt = f"""判断以下两个技能描述是否描述了相同或相似的任务:
-
-技能1: {cap1}
-技能2: {cap2}
-
-如果它们处理的是相同或非常相似的任务类型(如都是日报处理、都是天气查询等),回答 "是"。
-如果它们处理的是不同类型的任务,回答 "否"。
-
-只回答 "是" 或 "否":"""
-
-        try:
-            response = await self.think(prompt)
-            return "是" in response.strip()[:10]
-        except Exception:
-            return False
+        - 走 TeachingSession 状态机
+        - 若抽取信息完整且无重复 → 自动 confirm_and_publish
+        - 否则返回 mid-state
+        """
+        ts = await self.start_or_continue(
+            user_input, user_id=user_id, session_id=session_id,
+        )
+        if ts.status == TeachingStatus.DRAFT:
+            # 单轮已完整 → 自动确认发布
+            ok, msg, skill = self.confirm_and_publish(user_id, session_id)
+            if ok and skill is not None:
+                return True, msg, skill
+            return False, msg, None
+        if ts.status == TeachingStatus.ACTIVE:
+            return True, ts.current_question or "已完成", None
+        return False, ts.current_question, None

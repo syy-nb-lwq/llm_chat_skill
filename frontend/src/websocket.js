@@ -4,6 +4,8 @@
 // 接收：{"response": {"result": ..., "result_type": ..., "call_id": "..."}}
 //       {"request": {"method": "notify", ...}} (服务端推送)
 
+import { WS_BASE } from './config'  // M0-04
+
 class WsService {
   constructor() {
     this.ws = null
@@ -52,7 +54,7 @@ class WsService {
     this._isManualClose = false
 
     try {
-      this.ws = new WebSocket('ws://localhost:8000/pubsub')
+      this.ws = new WebSocket(`${WS_BASE}/pubsub`)
 
       this.ws.onopen = async () => {
         console.log('[WS] Connected!')

@@ -79,7 +79,7 @@
 </template>
 
 <script>
-const API_BASE = 'http://localhost:8000'
+import { API_BASE } from '../config'  // M0-04
 
 export default {
   name: 'EvolutionDashboard',

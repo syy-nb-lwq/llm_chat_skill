@@ -123,21 +123,26 @@
 
 职责：
 
-- 识别用户是否在“教”系统
+- 识别用户是否在"教"系统
 - 从教学文本中提取技能结构
 - 把技能持久化到 `skills/user/`
 
-教学流程：
+教学流程（M1-01 已重构为状态机）：
 
 1. 启发式判断是否为教学
-2. 需要时用 LLM 做二次确认
-3. 用 LLM 抽取 `Skill`
-4. 检查是否已有相似技能
-5. 不完整时返回交互式补充问题
-6. 写入 YAML 文件并刷新技能库
+2. 用 LLM 抽取 `Skill` 增量字段
+3. TeachingSession 状态机推进（Collecting → Draft → Active）
+4. 检测相似/重复技能 → 用户选择 reuse/update_new/cancel
+5. 草稿经 `validate_skill()` 校验后发布
+
+关键模块：
+
+- `TeachingSession` 状态机 → `agents/teaching_session.py`
+- 验证流水线 → `skills/validator.py`
+- 发布确认 API → `backend/main.py /api/teachings/*`
 
 ## 6. 当前问题
 
-- `ManagerAgent` 与 `SkillTrainer` 仍较依赖 prompt + JSON 输出稳定性
-- `ExecutionCritic.build_execution_context()` 目前无法准确反推真实工具名
-- 教学交互链路已经存在，但前端对补充问答的体验仍比较基础
+- `ManagerAgent` 仍较依赖 prompt + JSON 输出稳定性
+- TeachingSession 状态机已落地，前端对交互式问答体验仍比较基础（M1-08 未完成）
+- M1-10 e2e 教学闭环尚待验证

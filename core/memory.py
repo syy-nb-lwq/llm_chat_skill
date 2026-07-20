@@ -119,10 +119,21 @@ class MemoryStore:
         diagnosis: str,
         suggestion: Optional[Dict] = None,
         user_corrected: bool = False,
+        *,
+        execution_id: Optional[str] = None,
+        user_id: str = "default",
+        session_id: str = "default",
+        turn_id: str = "",
     ) -> FailureRecord:
-        """记录一次失败分析"""
+        """记录一次失败分析。
+
+        落盘文件名默认使用 ``execution_id``(每次 handle 调用唯一),
+        以避免同 session 多轮失败互相覆盖。``trace_id`` 仍保留在内容里以兼容
+        旧的查询代码。
+        """
+        eid = execution_id or trace_id
         record = FailureRecord(
-            id=f"fail_{trace_id}",
+            id=f"fail_{eid}",
             trace_id=trace_id,
             timestamp=datetime.now().isoformat(),
             scenario=scenario,
@@ -136,14 +147,23 @@ class MemoryStore:
             user_corrected=user_corrected,
         )
 
+        # 落盘 payload 附带身份字段(便于后续跨 user 隔离查询,M2 准备)
+        payload = asdict(record)
+        payload.update({
+            "execution_id": eid,
+            "user_id": user_id,
+            "session_id": session_id,
+            "turn_id": turn_id,
+        })
+
         # 按月归档
         month_dir = self.failures_dir / datetime.now().strftime("%Y-%m")
         month_dir.mkdir(parents=True, exist_ok=True)
 
-        path = month_dir / f"{trace_id}.json"
-        path.write_text(json.dumps(asdict(record), ensure_ascii=False), encoding="utf-8")
+        path = month_dir / f"{eid}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-        self.logger.info("MemoryStore", f"记录失败: {trace_id}, rate={success_rate:.2f}")
+        self.logger.info("MemoryStore", f"记录失败: {eid}, rate={success_rate:.2f}")
         return record
 
     def record_success(
@@ -204,7 +224,10 @@ class MemoryStore:
                 except Exception:
                     continue
                 try:
-                    records.append(FailureRecord(**data))
+                    # 过滤掉非 FailureRecord 字段(payload 中携带的 identity 信息)
+                    valid_keys = {f.name for f in FailureRecord.__dataclass_fields__.values()}
+                    payload = {k: v for k, v in data.items() if k in valid_keys}
+                    records.append(FailureRecord(**payload))
                 except Exception:
                     continue
                 if len(records) >= top_k:
