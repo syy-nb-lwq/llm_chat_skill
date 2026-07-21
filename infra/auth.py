@@ -19,6 +19,8 @@ import time
 from functools import wraps
 from typing import Optional
 
+from fastapi import HTTPException, Request
+
 from infra.config import config
 from infra.logger import get_logger
 
@@ -116,3 +118,37 @@ def get_user_from_ws(ws) -> tuple[str, str, str]:
     # 不接受客户端提交的 client_id
     cid = gen_client_id()
     return uid, sid, cid
+
+
+def extract_ws_identity(data: dict, headers: dict | None = None) -> tuple[str, str, str]:
+    """从 PubSub 消息体/headers 提取身份(C-01)。
+
+    PubSub dispatcher 拿不到原始 ws 对象,只能从 data 和 topic 解析。
+    - user_id / session_id 优先从 data / headers 取,缺失则服务端签发
+    - server_client_id 始终由服务端签发,回传给前端选用
+    """
+    data = data or {}
+    headers = headers or {}
+    uid = str(data.get("user_id") or headers.get("x-user-id") or "").strip() or gen_user_id()
+    sid = str(data.get("session_id") or headers.get("x-session-id") or "").strip() or gen_session_id()
+    # 始终签发服务端 client_id,前端收到后可更新本地
+    server_cid = gen_client_id()
+    return uid, sid, server_cid
+
+
+async def require_owner_token(request: Request) -> None:
+    """FastAPI 依赖:管理 API 的 owner token 校验(C-01)。
+
+    用法: ``@app.post(..., dependencies=[Depends(require_owner_token)])``
+
+    - 未配置 ``owner_token`` → 放行(单机个人环境,不破坏现有)
+    - 配置了 → 请求头必须带 ``Authorization: Bearer <token>``,否则 401/403
+    """
+    expected = get_owner_token()
+    if expected is None:
+        return
+    token = _read_bearer(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="需要 Authorization: Bearer <token>")
+    if not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=403, detail="token 无效")

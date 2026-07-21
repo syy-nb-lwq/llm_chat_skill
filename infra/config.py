@@ -51,6 +51,9 @@ class Config(BaseSettings):
     semantic_memory_enabled: bool = Field(False, description="Enable semantic memory")
     soul_enabled: bool = Field(False, description="Enable soul system")
 
+    # Auth (C-01)
+    owner_token: str = Field("", description="管理 API owner token;留空则跳过校验(单机环境)")
+
     # Embeddings
     embedding_provider: str = Field("mock", description="Embedding provider")
     embedding_api_key: str = Field("", description="Embedding API key")

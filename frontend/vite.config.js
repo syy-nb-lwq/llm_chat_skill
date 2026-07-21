@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+// M0-08: 加入 vitest 测试配置
 export default defineConfig({
   plugins: [vue()],
   server: {
@@ -17,5 +18,10 @@ export default defineConfig({
         changeOrigin: true,
       },
     }
-  }
+  },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    include: ['tests/**/*.{test,spec}.{js,ts}'],
+  },
 })

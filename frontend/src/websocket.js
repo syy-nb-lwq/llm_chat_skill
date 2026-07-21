@@ -294,4 +294,7 @@ class WsService {
   }
 }
 
+// M0-08: 同时导出类(供单元测试构造独立实例,不污染全局单例)
+export { WsService }
+
 export const wsService = new WsService()

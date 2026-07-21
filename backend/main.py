@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backend.session import sessions
 from backend.websocket_handler import endpoint, register_handlers
+from infra.auth import require_owner_token  # C-01:管理 API owner token
 from infra.config import ConfigError, config
 from infra.logger import get_logger
 
@@ -206,7 +207,7 @@ async def get_features():
     }
 
 
-@app.post("/api/features/self-evolution")
+@app.post("/api/features/self-evolution", dependencies=[Depends(require_owner_token)])
 async def set_self_evolution(payload: FeatureFlagUpdate):
     enabled = config.set_feature_flag(
         "self_evolution_enabled",
@@ -247,7 +248,7 @@ async def list_skills():
     }
 
 
-@app.delete("/api/skills/{name}")
+@app.delete("/api/skills/{name}", dependencies=[Depends(require_owner_token)])
 async def delete_skill(name: str):
     from skills.manager import get_skill_store
 
@@ -258,7 +259,7 @@ async def delete_skill(name: str):
     return {"deleted": name, "files": removed}
 
 
-@app.delete("/api/skills/{name}/{version}")
+@app.delete("/api/skills/{name}/{version}", dependencies=[Depends(require_owner_token)])
 async def delete_skill_version(name: str, version: str):
     from skills.manager import get_skill_store
 
@@ -269,7 +270,7 @@ async def delete_skill_version(name: str, version: str):
     return {"deleted": name, "version": version, "files": removed}
 
 
-@app.post("/api/skills/reload")
+@app.post("/api/skills/reload", dependencies=[Depends(require_owner_token)])
 async def reload_skills():
     from skills.manager import get_skill_store
 
@@ -301,7 +302,7 @@ async def list_teachings(user_id: str = "default", session_id: str = "default"):
     }
 
 
-@app.post("/api/teachings/cancel")
+@app.post("/api/teachings/cancel", dependencies=[Depends(require_owner_token)])
 async def cancel_teaching(user_id: str = "default", session_id: str = "default"):
     from agents.skill_trainer import SkillTrainer
     t = SkillTrainer()
@@ -309,7 +310,7 @@ async def cancel_teaching(user_id: str = "default", session_id: str = "default")
     return {"cancelled": ok}
 
 
-@app.post("/api/teachings/choose")
+@app.post("/api/teachings/choose", dependencies=[Depends(require_owner_token)])
 async def choose_teaching_decision(
     choice: str,
     user_id: str = "default",
@@ -333,7 +334,7 @@ async def choose_teaching_decision(
     return {"ok": True, "status": ts.status, "user_choice": ts.user_choice}
 
 
-@app.post("/api/teachings/confirm")
+@app.post("/api/teachings/confirm", dependencies=[Depends(require_owner_token)])
 async def confirm_teaching(user_id: str = "default", session_id: str = "default"):
     """用户在草稿 UI 上点确认发布时调用。"""
     from agents.skill_trainer import SkillTrainer
@@ -516,7 +517,7 @@ def _persist_patch_audit(patch_file: Path, payload: dict, **extra) -> None:
     patch_file.write_text(json.dumps(audited, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-@app.post("/api/patches/{patch_id}/approve")
+@app.post("/api/patches/{patch_id}/approve", dependencies=[Depends(require_owner_token)])
 async def approve_patch(patch_id: str):
     """M3-01 / M3-04 / M3-05 / M3-06:统一 patch schema 并收紧发布门禁。"""
     from core.memory import get_memory_store
@@ -738,7 +739,7 @@ def _publish_skill_version(skill) -> tuple:
         return False, str(e)
 
 
-@app.post("/api/patches/{patch_id}/reject")
+@app.post("/api/patches/{patch_id}/reject", dependencies=[Depends(require_owner_token)])
 async def reject_patch(patch_id: str):
     from core.memory import get_memory_store
 
@@ -753,7 +754,7 @@ async def reject_patch(patch_id: str):
 
 # ===== M3-02:FeedbackEvent =====
 
-@app.post("/api/feedback")
+@app.post("/api/feedback", dependencies=[Depends(require_owner_token)])
 async def submit_feedback(payload: dict):
     """用户对某次执行的反馈:accept / reject / correction / retry / rating。
 
@@ -836,7 +837,7 @@ async def list_memory(user_id: str = "default", type: Optional[str] = None, limi
     return {"memory": [it.to_dict() for it in items]}
 
 
-@app.delete("/api/memory/{item_id}")
+@app.delete("/api/memory/{item_id}", dependencies=[Depends(require_owner_token)])
 async def delete_memory(item_id: str, user_id: str = "default"):
     from core.memory_repository import get_memory_repository
     repo = get_memory_repository()
@@ -846,7 +847,7 @@ async def delete_memory(item_id: str, user_id: str = "default"):
     return {"deleted": item_id}
 
 
-@app.delete("/api/memory")
+@app.delete("/api/memory", dependencies=[Depends(require_owner_token)])
 async def forget_user(user_id: str = "default"):
     from core.memory_repository import get_memory_repository
     n = get_memory_repository().forget_user(user_id)
@@ -887,7 +888,7 @@ async def get_episode(execution_id: str):
 # ===== M1-08:技能发布确认 / Skill 版本管理 =====
 
 
-@app.post("/api/skills/{name}/rollback/{version}")
+@app.post("/api/skills/{name}/rollback/{version}", dependencies=[Depends(require_owner_token)])
 async def rollback_skill(name: str, version: str):
     """M3-04 Rollback:把指定历史版本重新切到 active。"""
     from skills.manager import get_skill_store

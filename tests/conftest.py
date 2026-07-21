@@ -14,12 +14,20 @@ sys.path.insert(0, str(ROOT))
 ENV_PATH = ROOT / ".env"
 if not ENV_PATH.exists():
     ENV_PATH.write_text(
-        "LLM_API_KEY=sk-test-dummy\n"
-        "LLM_BASE_URL=https://api.openai.com/v1\n"
-        "LLM_MODEL=gpt-4o-mini\n"
+        "OPENAI_API_KEY=sk-test-dummy\n"
+        "OPENAI_BASE_URL=https://api.openai.com/v1\n"
+        "OPENAI_MODEL=gpt-4o-mini\n"
         "LOG_LEVEL=WARNING\n",
         encoding="utf-8",
     )
+else:
+    # 确保测试必需的 OPENAI_API_KEY 存在(conftest 历史模板曾误用 LLM_API_KEY)
+    _text = ENV_PATH.read_text(encoding="utf-8")
+    if "OPENAI_API_KEY" not in _text:
+        ENV_PATH.write_text(
+            "OPENAI_API_KEY=sk-test-dummy\n" + _text,
+            encoding="utf-8",
+        )
 
 
 @pytest.fixture(scope="session")
@@ -66,6 +74,15 @@ def reset_singletons():
         for f in ep_dir.glob("*.json"):
             try:
                 f.unlink()
+            except Exception:
+                pass
+    # 清理 MemoryRepository 持久化的 sqlite 文件
+    # (旧 schema 缺 scope 等列,会与新 SCHEMA 的 CREATE INDEX 冲突)
+    for db_name in ("semantic_memory.db", "semantic_memory.db-wal", "semantic_memory.db-shm"):
+        db_file = Path(__file__).parent.parent / "memory" / db_name
+        if db_file.exists():
+            try:
+                db_file.unlink()
             except Exception:
                 pass
     # 重置两个工具系统
