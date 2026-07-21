@@ -18,6 +18,7 @@ class Session:
 
     client_id: str
     agent: Agent
+    user_id: str = "default"
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     dispose_callbacks: List[DisposeCallback] = field(default_factory=list)
@@ -35,13 +36,18 @@ class SessionManager:
         self.ttl_s = ttl_s
         self.logger = get_logger()
 
-    async def get_or_create(self, client_id: str) -> Session:
+    async def get_or_create(self, client_id: str, user_id: str = "default") -> Session:
         async with self._lock:
             session = self._sessions.get(client_id)
             if session is None:
-                session = Session(client_id=client_id, agent=Agent(session_id=client_id))
+                agent = Agent(session_id=client_id, user_id=user_id)
+                session = Session(
+                    client_id=client_id,
+                    user_id=user_id,
+                    agent=agent,
+                )
                 self._sessions[client_id] = session
-                self.logger.info("Session", f"created: {client_id[:8]}")
+                self.logger.info("Session", f"created: client={client_id[:8]} user={user_id[:8]}")
             session.touch()
             return session
 

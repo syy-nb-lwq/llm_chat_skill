@@ -42,14 +42,15 @@ async def dispatcher(subscription, data: Any):
         if topic.startswith("chat/"):
             client_id = topic[5:]
             from backend.session import sessions
-            session = await sessions.get_or_create(client_id)
+            user_id = (data or {}).get("user_id") or "default"
+            session = await sessions.get_or_create(client_id, user_id=user_id)
             user_input = (data or {}).get("content", "")
             if not user_input.strip():
                 await push_event(client_id, "error", {"message": "content 为空"})
                 return
             async def push(event: str, payload: dict):
                 await push_event(client_id, event, payload)
-            await session.agent.handle(user_input, push)
+            await session.agent.handle(user_input, push, user_id=user_id, session_id=client_id)
             return
 
         if topic.startswith("reset/"):

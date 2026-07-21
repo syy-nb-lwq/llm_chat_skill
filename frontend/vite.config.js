@@ -11,10 +11,11 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true
       },
-      '/ws': {
+      '/pubsub': {
         target: 'ws://localhost:8000',
-        ws: true
-      }
+        ws: true,
+        changeOrigin: true,
+      },
     }
   }
 })

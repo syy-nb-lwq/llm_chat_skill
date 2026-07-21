@@ -406,14 +406,31 @@ class ManagerAgent(BaseAgent):
         return "\n".join(lines)
 
     async def _enrich_with_hints(self, user_input: str) -> str:
-        """读取历史教训 hints,拼到 user_input 前面
+        """读取历史教训 hints,拼到 user_input 前面。
 
-        优先使用语义记忆,回退到普通记忆
+        - 优先使用语义记忆(异步)
+        - 回退到普通记忆
+        - M2-05:真正 await 异步检索,不再用 ``run_until_complete`` 静默忽略。
+        - M2-06:只召回当前 user 的 + global 的记忆。
         """
         hints: List[str] = []
 
-        # 尝试语义记忆
-        if self.semantic_memory:
+        # 异步走语义记忆(M2-01/M2-05/M2-06)
+        try:
+            from core.memory_repository import get_memory_repository
+            repo = get_memory_repository()
+            hints.extend(
+                await repo.recall_strings(
+                    query=user_input,
+                    user_id=getattr(self, "_current_user_id", "default"),
+                    limit=3,
+                )
+            )
+        except Exception:
+            pass
+
+        # 也兼容旧的 SemanticMemoryStore
+        if not hints and self.semantic_memory:
             try:
                 results = await self.semantic_memory.search_context(user_input, limit=3)
                 hints.extend(results)

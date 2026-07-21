@@ -275,12 +275,13 @@ class MemoryStore:
         return hints
 
     def get_pending_patches(self) -> List[SkillPatch]:
-        """获取所有待审阅的改进建议"""
+        """获取所有待审阅的改进建议。"""
         patches: List[SkillPatch] = []
+        reviewable_statuses = {"pending", "auto_approved"}
         for path in self.patches_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("status") == "pending":
+                if data.get("status") in reviewable_statuses:
                     patches.append(SkillPatch(**data))
             except Exception:
                 pass

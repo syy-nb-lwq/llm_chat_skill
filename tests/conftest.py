@@ -38,6 +38,7 @@ def reset_singletons():
     from tools.hub import reset_tool_hub
     from tools.base import reset_tool_registry
     from agents import teaching_session as ts_mod
+    from core import memory_repository as mem_repo_mod
 
     # 清理 backend/skills 残留文件
     import shutil
@@ -50,10 +51,19 @@ def reset_singletons():
     logger_mod.get_logger().__init__()
     skill_mod.reset_skill_store()
     ts_mod.reset_teaching_store()
+    mem_repo_mod.reset_memory_repository()
     # 清理 teaching 持久化目录
     teach_dir = Path(__file__).parent.parent / "memory" / "teachings"
     if teach_dir.exists():
         for f in teach_dir.glob("*.json"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    # 清理 episodes 目录
+    ep_dir = Path(__file__).parent.parent / "memory" / "episodes"
+    if ep_dir.exists():
+        for f in ep_dir.glob("*.json"):
             try:
                 f.unlink()
             except Exception:

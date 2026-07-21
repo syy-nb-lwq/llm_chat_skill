@@ -40,13 +40,22 @@ class TaskExecutionSummary:
 @dataclass
 class ExecutionContext:
     """执行上下文:包含一次完整执行的所有信息"""
-    trace_id: str
-    scenario: str
-    intent: str
-    selected_skill: Optional[str]
-    tasks: List[TaskExecutionSummary]
-    latency_ms: float
+    execution_id: str = ""
+    trace_id: str = ""
+    turn_id: str = ""
+    user_id: str = "default"
+    session_id: str = "default"
+    parent_execution_id: Optional[str] = None
+    scenario: str = ""
+    intent: str = ""
+    selected_skill: Optional[str] = None
+    selected_skill_version: Optional[str] = None
+    tasks: List[TaskExecutionSummary] = field(default_factory=list)
+    latency_ms: float = 0.0
     user_feedback: Optional[str] = None  # 下一轮用户是否有纠正
+    final_output: Optional[str] = None  # M3-03:最终输出文本,供 ResultValidator 校验
+    selected_skill_obj: Optional[Any] = None  # M3-03:技能对象,供结果校验
+    attempt_summary: Dict[str, Any] = field(default_factory=dict)  # retry/fallback/timeout 汇总
 
 
 class ExecutionCritic:
@@ -84,6 +93,26 @@ class ExecutionCritic:
                 self.logger.warning("ExecutionCritic", f"无法初始化 LLM: {e}")
         return self._llm_client
 
+    def _evaluate_result(self, context: ExecutionContext) -> float:
+        """M3-03:对无工具任务的最终输出做结果校验,返回 success_rate。"""
+        output = context.final_output or ""
+        skill = context.selected_skill_obj
+        if not output and skill is None:
+            return 1.0  # 无输出且无技能时保持旧行为,避免误杀
+        try:
+            from core.result_validator import ResultValidator
+            validator = ResultValidator()
+            result = validator.validate(skill, output, context.intent)
+            if not result.passed:
+                self.logger.info(
+                    "ExecutionCritic",
+                    f"M3-03 结果校验未通过: score={result.score:.2f}, issues={result.issues}",
+                )
+            return result.score
+        except Exception as e:
+            self.logger.warning("ExecutionCritic", f"ResultValidator 异常,降级为 1.0: {e}")
+            return 1.0
+
     async def evaluate(
         self,
         context: ExecutionContext,
@@ -109,7 +138,8 @@ class ExecutionCritic:
         # 计算评估维度
         total_tasks = len(context.tasks)
         if total_tasks == 0:
-            success_rate = 1.0
+            # M3-03:无工具任务不再无条件得 100%,交给 ResultValidator 校验最终输出
+            success_rate = self._evaluate_result(context)
         else:
             success_count = sum(1 for t in context.tasks if t.success)
             success_rate = success_count / total_tasks
@@ -155,11 +185,10 @@ class ExecutionCritic:
                 status="pending",
             )
 
-            # 高置信度(>0.9)自动生效:持久化 patch 并尝试自动应用
+            # M3-06: 高置信度 patch 仅标记为 auto_approved，仍需走审批/验证/回归门禁。
             if confidence >= 0.9:
                 patch.status = "auto_approved"
                 self.memory.add_pending_patch(patch)
-                await self._apply_patch(patch)
                 records_generated.append("patch_auto_approved")
             else:
                 self.memory.add_pending_patch(patch)
@@ -377,29 +406,105 @@ def build_execution_context(
     tool_results: Dict[str, ToolResult],
     latency_ms: float,
     user_feedback: Optional[str] = None,
+    *,
+    task_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    execution_id: str = "",
+    turn_id: str = "",
+    user_id: str = "default",
+    session_id: str = "default",
+    parent_execution_id: Optional[str] = None,
+    selected_skill_version: Optional[str] = None,
+    final_output: Optional[str] = None,
+    selected_skill_obj: Optional[Any] = None,
 ) -> ExecutionContext:
-    """从工具执行结果构建 ExecutionContext"""
+    """从工具执行结果构建 ExecutionContext。
+
+    task_specs 把 task_id 映射到包含真实 {type, retry, fallback_to, timeout_s}
+    的 task 字典,避免 ``build_execution_context`` 倒退到用 task_id 推断
+    tool 名的旧行为(M0-02)。
+
+    M3-03: final_output / selected_skill_obj 供 ResultValidator 校验无工具任务。
+    """
     tasks: List[TaskExecutionSummary] = []
+    attempt_summary: Dict[str, Any] = {
+        "tools": {},
+        "total_retries": 0,
+        "fallbacks_used": 0,
+        "timeouts": 0,
+    }
+    specs = task_specs or {}
 
     for task_id, result in tool_results.items():
-        # 从 task_id 推断 tool 名(格式: t1, t2...)
-        tool_name = task_id if task_id.startswith("tool:") else f"task_{task_id}"
         meta = getattr(result, "meta", {}) or {}
-        tasks.append(TaskExecutionSummary(
+        spec = specs.get(task_id) or {}
+        tool_name = (
+            meta.get("tool")
+            or spec.get("type")
+            or (task_id if task_id.startswith("tool:") else None)
+            or f"task_{task_id}"
+        )
+
+        # attempts: 优先 meta,否则 spec.retry+1
+        if "attempts" in meta:
+            attempts = int(meta.get("attempts") or 1)
+        elif "retry_count" in meta:
+            attempts = int(meta["retry_count"]) + 1
+        else:
+            attempts = int(spec.get("retry", 0)) + 1
+        retry_count = max(0, attempts - 1)
+
+        # used_fallback: 优先 meta,再 spec.fallback_to 决定
+        # 注意:即使 result.success 也有可能用 fallback(spec.fallback_to 在结果里反映"已经走过该路径")
+        used_fallback = bool(meta.get("used_fallback", False))
+        if not used_fallback and spec.get("fallback_to"):
+            used_fallback = True
+
+        error = result.error or ""
+        is_timeout = "超时" in error or "timeout" in error.lower()
+
+        task_summary = TaskExecutionSummary(
             task_id=task_id,
-            tool=tool_name,
+            tool=str(tool_name),
             success=result.success,
-            used_fallback=bool(meta.get("used_fallback", False)),
-            retry_count=int(meta.get("retry_count", 0)),
-            error=result.error or "",
-        ))
+            used_fallback=used_fallback,
+            retry_count=retry_count,
+            error=error,
+        )
+        tasks.append(task_summary)
+
+        attempt_summary["tools"][task_id] = {
+            "tool": str(tool_name),
+            "spec_retry": int(spec.get("retry", 0) or 0),
+            "spec_timeout_s": int(spec.get("timeout_s", 30) or 30),
+            "spec_fallback_to": spec.get("fallback_to"),
+            "meta_retry_count": int(meta.get("retry_count", 0) or 0),
+            "meta_attempts": int(meta.get("attempts", 0) or 0),
+            "meta_latency_ms": float(meta.get("latency_ms", 0.0) or 0.0),
+            "used_fallback": used_fallback,
+            "is_timeout": is_timeout,
+            "success": result.success,
+        }
+        attempt_summary["total_retries"] += retry_count
+        if used_fallback:
+            attempt_summary["fallbacks_used"] += 1
+        if is_timeout:
+            attempt_summary["timeouts"] += 1
 
     return ExecutionContext(
+        execution_id=execution_id or trace_id,
         trace_id=trace_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        session_id=session_id,
+        parent_execution_id=parent_execution_id,
         scenario=scenario,
         intent=intent,
         selected_skill=selected_skill,
+        selected_skill_version=selected_skill_version,
         tasks=tasks,
         latency_ms=latency_ms,
         user_feedback=user_feedback,
+        final_output=final_output,
+        selected_skill_obj=selected_skill_obj,
+        attempt_summary=attempt_summary,
     )
