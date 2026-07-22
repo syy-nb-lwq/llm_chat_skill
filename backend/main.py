@@ -100,6 +100,30 @@ async def _startup():
     except ValueError:
         pass
 
+    # MCP 工具源(P7-3):mcp_enabled 时解析 mcp_servers 并注册到 ToolHub
+    if config.mcp_enabled and config.mcp_servers:
+        import json as _json
+        from tools.sources.mcp_source import create_mcp_source
+        try:
+            mcp_servers = _json.loads(config.mcp_servers)
+        except Exception as exc:
+            logger.warning("startup", f"mcp_servers JSON 解析失败: {exc}")
+            mcp_servers = []
+        for srv in mcp_servers:
+            try:
+                src = create_mcp_source(
+                    name=srv.get("name", "mcp"),
+                    connection_type=srv.get("type", "stdio"),
+                    server_path=srv.get("command", ""),
+                    server_url=srv.get("url", ""),
+                )
+                hub.register_source(src)
+                logger.info("startup", f"mcp source registered: {srv.get('name', 'mcp')}")
+            except ValueError:
+                pass
+            except Exception as exc:
+                logger.warning("startup", f"mcp source {srv.get('name', 'mcp')} 注册失败: {exc}")
+
     try:
         await hub.connect_all()
         logger.info("startup", f"tool hub initialized with {len(hub.names())} tools")
@@ -129,6 +153,19 @@ async def _startup():
         except Exception as exc:
             logger.warning("startup", f"self reflection loop start failed: {exc}")
 
+    # Heartbeat 调度器(P7-1):heartbeat_enabled 时启动定时任务
+    if config.heartbeat_enabled:
+        try:
+            from core.heartbeat import HeartbeatScheduler
+            scheduler = HeartbeatScheduler(
+                interval_seconds=int(config.heartbeat_interval_seconds),
+            )
+            await scheduler.start()
+            app.state.heartbeat_scheduler = scheduler
+            logger.info("startup", f"heartbeat scheduler started (interval={config.heartbeat_interval_seconds}s)")
+        except Exception as exc:
+            logger.warning("startup", f"heartbeat scheduler start failed: {exc}")
+
 
 @app.on_event("shutdown")
 async def _shutdown():
@@ -141,6 +178,15 @@ async def _shutdown():
             pass
 
     await _stop_reflect_loop()
+
+    # 停止 Heartbeat 调度器(P7-1)
+    heartbeat_scheduler = getattr(app.state, "heartbeat_scheduler", None)
+    if heartbeat_scheduler is not None:
+        try:
+            await heartbeat_scheduler.stop()
+        except Exception as exc:
+            logger.warning("shutdown", f"heartbeat scheduler stop failed: {exc}")
+        app.state.heartbeat_scheduler = None
 
     from tools.hub import get_tool_hub
 
@@ -363,6 +409,160 @@ async def list_tools():
     return {
         "tools": [{"name": tool.name, "description": tool.description} for tool in tools]
     }
+
+
+# ===== M4 工具提案 REST 路由 =====
+
+
+@app.get("/api/tools/proposals")
+async def list_tool_proposals():
+    """列出所有工具提案(M4-05)。"""
+    from tools.proposal import get_tool_proposal_store
+
+    store = get_tool_proposal_store()
+    proposals = store.list_all()
+    return {
+        "proposals": [
+            {
+                "proposal_id": p.proposal_id,
+                "name": p.name,
+                "version": p.version,
+                "runtime": p.runtime,
+                "description": p.description,
+                "side_effect": p.side_effect,
+                "status": p.status,
+                "author": p.author,
+                "created_at": p.created_at,
+                "updated_at": p.updated_at,
+            }
+            for p in proposals
+        ]
+    }
+
+
+@app.get("/api/tools/proposals/{name}/{version}")
+async def get_tool_proposal(name: str, version: str):
+    """获取单个工具提案详情。"""
+    from tools.proposal import get_tool_proposal_store
+
+    store = get_tool_proposal_store()
+    p = store.get(name, version)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"proposal not found: {name}@{version}")
+    return p.to_dict()
+
+
+@app.post("/api/tools/proposals", dependencies=[Depends(require_owner_token)])
+async def create_tool_proposal(payload: dict):
+    """创建工具提案(M4-01/M4-02)。
+
+    payload 字段对应 ``ToolProposal`` dataclass,支持嵌套 endpoint /
+    network_policy / test_cases 的 dict 形式。
+    """
+    from tools.proposal import ToolProposal, get_tool_proposal_store
+
+    try:
+        proposal = ToolProposal(**payload)
+    except TypeError as exc:
+        raise HTTPException(status_code=422, detail=f"提案字段非法: {exc}")
+
+    issues = proposal.validate()
+    if issues:
+        raise HTTPException(status_code=422, detail="; ".join(issues))
+
+    store = get_tool_proposal_store()
+    try:
+        store.save(proposal, overwrite=False)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail=f"提案已存在: {proposal.name}@{proposal.version}")
+
+    return {
+        "created": True,
+        "proposal_id": proposal.proposal_id,
+        "name": proposal.name,
+        "version": proposal.version,
+        "status": proposal.status,
+    }
+
+
+@app.post("/api/tools/proposals/{name}/{version}/sandbox", dependencies=[Depends(require_owner_token)])
+async def sandbox_tool_proposal(name: str, version: str):
+    """运行沙箱测试(M4-03)。"""
+    from tools.approval import get_tool_approval_service
+    from tools.proposal import get_tool_proposal_store
+
+    store = get_tool_proposal_store()
+    prop = store.get(name, version)
+    if not prop:
+        raise HTTPException(status_code=404, detail=f"proposal not found: {name}@{version}")
+
+    svc = get_tool_approval_service()
+    result = svc.run_sandbox(prop)
+    return {
+        "ok": result.ok,
+        "status": result.status,
+        "message": result.message,
+        "issues": result.issues,
+        "sandbox_results": result.sandbox_results,
+    }
+
+
+@app.post("/api/tools/proposals/{name}/{version}/approve", dependencies=[Depends(require_owner_token)])
+async def approve_tool_proposal(name: str, version: str, approver: str = "admin"):
+    """审批工具提案(M4-05)。"""
+    from tools.approval import get_tool_approval_service
+
+    svc = get_tool_approval_service()
+    result = svc.approve(name, version, approver=approver)
+    if not result.ok and result.status == "not_found":
+        raise HTTPException(status_code=404, detail=result.message)
+    return {"ok": result.ok, "status": result.status, "message": result.message}
+
+
+@app.post("/api/tools/proposals/{name}/{version}/reject", dependencies=[Depends(require_owner_token)])
+async def reject_tool_proposal(name: str, version: str, payload: Optional[dict] = None):
+    """驳回工具提案。"""
+    from tools.approval import get_tool_approval_service
+
+    reason = (payload or {}).get("reason", "")
+    svc = get_tool_approval_service()
+    result = svc.reject(name, version, reason=reason)
+    if not result.ok and result.status == "not_found":
+        raise HTTPException(status_code=404, detail=result.message)
+    return {"ok": result.ok, "status": result.status, "message": result.message}
+
+
+@app.post("/api/tools/proposals/{name}/{version}/publish", dependencies=[Depends(require_owner_token)])
+async def publish_tool_proposal(name: str, version: str):
+    """发布工具到 ToolHub(M4-05)。"""
+    from tools.approval import get_tool_approval_service
+
+    svc = get_tool_approval_service()
+    result = svc.publish(name, version)
+    if not result.ok and result.status == "not_found":
+        raise HTTPException(status_code=404, detail=result.message)
+    return {"ok": result.ok, "status": result.status, "message": result.message}
+
+
+@app.post("/api/tools/proposals/{name}/{version}/disable", dependencies=[Depends(require_owner_token)])
+async def disable_tool_proposal(name: str, version: str):
+    """下线已发布的工具(M4-05)。"""
+    from tools.approval import get_tool_approval_service
+
+    svc = get_tool_approval_service()
+    result = svc.disable(name, version)
+    if not result.ok and result.status == "not_found":
+        raise HTTPException(status_code=404, detail=result.message)
+    return {"ok": result.ok, "status": result.status, "message": result.message}
+
+
+@app.get("/api/tools/proposals/audit")
+async def tool_proposal_audit():
+    """获取工具审批审计日志(M4-05/C-03)。"""
+    from tools.approval import get_tool_approval_service
+
+    svc = get_tool_approval_service()
+    return {"audit": svc.audit_log}
 
 
 @app.get("/api/patches")
@@ -951,6 +1151,8 @@ async def diag():
             "skill_dag_enabled": bool(config.skill_dag_enabled),
             "semantic_memory_enabled": bool(config.semantic_memory_enabled),
             "soul_enabled": bool(config.soul_enabled),
+            "mcp_enabled": bool(config.mcp_enabled),
+            "heartbeat_enabled": bool(config.heartbeat_enabled),
         },
         "tool_sources": hub.health_summary(),
         "embedding": {
