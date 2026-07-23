@@ -103,9 +103,10 @@ LearningAgent.execute_tool()
 
 ## 6. 当前缺陷
 
-- 工具源的健康状态暴露有限，没有专门诊断页面
+- 工具源健康状态已通过 `/api/health`（§7）和 CLI `diagnose` 子命令暴露，但缺少前端专门诊断页面
 - `web_search` 的公网依赖较多，稳定性受外部服务影响
-- 没有统一缓存层，重复查询会直接打外部接口
+- 没有统一缓存层，重复查询会直接打外部接口（`tool_cache_enabled` feature flag 仍是占位）
+- M4 工具提案审批/发布只暴露 Python API，无 REST 路由（见 §8.7）
 
 ## 7. 启动可观测性（M0-06）
 
@@ -123,3 +124,97 @@ LearningAgent.execute_tool()
 - `ToolHub.health_summary()` 汇总 `total_sources / connected / failed / disconnected / has_failures`
 - `GET /api/health` 暴露 `tool_sources` 聚合字段 + `sources` 详情;顶层 `status` 在 `has_failures=True` 时降级为 `degraded`
 - `connect_all()` 单源失败不影响其他源,失败状态被显式记录
+
+## 8. 受控工具沉淀（M4 整组）
+
+允许用户通过对话提出并发布新的工具能力，先声明式（HTTP/MCP），暂不允许 LLM 直接生成并执行 Python 工具。
+
+### 8.1 ToolProposal 数据模型（M4-01）
+
+文件：`tools/proposal.py`
+
+- `ToolProposal`：完整提案描述
+  - `name` / `version`（semver）/ `runtime`（`declarative_http` / `mcp`）
+  - `endpoint: ToolEndpoint`（method / path / params / returns）
+  - `permissions` / `network_policy: NetworkPolicy` / `side_effect`
+  - `secret_refs`（命名空间引用，如 `github.token`，不存明文）
+  - `test_cases: List[ToolTestCase]` / `status` / `proposal_id`
+- `SideEffectLevel`：`read_only` / `local_write` / `network_write` / `destructive`（仅 `read_only` 可自动发布）
+- `ToolProposalStatus`：`draft` → `sandbox_ok` / `sandbox_failed` → `approved` → `published` → `disabled` / `rejected`
+- `NetworkPolicy`：`allowed_hosts`（支持 `*.example.com` 通配符）/ `denied_hosts` / `require_https`
+- `ToolParamSpec`：`name / type / description / required / default / enum / location`（query/path/header/body）
+- `ToolTestCase`：`name / input / expected_status / expected_keys / expect_error`
+
+静态校验 `ToolProposal.validate()` 返回错误列表：name 格式、version semver、runtime 范围、endpoint 合法性、side_effect 合法性、secret_refs 命名空间化、网络白名单非空。
+
+### 8.2 声明式 HTTP 工具（M4-02）
+
+文件：`tools/declarative_http.py`
+
+`DeclarativeHTTPTool(proposal, base_url, secret_resolver)` 把 `ToolProposal` 渲染成 `Tool` 实例：
+
+- `schema()` 从 `endpoint.params` 生成 `ToolSchema` / `ToolParam`
+- `execute()` 按 `endpoint.method` + `endpoint.path` 渲染 path/query/body/header，发起 HTTP 请求
+- 返回 `ToolResult`，`meta.source` 标明来源
+- `register_to_hub(hub)` 注册到 `ToolHub`
+
+### 8.3 网络白名单（M4-04）
+
+执行前强制校验：
+
+- `_host_in_allowed(host, allowed)`：精确匹配 + `*.example.com` 通配符匹配
+- `_enforce_network_policy(url, policy)`：返回 None 通过，否则返回错误信息
+- `require_https=True` 时强制 HTTPS（localhost/127.0.0.1/::1 沙箱豁免）
+- host 不在 `allowed_hosts` 内或在 `denied_hosts` 内 → 拒绝
+- secret 引用通过 `infra.config.get_secret(name)` 解析，工具不接触明文
+
+### 8.4 沙箱测试运行器（M4-03）
+
+文件：`tools/declarative_http.py`（`SandboxRunner` 类）
+
+- 隔离目录 + 受限网络 + 测试用例运行，失败不污染主进程
+- 静态检查：proposal `validate()` + 网络白名单覆盖 endpoint host
+- 多用例执行：每个 `ToolTestCase` 跑一次，断言 `expected_status` / `expected_keys` / `expect_error`
+- 支持 `success` / `expect_error` 两类断言
+
+### 8.5 审批发布 + 注册（M4-05）
+
+文件：`tools/approval.py`
+
+`ToolApprovalService` 提供 sandbox → approve → publish → disable 全生命周期：
+
+- `run_sandbox(proposal)`：跑沙箱测试，推进到 `SANDBOX_OK` 或 `SANDBOX_FAILED`
+- `approve_proposal(name, version, approver)`：把 `DRAFT` / `SANDBOX_OK` 推进到 `APPROVED`；`read_only` + 沙箱通过可自动发布
+- `publish_proposal(name, version)`：把 `APPROVED` 注册到 `ToolHub`（`DeclarativeHTTPTool.register_to_hub`），状态变为 `PUBLISHED`
+- `disable_proposal(name, version)`：把 `PUBLISHED` 工具从 `ToolHub` 注销，状态变为 `DISABLED`；规划器不再选择该工具
+- `reject_proposal(name, version, reason)`：拒绝草案
+- 每次审批记录审计日志：`approver / timestamp / from_status / to_status / proposal_id`
+
+`ToolProposalStore.save(proposal, overwrite=...)`：
+
+- `overwrite=False`（默认）：同 `name@version` 视为版本冲突，抛 `FileExistsError`（强制"新建版本"约束，避免原地覆盖）
+- `overwrite=True`：仅用于状态机迁移，不允许新增字段
+
+存储位置：`tools/proposals/{name}@{version}.yaml`。
+
+### 8.6 副作用分级审批策略
+
+| SideEffectLevel | 自动发布 | 审批要求 |
+|---|---|---|
+| `read_only` | ✅ 允许（沙箱通过后） | 可跳过人工审批 |
+| `local_write` | ❌ | 普通审批 |
+| `network_write` | ❌ | 高风险审批 |
+| `destructive` | ❌ | 禁止自动发布，需显式审批 |
+
+### 8.7 e2e 闭环（M4-06）
+
+文件：`tests/e2e/test_m4_06_declarative_tool_e2e.py`
+
+4 个 e2e 用例覆盖声明式工具全链路：
+
+- draft → sandbox → approve → publish → call → disable 全生命周期
+- 禁用后工具从 `ToolHub` 注销
+- 发布后可真实调用（本地 mock HTTP server 验证 read-only 声明式工具）
+- 审计日志记录生命周期
+
+注：M4 的审批/发布目前通过 Python API（`ToolApprovalService`）暴露，`backend/main.py` 尚未提供 `/api/tools/proposals/*` REST 路由（见 `00-总览.md` 当前已知限制）。

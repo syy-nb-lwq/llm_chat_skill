@@ -204,6 +204,130 @@ def test_approve_patch_persists_skill_method(client, tmp_path, monkeypatch):
         memory_mod._memory_store = original_memory_store
 
 
+
+def test_approve_user_correction_blocks_without_regression_examples(client, tmp_path, monkeypatch):
+    import core.memory as memory_mod
+    import skills.manager as mgr
+    from core.memory import MemoryStore
+
+    original_store = mgr._store
+    original_memory_store = memory_mod._memory_store
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True)
+    skill_path = skills_dir / "demo@1.0.0.yaml"
+    skill_path.write_text(
+        "name: demo\nversion: 1.0.0\ncapability: a\nmethod: old method\npatterns: [demo]\nsteps: []\nexamples: []\n",
+        encoding="utf-8",
+    )
+
+    memory_store = MemoryStore(base_path=tmp_path / "memory")
+    patch_file = memory_store.patches_dir / "patch_demo_correction.json"
+    patch_file.write_text(
+        json.dumps(
+            {
+                "id": "patch_demo_correction",
+                "trace_id": "trace_2",
+                "timestamp": "2026-07-16T12:00:00",
+                "target_skill": "demo",
+                "patch_type": "user_correction",
+                "diagnosis": "用户纠正",
+                "suggestion": {
+                    "type": "improve_method",
+                    "target_skill": "demo",
+                    "version_target": "next",
+                    "user_feedback": "问题部分如果为空就不显示",
+                },
+                "confidence": 0.95,
+                "status": "pending",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    mgr.reset_skill_store()
+    mgr._store = mgr.SkillStore(str(skills_dir))
+    monkeypatch.setattr(memory_mod, "_memory_store", memory_store)
+    monkeypatch.setattr("backend.main.config.self_evolution_enabled", True)
+    try:
+        response = client.post("/api/patches/patch_demo_correction/approve")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["applied"] is False
+        assert "缺少旧样例，无法执行回归对比" in payload["rejection_reasons"]
+        assert payload["regression_results"]["passed"] is False
+        assert payload["risk_summary"]["risk_level"] == "high"
+        assert not (skills_dir / "user" / "demo@1.0.1.yaml").exists()
+    finally:
+        mgr._store = original_store
+        memory_mod._memory_store = original_memory_store
+
+
+
+def test_auto_approved_patch_still_requires_review_gate(client, tmp_path, monkeypatch):
+    import core.memory as memory_mod
+    import skills.manager as mgr
+    from core.memory import MemoryStore
+
+    original_store = mgr._store
+    original_memory_store = memory_mod._memory_store
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True)
+    skill_path = skills_dir / "demo@1.0.0.yaml"
+    skill_path.write_text(
+        "name: demo\nversion: 1.0.0\ncapability: a\nmethod: old method\npatterns: [demo]\nsteps: []\nexamples: [示例1]\n",
+        encoding="utf-8",
+    )
+
+    memory_store = MemoryStore(base_path=tmp_path / "memory")
+    patch_file = memory_store.patches_dir / "patch_demo_auto.json"
+    patch_file.write_text(
+        json.dumps(
+            {
+                "id": "patch_demo_auto",
+                "trace_id": "trace_3",
+                "timestamp": "2026-07-16T12:00:00",
+                "target_skill": "demo",
+                "patch_type": "improve_skill",
+                "diagnosis": "high confidence",
+                "suggestion": {
+                    "type": "improve_skill",
+                    "target_skill": "demo"
+                },
+                "confidence": 0.95,
+                "status": "auto_approved",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    mgr.reset_skill_store()
+    mgr._store = mgr.SkillStore(str(skills_dir))
+
+    def fail_update_skill(*args, **kwargs):
+        raise AssertionError("auto_approved patch should not directly call update_skill")
+
+    monkeypatch.setattr(mgr._store, "update_skill", fail_update_skill)
+    monkeypatch.setattr(memory_mod, "_memory_store", memory_store)
+    monkeypatch.setattr("backend.main.config.self_evolution_enabled", True)
+    try:
+        response = client.post("/api/patches/patch_demo_auto/approve")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["applied"] is False
+        assert "patch 缺少可发布的结构化变更" in payload["rejection_reasons"]
+        assert payload["risk_summary"]["patch_status"] == "auto_approved"
+        assert payload["risk_summary"]["risk_level"] == "high"
+        assert skill_path.read_text(encoding="utf-8").count("old method") == 1
+        assert not (skills_dir / "user" / "demo@1.0.1.yaml").exists()
+    finally:
+        mgr._store = original_store
+        memory_mod._memory_store = original_memory_store
+
+
 def test_startup_fails_fast_on_invalid_config(monkeypatch):
     from backend.main import app
     from infra.config import ConfigError

@@ -35,21 +35,33 @@ async def dispatcher(subscription, data: Any):
     try:
         if topic.startswith("init/"):
             client_id = topic[5:]
-            await push_event(client_id, "connected", {"client_id": client_id})
-            logger.info("ws_manager", f"Client initialized: {client_id}")
+            # C-01:服务端签发 server_client_id + 提取/生成 user_id/session_id
+            from infra.auth import extract_ws_identity
+            uid, sid, server_cid = extract_ws_identity(data or {})
+            await push_event(client_id, "connected", {
+                "client_id": client_id,          # 兼容:前端订阅用的 id
+                "server_client_id": server_cid,  # C-01:服务端签发,前端可选用
+                "user_id": uid,
+                "session_id": sid,
+            })
+            logger.info("ws_manager", f"Client initialized: {client_id} (server_cid={server_cid}, user={uid})")
             return
 
         if topic.startswith("chat/"):
             client_id = topic[5:]
             from backend.session import sessions
-            session = await sessions.get_or_create(client_id)
+            # C-01:从 data 提取 user_id,缺失则服务端签发
+            from infra.auth import extract_ws_identity
+            uid, _sid, _ = extract_ws_identity(data or {})
+            user_id = (data or {}).get("user_id") or uid
+            session = await sessions.get_or_create(client_id, user_id=user_id)
             user_input = (data or {}).get("content", "")
             if not user_input.strip():
                 await push_event(client_id, "error", {"message": "content 为空"})
                 return
             async def push(event: str, payload: dict):
                 await push_event(client_id, event, payload)
-            await session.agent.handle(user_input, push)
+            await session.agent.handle(user_input, push, user_id=user_id, session_id=client_id)
             return
 
         if topic.startswith("reset/"):

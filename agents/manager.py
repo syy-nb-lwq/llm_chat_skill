@@ -79,33 +79,55 @@ class ManagerAgent(BaseAgent):
 
     name = "Manager"
 
-    PLAN_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "intent":         {"type": "string"},
-            "selected_skill": {"type": "string"},
-            "is_retry":       {"type": "boolean"},
-            "tool_tasks": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id":     {"type": "string"},
-                        "type":   {"type": "string", "enum": ["weather_query", "web_search"]},
-                        "params": {"type": "object"},
-                        "depends_on": {"type": "array", "items": {"type": "string"}},
-                        "parallel_group": {"type": "string"},
+    # 内置兜底工具(ToolHub 不可用时使用)
+    _BUILTIN_TOOLS = ["weather_query", "web_search"]
+
+    def _get_available_tool_names(self) -> List[str]:
+        """从 ToolHub 动态读取已注册工具名(M4 动态工具支持)。
+
+        ToolHub 不可用或为空时,回退到内置列表,保证旧环境可用。
+        """
+        try:
+            from tools.hub import get_tool_hub
+            names = get_tool_hub().names()
+            if names:
+                return names
+        except Exception:
+            pass
+        return list(self._BUILTIN_TOOLS)
+
+    def _build_plan_schema(self) -> dict:
+        """根据当前 ToolHub 中可用工具动态构建 PLAN_SCHEMA。"""
+        tool_names = self._get_available_tool_names()
+        return {
+            "type": "object",
+            "properties": {
+                "intent":         {"type": "string"},
+                "selected_skill": {"type": "string"},
+                "is_retry":       {"type": "boolean"},
+                "tool_tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id":     {"type": "string"},
+                            "type":   {"type": "string", "enum": tool_names},
+                            "params": {"type": "object"},
+                            "depends_on": {"type": "array", "items": {"type": "string"}},
+                            "parallel_group": {"type": "string"},
+                        },
+                        "required": ["type", "params"],
                     },
-                    "required": ["type", "params"],
                 },
             },
-        },
-        "required": ["intent", "tool_tasks"],
-    }
+            "required": ["intent", "tool_tasks"],
+        }
 
     def system_prompt(self) -> str:
         skills = self.skill_store.list_all()
         skills_list = self._format_skills(skills)
+        tool_names = self._get_available_tool_names()
+        tools_str = ", ".join(tool_names)
         return f"""你是一个任务规划助手。作为流转中枢,你需要:
 
 1. 识别用户意图(包括重试、上下文关联等)
@@ -113,7 +135,7 @@ class ManagerAgent(BaseAgent):
 3. 规划需要的工具来获取数据
 
 重要规则:
-- 工具只能从以下列表选择:weather_query, web_search
+- 工具只能从以下列表选择:{tools_str}
 - 如果用户说"重新回答"、"再说一遍"、"上次"、"之前"等,说明要重试上一次的执行,tool_tasks 要与上次保持一致
 - 技能是完成任务的方法论,工具是获取数据的手段
 
@@ -126,8 +148,7 @@ class ManagerAgent(BaseAgent):
   "selected_skill": "选择的技能名称(没有则填空字符串)",
   "is_retry": true/false,  // 用户是否要求重试上一次的执行
   "tool_tasks": [
-    {{"type": "weather_query", "params": {{"city": "城市名", "date": "日期"}}}},
-    {{"type": "web_search", "params": {{"query": "搜索关键词"}}}}
+    {{"type": "{tool_names[0] if tool_names else 'tool_name'}", "params": {{}}}}
   ]
 }}"""
 
@@ -258,7 +279,7 @@ class ManagerAgent(BaseAgent):
         try:
             llm_plan = await self.think_json(
                 self._build_user_prompt(enriched_input, context),
-                self.PLAN_SCHEMA,
+                self._build_plan_schema(),
             )
         except Exception as e:
             self.logger.error("Manager", f"LLM 规划失败: {e}")
@@ -406,14 +427,31 @@ class ManagerAgent(BaseAgent):
         return "\n".join(lines)
 
     async def _enrich_with_hints(self, user_input: str) -> str:
-        """读取历史教训 hints,拼到 user_input 前面
+        """读取历史教训 hints,拼到 user_input 前面。
 
-        优先使用语义记忆,回退到普通记忆
+        - 优先使用语义记忆(异步)
+        - 回退到普通记忆
+        - M2-05:真正 await 异步检索,不再用 ``run_until_complete`` 静默忽略。
+        - M2-06:只召回当前 user 的 + global 的记忆。
         """
         hints: List[str] = []
 
-        # 尝试语义记忆
-        if self.semantic_memory:
+        # 异步走语义记忆(M2-01/M2-05/M2-06)
+        try:
+            from core.memory_repository import get_memory_repository
+            repo = get_memory_repository()
+            hints.extend(
+                await repo.recall_strings(
+                    query=user_input,
+                    user_id=getattr(self, "_current_user_id", "default"),
+                    limit=3,
+                )
+            )
+        except Exception:
+            pass
+
+        # 也兼容旧的 SemanticMemoryStore
+        if not hints and self.semantic_memory:
             try:
                 results = await self.semantic_memory.search_context(user_input, limit=3)
                 hints.extend(results)

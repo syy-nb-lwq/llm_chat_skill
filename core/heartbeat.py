@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from infra.logger import get_logger
 
@@ -257,31 +257,47 @@ class HeartbeatScheduler:
 class HeartbeatAgent:
     """心跳 Agent - 处理主动任务"""
     
-    def __init__(self, scheduler: Optional[HeartbeatScheduler] = None):
+    def __init__(
+        self,
+        scheduler: Optional[HeartbeatScheduler] = None,
+        agent_handle: Optional[Callable[[str], Awaitable[str]]] = None,
+    ):
         self.scheduler = scheduler or HeartbeatScheduler()
         self.logger = get_logger()
         self._executing_tasks: List[HeartbeatTask] = []
-    
+        # 异步回调: (task.description) -> result_text,由外部注入真实 Agent 执行入口
+        self._agent_handle = agent_handle
+
     async def start(self) -> None:
         """启动心跳处理"""
         await self.scheduler.start()
-    
+
     async def stop(self) -> None:
         """停止心跳处理"""
         await self.scheduler.stop()
-    
+
     async def execute_task(self, task: HeartbeatTask) -> str:
-        """执行单个任务"""
+        """执行单个任务
+
+        优先调用注入的 ``agent_handle`` 真实执行;
+        未注入时降级为记录日志,不再假装执行成功。
+        """
         self.logger.info("HeartbeatAgent", f"执行任务: {task.description}")
-        
+
         # 更新状态
         task.last_run = datetime.now().isoformat()
         task.last_status = HeartbeatStatus.RUNNING
-        
+
         try:
-            # 这里应该调用 LLM 执行实际任务
-            # 目前只是模拟
-            result = f"任务 '{task.description}' 执行完成"
+            if self._agent_handle is not None:
+                result = await self._agent_handle(task.description)
+            else:
+                # 未接入 Agent,明确降级而非假装成功
+                self.logger.warning(
+                    "HeartbeatAgent",
+                    f"未注入 agent_handle,任务降级跳过: {task.description}",
+                )
+                result = f"[降级] 未接入 Agent,任务未真实执行: {task.description}"
             task.last_result = result
             task.last_status = HeartbeatStatus.COMPLETED
             return result
