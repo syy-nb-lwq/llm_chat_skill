@@ -1015,8 +1015,8 @@ async def submit_feedback(payload: dict):
             patch_path = Path(__file__).parent.parent / "memory" / "skill_patches" / "pending" / f"{patch['id']}.json"
             patch_path.parent.mkdir(parents=True, exist_ok=True)
             patch_path.write_text(json.dumps(patch, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("feedback", f"correction patch 写盘失败 (patch={patch.get('id')}): {exc}")
     return {"ok": True, "id": ev.id, "file": str(path)}
 
 

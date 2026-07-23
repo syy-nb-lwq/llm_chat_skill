@@ -265,12 +265,12 @@ class MemoryStore:
                     # 关键词匹配
                     if any(kw in user_input for kw in [record.scenario, record.matched_skill]):
                         hints.append(f"[成功经验] {record.matched_skill} 适合处理 {record.scenario}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.debug("MemoryStore", f"跳过损坏的成功记录行: {e}")
                 if len(hints) >= top_k:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning("MemoryStore", f"读取成功经验失败: {e}")
 
         return hints
 
@@ -283,8 +283,8 @@ class MemoryStore:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("status") in reviewable_statuses:
                     patches.append(SkillPatch(**data))
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug("MemoryStore", f"跳过损坏的 patch 文件 {path.name}: {e}")
         # 按 confidence 降序
         patches.sort(key=lambda x: -x.confidence)
         return patches
@@ -341,8 +341,8 @@ class MemoryStore:
                     data = json.loads(path.read_text(encoding="utf-8"))
                     rate = data.get("success_rate", 0.0)
                     records.append((path, rate))
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.debug("MemoryStore", f"容量控制跳过损坏记录 {path.name}: {e}")
 
             # 按 success_rate 降序排序,保留 top keep_ratio
             records.sort(key=lambda x: -x[1])

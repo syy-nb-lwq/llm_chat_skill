@@ -1,5 +1,6 @@
 """SelfReflectLoop - 主动反思循环:在低负载时主动复盘近期经验,生成洞察"""
 import asyncio
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -171,7 +172,7 @@ class SelfReflectLoop:
         pending = store.get_pending_patches()
 
         # 生成洞察
-        insights = await self._generate_insights(high_freq, failures)
+        insights = await self._generate_insights(high_freq, failures, store)
 
         report = ReflectionReport(
             id=f"reflect_{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -238,6 +239,7 @@ class SelfReflectLoop:
         self,
         high_freq: List[Dict],
         failures: List,
+        store: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """生成洞察和建议"""
         insights = {
@@ -254,9 +256,24 @@ class SelfReflectLoop:
             }
             insights["skill_suggestions"].append(suggestion)
 
-        # 找出成功率高的技能(无需改动)
-        # 这需要更复杂的分析,暂时留空
-        insights["strengthened_skills"] = []
+        # 找出成功率高的技能:从成功记录按 matched_skill 聚合,取 top 3
+        if store is not None:
+            try:
+                skill_counts: Dict[str, int] = {}
+                success_path = store.successes_dir / "success_index.jsonl"
+                if success_path.exists():
+                    for line in success_path.read_text(encoding="utf-8").splitlines():
+                        try:
+                            data = json.loads(line)
+                            skill = data.get("matched_skill", "")
+                            if skill:
+                                skill_counts[skill] = skill_counts.get(skill, 0) + 1
+                        except Exception:
+                            continue
+                top = sorted(skill_counts.items(), key=lambda x: -x[1])[:3]
+                insights["strengthened_skills"] = [s for s, _ in top]
+            except Exception as e:
+                self.logger.warning("SelfReflectLoop", f"聚合强化技能失败: {e}")
 
         return insights
 

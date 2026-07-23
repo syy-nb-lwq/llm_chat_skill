@@ -104,7 +104,7 @@ patch 字段统一为：
 - `type`：`accept / reject / correction / retry / rating`
 - `content`：反馈正文
 - `rating`：可选 1~5 评分
-- `user_id` / `session_id`：用于多用户隔离
+- `user_id` / `session_id`：用于会话/记忆隔离
 
 `FeedbackStore` 持久化到 `memory/feedback/{execution_id}__{feedback_id}.json`，并维护 `_index.json` 按 `execution_id` 索引。`correction` 类型反馈会触发 patch 生成（在 backend API 中处理）。
 
@@ -120,7 +120,7 @@ patch 字段统一为：
 
 | 字段 | 说明 |
 |---|---|
-| `tenant_id` / `user_id` / `project_id` / `session_id` | 作用域隔离四元组 |
+| `user_id` / `project_id` / `session_id` | 作用域隔离（单用户场景，已移除 tenant_id） |
 | `turn_id` / `execution_id` / `source_turn_id` | 追溯到具体执行 |
 | `scope` | `global / user / project / session` |
 | `type` | `fact / preference / context / episode / lesson / skill_hint` |

@@ -64,7 +64,6 @@ class MemoryItem:
     字段命名遵循 ``docs/10-目标架构评审与演进方案.md §6.2``。
     """
     id: str = ""
-    tenant_id: str = "default"
     user_id: str = "default"
     project_id: str = ""
     session_id: str = ""
@@ -116,7 +115,6 @@ class _MemoryDB:
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS memories (
         id TEXT PRIMARY KEY,
-        tenant_id TEXT NOT NULL DEFAULT 'default',
         user_id TEXT NOT NULL DEFAULT 'default',
         project_id TEXT NOT NULL DEFAULT '',
         session_id TEXT NOT NULL DEFAULT '',
@@ -154,7 +152,6 @@ class _MemoryDB:
 
     # 兼容旧 SemanticMemoryStore 的表(没有 scope 等列)
     ALT_COLUMNS = (
-        "tenant_id TEXT NOT NULL DEFAULT 'default',"
         "user_id TEXT NOT NULL DEFAULT 'default',"
         "project_id TEXT NOT NULL DEFAULT '',"
         "session_id TEXT NOT NULL DEFAULT '',"
@@ -206,13 +203,13 @@ class _MemoryDB:
         def _json(col: int) -> Any:
             raw = row[col]
             if not raw:
-                return {} if col in (10, 14, 15) else []
+                return {} if col in (9, 18) else []
             try:
                 return json.loads(raw)
             except Exception:
-                return {} if col in (10, 14, 15) else []
+                return {} if col in (9, 18) else []
 
-        embedding_raw = row[16]
+        embedding_raw = row[19]
         embedding = None
         if embedding_raw:
             try:
@@ -222,25 +219,24 @@ class _MemoryDB:
 
         return MemoryItem(
             id=row[0],
-            tenant_id=row[1] or "default",
-            user_id=row[2] or "default",
-            project_id=row[3] or "",
-            session_id=row[4] or "",
-            turn_id=row[5] or "",
-            execution_id=row[6] or "",
-            scope=row[7] or MemoryScope.USER.value,
-            type=row[8] or MemoryType.FACT.value,
-            content=row[9],
-            structured_value=_json(10),
-            source_turn_id=row[11] or "",
-            confidence=float(row[12] or 0.7),
-            sensitivity=row[13] or "normal",
-            valid_from=row[14] or "",
-            valid_until=row[15] or "",
-            supersedes_id=row[16] or "",
-            status=row[17] or MemoryStatus.ACTIVE.value,
-            tags=_json(18),
-            metadata=_json(19),
+            user_id=row[1] or "default",
+            project_id=row[2] or "",
+            session_id=row[3] or "",
+            turn_id=row[4] or "",
+            execution_id=row[5] or "",
+            scope=row[6] or MemoryScope.USER.value,
+            type=row[7] or MemoryType.FACT.value,
+            content=row[8],
+            structured_value=_json(9),
+            source_turn_id=row[10] or "",
+            confidence=float(row[11] or 0.7),
+            sensitivity=row[12] or "normal",
+            valid_from=row[13] or "",
+            valid_until=row[14] or "",
+            supersedes_id=row[15] or "",
+            status=row[16] or MemoryStatus.ACTIVE.value,
+            tags=_json(17),
+            metadata=_json(18),
             embedding=embedding,
             created_at=row[20] or "",
             updated_at=row[21] or "",
@@ -255,7 +251,6 @@ class _MemoryDB:
             cursor = conn.cursor()
             row = (
                 item.id,
-                item.tenant_id,
                 item.user_id,
                 item.project_id,
                 item.session_id,
@@ -281,7 +276,7 @@ class _MemoryDB:
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO memories VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
                 )
                 """,
                 row,

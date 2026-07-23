@@ -2,7 +2,7 @@
 
 设计:
 - 每个 FeedbackEvent 绑定 execution_id,确保反馈可追溯到具体执行。
-- 反馈存为独立 JSON 文件,方便多用户隔离和重放。
+- 反馈存为独立 JSON 文件,方便隔离和重放。
 - correction 类型反馈会自动触发 patch 生成(在 backend API 中处理)。
 """
 from __future__ import annotations

@@ -306,39 +306,6 @@ class ExecutionCritic:
 
         return "未知情况", None, 0.0
 
-    async def _apply_patch(self, patch: "SkillPatch") -> bool:
-        """尝试将 auto_approved patch 直接应用到 skill YAML"""
-        target_skill = patch.target_skill
-        suggestion = patch.suggestion or {}
-        if not target_skill or not suggestion:
-            return False
-
-        # 构建 updates 字典:从 suggestion 中提取可应用字段
-        updates: Dict[str, object] = {}
-        if "method" in suggestion:
-            updates["method"] = suggestion["method"]
-        if "capability" in suggestion:
-            updates["capability"] = suggestion["capability"]
-        if "patterns" in suggestion:
-            updates["patterns"] = suggestion["patterns"]
-
-        if not updates:
-            return False
-
-        try:
-            from skills.manager import get_skill_store
-            store = get_skill_store()
-            applied = store.update_skill(target_skill, updates)
-            if applied:
-                self.logger.info(
-                    "ExecutionCritic",
-                    f"auto_approved patch {patch.id} 已应用: {target_skill} -> {applied}"
-                )
-                return True
-        except Exception as e:
-            self.logger.warning("ExecutionCritic", f"auto_apply patch 失败: {e}")
-        return False
-
     async def suggest_improvements(
         self,
         context: ExecutionContext,

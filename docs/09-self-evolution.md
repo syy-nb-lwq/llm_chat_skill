@@ -117,7 +117,7 @@ patch 字段统一为：
 - `type`：`accept / reject / correction / retry / rating`
 - `content`：反馈正文
 - `rating`：可选 1~5 评分
-- `user_id` / `session_id`：多用户隔离
+- `user_id` / `session_id`：会话/记忆隔离
 
 `FeedbackStore` 持久化到 `memory/feedback/{execution_id}__{feedback_id}.json`，并维护 `_index.json` 按 `execution_id` 索引。`correction` 类型反馈会触发 patch 生成。
 

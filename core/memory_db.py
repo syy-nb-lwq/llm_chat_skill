@@ -21,7 +21,7 @@ class MemoryEntry:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     tags: List[str] = field(default_factory=list)
-    user_id: Optional[str] = None  # 多用户支持
+    user_id: Optional[str] = None  # 单用户场景下用于会话/记忆隔离标识
 
 
 class MemoryDB:
