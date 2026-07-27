@@ -6,6 +6,50 @@
         <button class="reload" @click="reload" :disabled="loading">↻ 刷新</button>
       </div>
     </div>
+
+    <!-- M1-08: 教学草稿发布确认 -->
+    <div v-if="teaching" class="teaching-draft">
+      <div class="draft-header">
+        <span class="draft-title">📝 教学草稿待确认</span>
+        <span class="draft-status" :class="teaching.status">{{ teaching.status }}</span>
+      </div>
+      <div v-if="teaching.draft">
+        <div class="draft-row"><strong>名称:</strong> {{ teaching.draft.name || '(未定)' }}</div>
+        <div class="draft-row"><strong>能力:</strong> {{ teaching.draft.capability || '(未定)' }}</div>
+        <div class="draft-row" v-if="teaching.draft.method">
+          <strong>方法论:</strong>
+          <pre>{{ teaching.draft.method }}</pre>
+        </div>
+        <div class="draft-row" v-if="(teaching.draft.patterns||[]).length">
+          <strong>关键词:</strong>
+          <span v-for="p in teaching.draft.patterns" :key="p" class="pattern">{{ p }}</span>
+        </div>
+        <div class="draft-row" v-if="(teaching.draft.steps||[]).length">
+          <strong>步骤({{ teaching.draft.steps.length }}):</strong>
+          <span v-for="s in teaching.draft.steps" :key="s.id" class="step-chip">{{ s.id }}{{ s.tool ? '·'+s.tool : '' }}</span>
+        </div>
+      </div>
+      <div v-if="teaching.missing_fields && teaching.missing_fields.length" class="draft-row warn">
+        ⚠ 缺失字段: {{ teaching.missing_fields.join(', ') }}
+      </div>
+      <div v-if="teaching.current_question" class="draft-row question">
+        {{ teaching.current_question }}
+      </div>
+      <!-- 重复技能决策 -->
+      <div v-if="teaching.duplicate_of" class="draft-row warn">
+        与已有技能「{{ teaching.duplicate_of }}」重名,请选择:
+        <button class="draft-btn" @click="chooseTeaching('reuse')" :disabled="teachingBusy">复用现有</button>
+        <button class="draft-btn" @click="chooseTeaching('update_new')" :disabled="teachingBusy">创建新版本</button>
+      </div>
+      <!-- 草稿确认/取消 -->
+      <div v-if="teaching.status === 'draft'" class="draft-actions">
+        <button class="draft-btn primary" @click="confirmTeaching" :disabled="teachingBusy">
+          {{ teachingBusy ? '处理中...' : '✓ 确认发布' }}
+        </button>
+        <button class="draft-btn" @click="cancelTeaching" :disabled="teachingBusy">取消</button>
+      </div>
+    </div>
+
     <div v-if="loading" class="empty">加载中...</div>
     <div v-else-if="grouped.length === 0" class="empty">暂无技能</div>
     <div v-for="grp in grouped" :key="grp.name" class="skill-group">
@@ -84,7 +128,12 @@ export default {
   },
   emits: ['reload'],
   data() {
-    return { expanded: {} }
+    return {
+      expanded: {},
+      // M1-08: 教学草稿发布确认
+      teaching: null,        // 后端 /api/teachings 返回的 active 对象
+      teachingBusy: false,   // 按钮防抖
+    }
   },
   computed: {
     grouped() {
@@ -102,9 +151,83 @@ export default {
       return out
     },
   },
+  mounted() {
+    // M1-08: 进入面板即尝试拉取一次草稿
+    this.fetchTeaching()
+  },
   methods: {
-    reload() { this.$emit('reload') },
+    reload() {
+      this.$emit('reload')
+      this.fetchTeaching()
+    },
     toggleCard(name) { this.expanded[name] = !this.expanded[name] },
+    // ===== M1-08: 教学草稿发布确认 =====
+    async fetchTeaching() {
+      try {
+        const r = await fetch(`${API_BASE}/api/teachings`)
+        if (!r.ok) return
+        const data = await r.json()
+        this.teaching = data.active || null
+      } catch (e) {
+        // 静默失败:无后端时不应阻塞技能库面板
+        console.warn('[SkillManager] fetchTeaching failed:', e)
+      }
+    },
+    async confirmTeaching() {
+      if (this.teachingBusy) return
+      this.teachingBusy = true
+      try {
+        const r = await fetch(`${API_BASE}/api/teachings/confirm`, { method: 'POST' })
+        const data = await r.json()
+        if (!r.ok || data.ok === false) {
+          alert('发布失败: ' + (data.error || r.statusText))
+          return
+        }
+        this.teaching = null
+        this.reload()
+      } catch (e) {
+        alert('发布失败: ' + e.message)
+      } finally {
+        this.teachingBusy = false
+      }
+    },
+    async cancelTeaching() {
+      if (this.teachingBusy) return
+      if (!confirm('确定取消当前教学?')) return
+      this.teachingBusy = true
+      try {
+        const r = await fetch(`${API_BASE}/api/teachings/cancel`, { method: 'POST' })
+        const data = await r.json()
+        if (!r.ok || data.cancelled === false) {
+          alert('取消失败: ' + (data.error || r.statusText))
+          return
+        }
+        this.teaching = null
+      } catch (e) {
+        alert('取消失败: ' + e.message)
+      } finally {
+        this.teachingBusy = false
+      }
+    },
+    async chooseTeaching(choice) {
+      if (this.teachingBusy) return
+      this.teachingBusy = true
+      try {
+        const url = `${API_BASE}/api/teachings/choose?choice=${encodeURIComponent(choice)}`
+        const r = await fetch(url, { method: 'POST' })
+        const data = await r.json()
+        if (!r.ok || data.ok === false) {
+          alert('决策失败: ' + (data.error || r.statusText))
+          return
+        }
+        await this.fetchTeaching()
+        this.$emit('reload')
+      } catch (e) {
+        alert('决策失败: ' + e.message)
+      } finally {
+        this.teachingBusy = false
+      }
+    },
     formatTime(t) {
       if (!t) return ''
       try {
@@ -281,6 +404,98 @@ export default {
 .step-deps { font-size: 10px; color: #888; margin-left: auto; }
 
 .meta { font-size: 10px; color: #888; display: flex; gap: 12px; margin-top: 6px; }
+
+/* M1-08: 教学草稿发布确认面板 */
+.teaching-draft {
+  background: rgba(255, 193, 7, 0.08);
+  border: 1px solid rgba(255, 193, 7, 0.4);
+  border-left: 3px solid #ffc107;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.draft-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.draft-title { font-weight: 600; color: #b8860b; }
+.draft-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  text-transform: uppercase;
+  background: rgba(255, 193, 7, 0.25);
+  color: #b8860b;
+}
+.draft-status.draft { background: rgba(33, 150, 243, 0.25); color: #1565c0; }
+.draft-status.collecting { background: rgba(255, 193, 7, 0.25); color: #b8860b; }
+.draft-status.active { background: rgba(76, 175, 80, 0.25); color: #2e7d32; }
+.draft-status.cancelled, .draft-status.rejected {
+  background: rgba(244, 67, 54, 0.25);
+  color: #c62828;
+}
+.draft-row {
+  margin: 4px 0;
+  line-height: 1.5;
+}
+.draft-row pre {
+  margin: 4px 0;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+.draft-row.warn {
+  background: rgba(244, 67, 54, 0.1);
+  border-radius: 4px;
+  padding: 6px;
+  color: #c62828;
+}
+.draft-row.question {
+  background: rgba(102, 126, 234, 0.1);
+  border-radius: 4px;
+  padding: 6px;
+  color: #667eea;
+  font-style: italic;
+}
+.step-chip {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  background: rgba(102, 126, 234, 0.15);
+  border-radius: 8px;
+  color: #667eea;
+  margin-right: 4px;
+}
+.draft-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.draft-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: inherit;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.draft-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.draft-btn.primary {
+  background: rgba(76, 175, 80, 0.25);
+  border-color: rgba(76, 175, 80, 0.4);
+  color: #2e7d32;
+  font-weight: 600;
+}
+.draft-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
 
 .toast {
   position: fixed;

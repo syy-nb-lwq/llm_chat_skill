@@ -14,24 +14,23 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Set
+from collections.abc import Iterable
 
 from skills.models import Skill, SkillStep
-
 
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,63}$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
-def validate_skill(skill: Skill, tool_names: Iterable[str] = ()) -> List[str]:
+def validate_skill(skill: Skill, tool_names: Iterable[str] = ()) -> list[str]:
     """对单一 Skill 做静态校验。
 
     Args:
         skill: 待校验的 Skill
         tool_names: 当前 ToolHub 中可用的工具名集合
     """
-    issues: List[str] = []
-    tool_set: Set[str] = set(tool_names or ())
+    issues: list[str] = []
+    tool_set: set[str] = set(tool_names or ())
 
     # 必填字段
     if not (skill.name or "").strip():
@@ -48,7 +47,7 @@ def validate_skill(skill: Skill, tool_names: Iterable[str] = ()) -> List[str]:
         issues.append(f"version 不是合法的 semver: {skill.version!r}")
 
     # step DAG
-    step_ids: Set[str] = set()
+    step_ids: set[str] = set()
     for st in skill.steps or []:
         if not st.id:
             issues.append("存在缺少 id 的 step")
@@ -76,9 +75,9 @@ def validate_skill(skill: Skill, tool_names: Iterable[str] = ()) -> List[str]:
     return issues
 
 
-def _has_cycle(steps: List[SkillStep]) -> bool:
+def _has_cycle(steps: list[SkillStep]) -> bool:
     graph = {s.id: list(s.depends_on or []) for s in steps}
-    WHITE, GRAY, BLACK = 0, 1, 2
+    WHITE, GRAY, BLACK = 0, 1, 2  # noqa: N806 - DFS 染色算法标准约定
     color = {n: WHITE for n in graph}
 
     def dfs(n):

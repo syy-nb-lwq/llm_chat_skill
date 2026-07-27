@@ -13,8 +13,14 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-# 复制源码
-COPY . .
+# P0-07: 创建非 root 用户并切换。
+# 必须在 COPY 源码之前创建用户,然后把 /app 所有权交给它,避免后面写入文件(EFS/挂载卷)时无权限。
+RUN useradd --create-home --shell /bin/bash app \
+    && chown -R app:app /app
+
+# 复制源码(以 app 身份)
+USER app
+COPY --chown=app:app . .
 
 # 默认暴露端口
 EXPOSE 8000

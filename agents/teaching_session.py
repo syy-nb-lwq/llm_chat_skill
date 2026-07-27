@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from infra.logger import get_logger
 
@@ -38,13 +38,13 @@ class TeachingSession:
     user_id: str
     session_id: str
     status: str = TeachingStatus.COLLECTING
-    partial_skill: Dict[str, Any] = field(default_factory=dict)
-    evidence_turns: List[Dict[str, str]] = field(default_factory=list)  # [{role, content}]
-    missing_fields: List[str] = field(default_factory=list)
+    partial_skill: dict[str, Any] = field(default_factory=dict)
+    evidence_turns: list[dict[str, str]] = field(default_factory=list)  # [{role, content}]
+    missing_fields: list[str] = field(default_factory=list)
     current_question: str = ""
     user_choice: str = ""  # for duplicate-skill: reuse/update_new/cancel
     duplicate_of: Optional[str] = None  # 已存在的同名 skill
-    draft_skill: Optional[Dict[str, Any]] = None
+    draft_skill: Optional[dict[str, Any]] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -54,11 +54,11 @@ class TeachingSession:
     def is_terminal(self) -> bool:
         return self.status in (TeachingStatus.ACTIVE, TeachingStatus.REJECTED, TeachingStatus.CANCELLED)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def new(cls, user_id: str, session_id: str) -> "TeachingSession":
+    def new(cls, user_id: str, session_id: str) -> TeachingSession:
         return cls(
             teaching_session_id=f"teach-{uuid.uuid4().hex[:10]}",
             user_id=user_id,
@@ -66,7 +66,7 @@ class TeachingSession:
         )
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "TeachingSession":
+    def from_dict(cls, data: dict[str, Any]) -> TeachingSession:
         # 兼容旧缺省字段
         return cls(
             teaching_session_id=data.get("teaching_session_id", ""),
@@ -119,7 +119,7 @@ class TeachingSessionStore:
 
     def find_active_for(self, user_id: str, session_id: str) -> Optional[TeachingSession]:
         """找到当前 session 上尚未结束的最近一个教学会话。"""
-        candidates: List[TeachingSession] = []
+        candidates: list[TeachingSession] = []
         for path in self.base.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -131,8 +131,8 @@ class TeachingSessionStore:
         candidates.sort(key=lambda x: x.updated_at, reverse=True)
         return candidates[0] if candidates else None
 
-    def list_active(self) -> List[TeachingSession]:
-        out: List[TeachingSession] = []
+    def list_active(self) -> list[TeachingSession]:
+        out: list[TeachingSession] = []
         for path in self.base.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))

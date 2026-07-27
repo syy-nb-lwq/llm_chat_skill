@@ -1,8 +1,7 @@
 """MCP 工具源 - 接入 MCP (Model Context Protocol) 协议的工具"""
 import asyncio
 import json
-from dataclasses import asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from tools.base import ToolParam, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
@@ -11,7 +10,7 @@ from tools.sources.base import SourceType, ToolSource, ToolSourceBase
 class MCPTool:
     """MCP 工具封装"""
 
-    def __init__(self, name: str, description: str, input_schema: Dict, source: "MCPSource"):
+    def __init__(self, name: str, description: str, input_schema: dict, source: "MCPSource"):
         self.name = name
         self.description = description
         self.input_schema = input_schema
@@ -46,7 +45,7 @@ class MCPSource(ToolSourceBase):
     """MCP 工具源
 
     通过 stdio 或 HTTP 连接 MCP 服务器,获取可用工具列表并执行。
-    
+
     MCP 协议文档: https://modelcontextprotocol.io/
     """
 
@@ -60,7 +59,7 @@ class MCPSource(ToolSourceBase):
 
     async def connect(self) -> bool:
         """连接 MCP 服务器
-        
+
         支持两种连接方式:
         1. stdio: 通过子进程 stdio 通信
         2. http: 通过 HTTP API 通信
@@ -99,15 +98,21 @@ class MCPSource(ToolSourceBase):
             self._reader = None
             self._writer = None
 
-    async def list_tools(self) -> List[Any]:
+        # 关闭 HTTP 会话(若存在)
+        session = getattr(self, "_http_session", None)
+        if session is not None and not session.closed:
+            await session.close()
+            self._http_session = None
+
+    async def list_tools(self) -> list[Any]:
         """列出所有 MCP 工具"""
         return [
-            MCPTool(name=t["name"], description=t["description"], 
+            MCPTool(name=t["name"], description=t["description"],
                    input_schema=t.get("inputSchema", {}), source=self)
             for t in self._tools.values()
         ]
 
-    async def call_tool(self, tool_name: str, params: Dict[str, Any]) -> ToolResult:
+    async def call_tool(self, tool_name: str, params: dict[str, Any]) -> ToolResult:
         """调用 MCP 工具"""
         if not self._connected:
             return ToolResult(success=False, error="MCP 源未连接")
@@ -140,7 +145,6 @@ class MCPSource(ToolSourceBase):
 
     async def _connect_stdio(self, server_path: str) -> bool:
         """通过 stdio 连接 MCP 服务器"""
-        import os
         import sys
 
         # 启动 MCP 服务器进程
@@ -177,30 +181,27 @@ class MCPSource(ToolSourceBase):
     async def _connect_http(self, server_url: str) -> bool:
         """通过 HTTP 连接 MCP 服务器"""
         import aiohttp
-        
-        self._server_url = server_url.rstrip("/")
-        
-        async with aiohttp.ClientSession() as session:
-            # 尝试获取工具列表
-            try:
-                async with session.get(f"{self._server_url}/tools") as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for tool in data.get("tools", []):
-                            tool_name = tool.get("name")
-                            if tool_name:
-                                self._tools[tool_name] = {
-                                    "name": tool_name,
-                                    "description": tool.get("description", ""),
-                                    "inputSchema": tool.get("inputSchema", {}),
-                                }
-                    self._connected = True
-                    return True
-            except Exception:
-                pass
 
-        # 简单 HTTP 模式:假设返回 JSON
+        self._server_url = server_url.rstrip("/")
+        # 始终创建持久会话,供后续 _call_http 使用
         self._http_session = aiohttp.ClientSession()
+
+        # 尝试获取工具列表(失败不阻断连接,后续可走 _call_http)
+        try:
+            async with self._http_session.get(f"{self._server_url}/tools") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for tool in data.get("tools", []):
+                        tool_name = tool.get("name")
+                        if tool_name:
+                            self._tools[tool_name] = {
+                                "name": tool_name,
+                                "description": tool.get("description", ""),
+                                "inputSchema": tool.get("inputSchema", {}),
+                            }
+        except Exception:
+            pass
+
         self._connected = True
         return True
 
@@ -216,7 +217,7 @@ class MCPSource(ToolSourceBase):
         except Exception:
             pass
 
-    async def _call_stdio(self, tool_name: str, params: Dict) -> Dict:
+    async def _call_stdio(self, tool_name: str, params: dict) -> dict:
         """通过 stdio 调用工具"""
         response = await self._send_request("tools/call", {
             "name": tool_name,
@@ -224,7 +225,7 @@ class MCPSource(ToolSourceBase):
         })
         return response.get("result", {})
 
-    async def _call_http(self, tool_name: str, params: Dict) -> Dict:
+    async def _call_http(self, tool_name: str, params: dict) -> dict:
         """通过 HTTP 调用工具"""
         async with self._http_session.post(
             f"{self._server_url}/tools/call",
@@ -234,7 +235,7 @@ class MCPSource(ToolSourceBase):
                 return await resp.json()
             return {"error": f"HTTP {resp.status}"}
 
-    async def _send_request(self, method: str, params: Dict) -> Dict:
+    async def _send_request(self, method: str, params: dict) -> dict:
         """发送 JSON-RPC 请求"""
         self._request_id += 1
         request = {
@@ -243,14 +244,14 @@ class MCPSource(ToolSourceBase):
             "method": method,
             "params": params,
         }
-        
+
         request_str = json.dumps(request) + "\n"
         self._writer.write(request_str.encode())
         await self._writer.drain()
-        
+
         return await self._read_response()
 
-    async def _send_notification(self, method: str, params: Dict):
+    async def _send_notification(self, method: str, params: dict):
         """发送 JSON-RPC 通知(无响应)"""
         notification = {
             "jsonrpc": "2.0",
@@ -261,7 +262,7 @@ class MCPSource(ToolSourceBase):
         self._writer.write(notification_str.encode())
         await self._writer.drain()
 
-    async def _read_response(self) -> Dict:
+    async def _read_response(self) -> dict:
         """读取响应"""
         line = await self._reader.readline()
         if not line:

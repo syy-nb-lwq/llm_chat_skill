@@ -1,7 +1,8 @@
 """Base Provider 抽象接口"""
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, AsyncIterator, Any
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -27,7 +28,7 @@ class BaseProvider(ABC):
     @abstractmethod
     async def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,
@@ -40,7 +41,7 @@ class BaseProvider(ABC):
     @abstractmethod
     async def chat_stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,
@@ -56,7 +57,7 @@ class BaseProvider(ABC):
 
     async def chat_with_retry(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         max_retries: int = 3,
         model: Optional[str] = None,

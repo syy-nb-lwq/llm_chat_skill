@@ -1,0 +1,27 @@
+id: skill_63fc2034
+name: demo
+version: 1.0.1
+capability: can do
+method: do it
+patterns:
+- demo
+tags:
+- t
+steps:
+- id: s1
+  name: do
+  description: do
+  tool: null
+  params: {}
+  depends_on: []
+  parallel_group: null
+  fallback: null
+  retry: 0
+  timeout_s: 30
+examples:
+- 以后做 demo,应该这样
+source: taught
+author: default
+created_at: '2026-07-20T16:39:09.347365'
+updated_at: '2026-07-20T16:39:09.347293'
+active: true

@@ -18,15 +18,39 @@
 - `chat()` 是同步桥接层，供 CLI / Streamlit 使用
 - `reset()` 只清空当前 `Context`
 
-`handle()` 的主要流程：
+### 1.1 四级执行标识（M0-01）
+
+文件：`core/identity.py`
+
+`Agent.handle()` 在入口创建 `IdentityContext`，统一四级标识：
+
+| 字段 | 含义 | 生成时机 |
+|---|---|---|
+| `user_id` | 用户身份 | 由调用方传入或服务端签发（C-01） |
+| `session_id` | 会话身份 | 同上 |
+| `turn_id` | 一轮对话 | `IdentityContext.__post_init__` 自动生成 `turn-<ts>-<rand>` |
+| `execution_id` | 一次执行（handle 调用） | 自动生成 `exec-<ts>-<rand>` |
+| `parent_execution_id` | 重试时的父执行 | `child()` 派生时填入父 `execution_id` |
+
+设计要点：
+
+- 标识只承担"区分身份/回合/执行"职责，不绑定任何存储路径前缀；真正的存储路径由调用方决定，e2e 测试可用 `tmp_path` 隔离
+- 同一 session 多次 `handle()` 各自拥有独立 `execution_id`，失败记录不再互相覆盖
+- 重试通过 `IdentityContext.child()` 派生子 execution，同时保留 `parent_execution_id` 指针，便于回溯执行链路
+- 每个 emit 的 event payload 都带上 `execution_id`，前端可按 execution 串起事件流
+
+### 1.2 handle() 主流程
 
 1. 写入用户消息到 `Context`
-2. 调用 `ManagerAgent.plan()`
-3. 根据意图分流到闲聊、教学、重试或工具链路
-4. 调用 `LearningAgent.execute_dag()`
-5. 调用 `OrchestratorAgent.stream()` 生成最终回复
-6. 把回复写回 `Context`
-7. 异步触发 `ExecutionCritic.evaluate()`
+2. 创建 `IdentityContext`（M0-01）
+3. 调用 `ManagerAgent.plan()`
+4. 根据意图分流到闲聊、教学、重试、技能管理或工具链路
+5. 调用 `LearningAgent.execute_dag()`
+6. 调用 `OrchestratorAgent.stream()` 生成最终回复
+7. 把回复写回 `Context`
+8. `build_execution_context()` 把四级标识 + 工具结果 + latency 交给 `ExecutionCritic.evaluate()` 异步评估
+9. `_maybe_record_episode()` 把本次执行写入 `MemoryRepository`（M2-03）
+10. `_maybe_summarize()` 超过窗口时折叠早期消息为摘要（M2-07）
 
 ## 2. ManagerAgent
 
@@ -54,6 +78,7 @@
 - `skill`
 - `teach`
 - `retry`
+- `manager`（M1-09：技能管理意图，走 `SkillManagerAgent`）
 - `unknown`
 
 当前策略：
@@ -61,6 +86,7 @@
 - 优先用规则和意图检测器快速分类
 - 需要时再调用 LLM 做 JSON 规划
 - 在自演化开启时，会把历史提示拼进规划输入
+- `ManagerAgent._current_user_id` 在 `handle()` 入口被刷新，用于召回时按 `user_id` 过滤（M2-06）
 
 ## 3. LearningAgent
 
@@ -141,7 +167,27 @@
 - 验证流水线 → `skills/validator.py`
 - 发布确认 API → `backend/main.py /api/teachings/*`
 
+### 5.1 SkillManagerAgent（M1-09）
+
+文件：`agents/skill_manager_agent.py`
+
+`MANAGER` 意图走主链的技能管理 Agent，支持：
+
+- `list`：列出所有技能 + active 版本
+- `show`：展示某技能的某版本详情
+- `versions`：列出同名技能的全部历史版本
+- `activate`：切换 active 指针到指定版本
+- `rollback`：回滚到上一版本（保留历史，不删除）
+
+返回 `SkillManagerResult`（`action / ok / message / skill_name / version / details`），由 `Agent.handle()` 通过 `skill_manager_result` 事件推给前端。
+
+### 5.2 修复 `_complete_teaching()` bug（M1-07）
+
+- 移除不存在的 `self.llm` 调用
+- 停止把 assistant 追问当作 user 消息回写 `Context`；中间追问以 `assistant_message` 角色留给下一轮
+
 ## 6. 当前问题
 
 - `ManagerAgent` 仍较依赖 prompt + JSON 输出稳定性
-- TeachingSession 状态机已落地，前端对交互式问答体验仍比较基础（M1-08 未完成）
+- 教学交互式问答体验仍偏基础，复杂多轮教学需要前端更多引导
+- `SkillManagerAgent` 当前只支持只读 + 切换/回滚，不支持通过对话创建版本

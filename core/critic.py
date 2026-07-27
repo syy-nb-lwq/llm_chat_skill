@@ -1,11 +1,9 @@
 """ExecutionCritic - 执行批评器:在每次 DAG 执行后评估结果质量"""
-import asyncio
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Optional
 
-from core.memory import FailureRecord, MemoryStore, SkillPatch, get_memory_store
+from core.memory import MemoryStore, SkillPatch, get_memory_store
 from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
 from tools.base import ToolResult
@@ -21,9 +19,9 @@ class EvaluationResult:
     latency_ms: float
     user_corrected: bool
     diagnosis: str
-    suggestion: Optional[Dict] = None
+    suggestion: Optional[dict] = None
     confidence: float = 0.5
-    records_generated: List[str] = field(default_factory=list)  # 生成的处理类型列表
+    records_generated: list[str] = field(default_factory=list)  # 生成的处理类型列表
 
 
 @dataclass
@@ -40,13 +38,22 @@ class TaskExecutionSummary:
 @dataclass
 class ExecutionContext:
     """执行上下文:包含一次完整执行的所有信息"""
-    trace_id: str
-    scenario: str
-    intent: str
-    selected_skill: Optional[str]
-    tasks: List[TaskExecutionSummary]
-    latency_ms: float
+    execution_id: str = ""
+    trace_id: str = ""
+    turn_id: str = ""
+    user_id: str = "default"
+    session_id: str = "default"
+    parent_execution_id: Optional[str] = None
+    scenario: str = ""
+    intent: str = ""
+    selected_skill: Optional[str] = None
+    selected_skill_version: Optional[str] = None
+    tasks: list[TaskExecutionSummary] = field(default_factory=list)
+    latency_ms: float = 0.0
     user_feedback: Optional[str] = None  # 下一轮用户是否有纠正
+    final_output: Optional[str] = None  # M3-03:最终输出文本,供 ResultValidator 校验
+    selected_skill_obj: Optional[Any] = None  # M3-03:技能对象,供结果校验
+    attempt_summary: dict[str, Any] = field(default_factory=dict)  # retry/fallback/timeout 汇总
 
 
 class ExecutionCritic:
@@ -84,6 +91,26 @@ class ExecutionCritic:
                 self.logger.warning("ExecutionCritic", f"无法初始化 LLM: {e}")
         return self._llm_client
 
+    def _evaluate_result(self, context: ExecutionContext) -> float:
+        """M3-03:对无工具任务的最终输出做结果校验,返回 success_rate。"""
+        output = context.final_output or ""
+        skill = context.selected_skill_obj
+        if not output and skill is None:
+            return 1.0  # 无输出且无技能时保持旧行为,避免误杀
+        try:
+            from core.result_validator import ResultValidator
+            validator = ResultValidator()
+            result = validator.validate(skill, output, context.intent)
+            if not result.passed:
+                self.logger.info(
+                    "ExecutionCritic",
+                    f"M3-03 结果校验未通过: score={result.score:.2f}, issues={result.issues}",
+                )
+            return result.score
+        except Exception as e:
+            self.logger.warning("ExecutionCritic", f"ResultValidator 异常,降级为 1.0: {e}")
+            return 1.0
+
     async def evaluate(
         self,
         context: ExecutionContext,
@@ -109,7 +136,8 @@ class ExecutionCritic:
         # 计算评估维度
         total_tasks = len(context.tasks)
         if total_tasks == 0:
-            success_rate = 1.0
+            # M3-03:无工具任务不再无条件得 100%,交给 ResultValidator 校验最终输出
+            success_rate = self._evaluate_result(context)
         else:
             success_count = sum(1 for t in context.tasks if t.success)
             success_rate = success_count / total_tasks
@@ -123,11 +151,11 @@ class ExecutionCritic:
         )
 
         # 根据评估结果决定记录什么
-        records_generated: List[str] = []
+        records_generated: list[str] = []
 
         # 1. 失败情况:记录失败(success_rate < 1.0 都记录)
         if success_rate < 1.0:
-            failure_record = self.memory.record_failure(
+            self.memory.record_failure(
                 trace_id=context.trace_id,
                 scenario=context.scenario,
                 intent=context.intent,
@@ -155,11 +183,10 @@ class ExecutionCritic:
                 status="pending",
             )
 
-            # 高置信度(>0.9)自动生效:持久化 patch 并尝试自动应用
+            # M3-06: 高置信度 patch 仅标记为 auto_approved，仍需走审批/验证/回归门禁。
             if confidence >= 0.9:
                 patch.status = "auto_approved"
                 self.memory.add_pending_patch(patch)
-                await self._apply_patch(patch)
                 records_generated.append("patch_auto_approved")
             else:
                 self.memory.add_pending_patch(patch)
@@ -217,12 +244,10 @@ class ExecutionCritic:
         context: ExecutionContext,
         success_rate: float,
         fallback_count: int,
-    ) -> tuple[str, Optional[Dict], float]:
+    ) -> tuple[str, Optional[dict], float]:
         """分析执行情况,生成诊断和建议。
 
-        策略:
-        1. 优先用规则快速判断(无 LLM 调用)
-        2. 仅在规则不足以判断时调用 LLM
+        策略:仅基于规则快速判断(无 LLM 调用)。
 
         Returns: (diagnosis, suggestion, confidence)
         """
@@ -277,129 +302,116 @@ class ExecutionCritic:
 
         return "未知情况", None, 0.0
 
-    async def _apply_patch(self, patch: "SkillPatch") -> bool:
-        """尝试将 auto_approved patch 直接应用到 skill YAML"""
-        target_skill = patch.target_skill
-        suggestion = patch.suggestion or {}
-        if not target_skill or not suggestion:
-            return False
-
-        # 构建 updates 字典:从 suggestion 中提取可应用字段
-        updates: Dict[str, object] = {}
-        if "method" in suggestion:
-            updates["method"] = suggestion["method"]
-        if "capability" in suggestion:
-            updates["capability"] = suggestion["capability"]
-        if "patterns" in suggestion:
-            updates["patterns"] = suggestion["patterns"]
-
-        if not updates:
-            return False
-
-        try:
-            from skills.manager import get_skill_store
-            store = get_skill_store()
-            applied = store.update_skill(target_skill, updates)
-            if applied:
-                self.logger.info(
-                    "ExecutionCritic",
-                    f"auto_approved patch {patch.id} 已应用: {target_skill} -> {applied}"
-                )
-                return True
-        except Exception as e:
-            self.logger.warning("ExecutionCritic", f"auto_apply patch 失败: {e}")
-        return False
-
-    async def suggest_improvements(
-        self,
-        context: ExecutionContext,
-    ) -> Optional[Dict]:
-        """可选:对复杂场景调用 LLM 生成改进建议(仅在 confidence < 0.7 时调用)"""
-        llm = self._get_llm_client()
-        if llm is None:
-            return None
-
-        # 构建 prompt
-        prompt = self._build_improvement_prompt(context)
-        if not prompt:
-            return None
-
-        try:
-            response = await llm.chat(
-                messages=[
-                    {"role": "system", "content": "你是一个技能优化专家。根据执行情况,给出改进建议。"},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-            )
-            # 尝试解析 JSON
-            import json, re
-            m = re.search(r"\{[\s\S]*\}", response)
-            if m:
-                return json.loads(m.group())
-        except Exception as e:
-            self.logger.warning("ExecutionCritic", f"LLM 建议生成失败: {e}")
-
-        return None
-
-    def _build_improvement_prompt(self, context: ExecutionContext) -> str:
-        """构建改进建议 prompt"""
-        if context.selected_skill is None:
-            return ""
-
-        lines = [
-            f"场景: {context.scenario}",
-            f"意图: {context.intent}",
-            f"技能: {context.selected_skill}",
-            f"执行结果:",
-        ]
-
-        for t in context.tasks:
-            status = "✓" if t.success else "✗"
-            fallback = " (fallback)" if t.used_fallback else ""
-            retry = f" (重试{t.retry_count}次)" if t.retry_count > 0 else ""
-            error = f" - {t.error}" if t.error else ""
-            lines.append(f"  {status} {t.tool}{fallback}{retry}{error}")
-
-        lines.append(f"耗时: {context.latency_ms:.0f}ms")
-        lines.append("")
-        lines.append("请分析失败原因,给出改进建议。输出 JSON 格式:")
-        lines.append('{"diagnosis": "...", "suggestion": {...}, "confidence": 0.0~1.0}')
-
-        return "\n".join(lines)
-
 
 def build_execution_context(
     trace_id: str,
     scenario: str,
     intent: str,
     selected_skill: Optional[str],
-    tool_results: Dict[str, ToolResult],
+    tool_results: dict[str, ToolResult],
     latency_ms: float,
     user_feedback: Optional[str] = None,
+    *,
+    task_specs: Optional[dict[str, dict[str, Any]]] = None,
+    execution_id: str = "",
+    turn_id: str = "",
+    user_id: str = "default",
+    session_id: str = "default",
+    parent_execution_id: Optional[str] = None,
+    selected_skill_version: Optional[str] = None,
+    final_output: Optional[str] = None,
+    selected_skill_obj: Optional[Any] = None,
 ) -> ExecutionContext:
-    """从工具执行结果构建 ExecutionContext"""
-    tasks: List[TaskExecutionSummary] = []
+    """从工具执行结果构建 ExecutionContext。
+
+    task_specs 把 task_id 映射到包含真实 {type, retry, fallback_to, timeout_s}
+    的 task 字典,避免 ``build_execution_context`` 倒退到用 task_id 推断
+    tool 名的旧行为(M0-02)。
+
+    M3-03: final_output / selected_skill_obj 供 ResultValidator 校验无工具任务。
+    """
+    tasks: list[TaskExecutionSummary] = []
+    attempt_summary: dict[str, Any] = {
+        "tools": {},
+        "total_retries": 0,
+        "fallbacks_used": 0,
+        "timeouts": 0,
+    }
+    specs = task_specs or {}
 
     for task_id, result in tool_results.items():
-        # 从 task_id 推断 tool 名(格式: t1, t2...)
-        tool_name = task_id if task_id.startswith("tool:") else f"task_{task_id}"
         meta = getattr(result, "meta", {}) or {}
-        tasks.append(TaskExecutionSummary(
+        spec = specs.get(task_id) or {}
+        tool_name = (
+            meta.get("tool")
+            or spec.get("type")
+            or (task_id if task_id.startswith("tool:") else None)
+            or f"task_{task_id}"
+        )
+
+        # attempts: 优先 meta,否则 spec.retry+1
+        if "attempts" in meta:
+            attempts = int(meta.get("attempts") or 1)
+        elif "retry_count" in meta:
+            attempts = int(meta["retry_count"]) + 1
+        else:
+            attempts = int(spec.get("retry", 0)) + 1
+        retry_count = max(0, attempts - 1)
+
+        # used_fallback: 优先 meta,再 spec.fallback_to 决定
+        # P0-06: 统一为"实际触发了 fallback 路径才算 used",
+        # 即 fallback_to 已声明 + 主路径失败。与 agents/learning.py 的语义对齐,
+        # 避免主路径成功但因声明了 fallback 就被误统计为 used_fallback。
+        used_fallback = bool(meta.get("used_fallback", False))
+        if not used_fallback and spec.get("fallback_to") and not result.success:
+            used_fallback = True
+
+        error = result.error or ""
+        is_timeout = "超时" in error or "timeout" in error.lower()
+
+        task_summary = TaskExecutionSummary(
             task_id=task_id,
-            tool=tool_name,
+            tool=str(tool_name),
             success=result.success,
-            used_fallback=bool(meta.get("used_fallback", False)),
-            retry_count=int(meta.get("retry_count", 0)),
-            error=result.error or "",
-        ))
+            used_fallback=used_fallback,
+            retry_count=retry_count,
+            error=error,
+        )
+        tasks.append(task_summary)
+
+        attempt_summary["tools"][task_id] = {
+            "tool": str(tool_name),
+            "spec_retry": int(spec.get("retry", 0) or 0),
+            "spec_timeout_s": int(spec.get("timeout_s", 30) or 30),
+            "spec_fallback_to": spec.get("fallback_to"),
+            "meta_retry_count": int(meta.get("retry_count", 0) or 0),
+            "meta_attempts": int(meta.get("attempts", 0) or 0),
+            "meta_latency_ms": float(meta.get("latency_ms", 0.0) or 0.0),
+            "used_fallback": used_fallback,
+            "is_timeout": is_timeout,
+            "success": result.success,
+        }
+        attempt_summary["total_retries"] += retry_count
+        if used_fallback:
+            attempt_summary["fallbacks_used"] += 1
+        if is_timeout:
+            attempt_summary["timeouts"] += 1
 
     return ExecutionContext(
+        execution_id=execution_id or trace_id,
         trace_id=trace_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        session_id=session_id,
+        parent_execution_id=parent_execution_id,
         scenario=scenario,
         intent=intent,
         selected_skill=selected_skill,
+        selected_skill_version=selected_skill_version,
         tasks=tasks,
         latency_ms=latency_ms,
         user_feedback=user_feedback,
+        final_output=final_output,
+        selected_skill_obj=selected_skill_obj,
+        attempt_summary=attempt_summary,
     )

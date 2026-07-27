@@ -20,6 +20,8 @@ uploads/
 outputs/
 vector_store/
 memory/
+tools/proposals/
+heartbeat/
 *.xlsx
 *.xls
 

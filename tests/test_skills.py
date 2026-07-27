@@ -5,9 +5,8 @@ from pathlib import Path
 import pytest
 
 from skills.loader import SkillLoader
-from skills.registry import SkillRegistry, _has_cycle
 from skills.models import Skill, SkillStep
-
+from skills.registry import SkillRegistry, _has_cycle
 
 SAMPLE_YAML = textwrap.dedent("""
 name: test_skill
@@ -60,7 +59,7 @@ def test_registry_match():
 def test_registry_match_score_exact_full():
     reg = SkillRegistry([Skill(name="t", patterns=["abc"])])
     exact = reg.match("abc")
-    fuzzy = reg.match("xx abc yy")
+    reg.match("xx abc yy")
     assert exact[0] is not None
     # 完全匹配分数应该更高(0.5 vs 1.0),出现在 top 1
     assert exact and exact[0].name == "t"
@@ -97,3 +96,35 @@ def test_registry_version_allowed():
     reg.add(Skill(name="t", version="1.0.0"))
     reg.add(Skill(name="t", version="1.1.0"))  # 不同 version 允许
     assert "t" in reg._by_name
+
+
+def test_registry_semver_max_picks_1_10_over_1_9():
+    """P0-02: 字符串比较会让 "1.10.0" < "1.9.0",导致 active 选错。
+
+    用 semver 解析后,1.10.0 必须排在 1.9.0 之上;2.0.0 仍排第一。
+    """
+    from skills.registry import _max_version, _semver_key
+
+    # 直接验证 key 排序
+    assert _semver_key("1.9.0") < _semver_key("1.10.0")
+    assert _semver_key("1.10.0") < _semver_key("2.0.0")
+
+    # 在 registry 里未声明 active 时,get() 必须返回 1.10.0
+    reg = SkillRegistry()
+    reg.add(Skill(name="t", version="1.9.0"))
+    reg.add(Skill(name="t", version="1.10.0"))
+    reg.add(Skill(name="t", version="2.0.0"))
+    active = reg.get("t")
+    assert active is not None
+    assert active.version == "2.0.0"
+
+    # 删掉 2.0.0 后,active 应回退到 1.10.0 而不是 1.9.0
+    reg._by_version["t"].pop("2.0.0")
+    reg._active_versions.pop("t", None)
+    active2 = reg.get("t")
+    assert active2 is not None
+    assert active2.version == "1.10.0"
+
+    # _max_version 集合版本
+    assert _max_version(["1.9.0", "1.10.0", "2.0.0"]) == "2.0.0"
+    assert _max_version(["1.9.0", "1.10.0"]) == "1.10.0"

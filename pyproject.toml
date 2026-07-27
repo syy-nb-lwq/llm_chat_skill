@@ -1,0 +1,141 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-agent"
+version = "1.0.0"
+description = "Skill Agent - 自演化 LLM 编排系统"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Skill Agent Team" }]
+
+dependencies = [
+    "openai>=1.30",
+    "anthropic>=0.35",
+    "httpx>=0.25.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.23.0",
+    "websockets>=10.0",
+    "streamlit>=1.28.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.0",
+    "PyYAML>=6.0",
+    "fastapi-websocket-pubsub>=0.3.0",
+    "tiktoken>=0.5.0",
+    "jsonschema>=4.20.0",
+    "python-multipart>=0.0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "ruff>=0.5",
+    "mypy>=1.8",
+    "pip-audit>=2.7",
+]
+
+[tool.setuptools]
+# 显式声明 packages,避免 setuptools 自动发现把 tests/ 当包
+py-modules = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    "build",
+    "dist",
+    ".venv",
+    "node_modules",
+    "frontend",
+    "data",
+]
+
+[tool.ruff.lint]
+# E: pycodestyle errors / F: pyflakes / W: warnings / I: isort
+# N: pep8-naming / UP: pyupgrade / BLE: blind except
+select = ["E", "F", "W", "I", "N", "UP", "BLE"]
+# BLE001 = blind-except (Exception without re-raising);P1-06 启用强制
+# E722 = bare except (do not use `except:`)
+ignore = [
+    "E501",   # line too long(交给 formatter,这里只做语义检查)
+    "E731",   # lambda assignment(部分回调场景可读性可接受)
+    "N805",   # method first arg(某些 dataclass 场景冲突)
+    "N818",   # error suffix on exception name(项目已有中文异常名)
+    "UP007",  # Optional[X] 与 X | None 在 3.10 运行时仍需 typing.Optional
+    "UP045",  # 同上,Optional 兼容性
+    # P1-01: BLE001 暂时全局忽略,P1-06 会逐处改为具体异常类型后从 ignore 移除。
+    # 渐进式策略:先让 ruff check 干净,再分阶段收紧。
+    "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["BLE001"]  # 测试允许宽 except 用于异常断言
+"tests/e2e/**" = ["BLE001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "agents", "skills", "tools", "infra", "backend", "ui"]
+
+[tool.mypy]
+python_version = "3.10"
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "."
+ignore_missing_imports = true
+# 渐进式严格:不全局 disallow_untyped_defs,先开 warn_return_any
+warn_unused_ignores = false
+warn_redundant_casts = true
+warn_unused_configs = true
+# 排除测试与第三方生成代码
+exclude = [
+    "build/",
+    "dist/",
+    ".venv/",
+    "node_modules/",
+    "frontend/",
+    "data/",
+]
+
+# 分模块覆盖:core/agents/backend 严格,其他模块宽松
+# P1-01 渐进式策略:先关闭需要大量注解重构的规则,让 mypy 能通过。
+# 后续阶段(P2 架构重构后)逐步开启这些规则:
+#   1. check_untyped_defs = true  (检查未注解函数体内的类型错误)
+#   2. warn_return_any = true     (警告返回 Any 类型)
+#   3. 逐步修复 disable_error_code 中的错误码
+[[tool.mypy.overrides]]
+module = ["core.*", "agents.*", "backend.*", "infra.*", "skills.*", "tools.*", "ui.*"]
+disallow_untyped_defs = false
+check_untyped_defs = false
+warn_return_any = false
+# P1-01: 暂时禁用以下错误码,它们需要大量类型注解重构:
+# - assignment: 赋值类型不兼容(通常是 dict vs dataclass)
+# - attr-defined: 属性不存在(通常是 dict 当对象用)
+# - call-arg: 函数调用参数不匹配
+# - arg-type: 参数类型不匹配
+# - union-attr: Optional 类型未做空值检查
+# - no-any-return: 返回 Any 类型
+# - override: 方法重写签名不匹配
+# - var-annotated: 变量需要显式类型注解
+# - return-value: 返回值类型不匹配
+# - operator: 操作符不支持
+# - misc: 其他
+disable_error_code = [
+    "assignment",
+    "attr-defined",
+    "call-arg",
+    "arg-type",
+    "union-attr",
+    "no-any-return",
+    "override",
+    "var-annotated",
+    "return-value",
+    "operator",
+    "misc",
+]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true

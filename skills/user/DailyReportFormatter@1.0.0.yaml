@@ -1,0 +1,63 @@
+id: skill_e9b93bc5
+name: DailyReportFormatter
+version: 1.0.0
+capability: 根据用户输入的工作内容，自动提取关键事项并整理成标准日报格式，避免过于简单或披露过多细节。
+method: 日报内容摘要与格式化
+patterns:
+- 日报
+- 工作内容
+- 格式
+- 整理
+- 每日汇报
+tags:
+- 日报
+- 文本处理
+- 自动化
+- 工作汇报
+steps:
+- id: step1
+  name: 接收输入
+  description: 接收用户描述的当天工作事项文本。
+  tool: null
+  params: {}
+  depends_on: []
+  parallel_group: null
+  fallback: null
+  retry: 0
+  timeout_s: 30
+- id: step2
+  name: 解析内容
+  description: 分析输入文本，识别主要任务、完成情况、关键进度或问题。
+  tool: null
+  params: {}
+  depends_on: []
+  parallel_group: null
+  fallback: null
+  retry: 0
+  timeout_s: 30
+- id: step3
+  name: 结构化整理
+  description: 按照预设的日报模板（如分点列出任务、进展、明日计划等）进行格式化，保留必要信息，省略冗余细节。
+  tool: null
+  params: {}
+  depends_on: []
+  parallel_group: null
+  fallback: null
+  retry: 0
+  timeout_s: 30
+- id: step4
+  name: 输出日报
+  description: 返回整理后的日报文本。
+  tool: null
+  params: {}
+  depends_on: []
+  parallel_group: null
+  fallback: null
+  retry: 0
+  timeout_s: 30
+examples:
+- 生成一个技能 用来做每日的日报编写 ，原则上就是 不需要太简单，不需要披露 太多细节，我会发给你我今天做了什么事情 你给我整理成规定格式就可以
+source: taught
+author: user
+created_at: '2026-07-14T17:30:56.874017'
+updated_at: '2026-07-14T17:30:56.873945'

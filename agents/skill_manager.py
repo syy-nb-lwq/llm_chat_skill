@@ -6,13 +6,12 @@
 3. 更新技能 - 基于反馈或教导更新已有技能
 4. 整理技能 - 定时检查、归纳、合并重复技能
 """
-from typing import List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 from core.agent_base import BaseAgent
-from skills.manager import get_skill_store, Skill, SkillStore
-from skills.models import SkillStep
+from skills.manager import Skill, get_skill_store
 
 
 @dataclass
@@ -27,7 +26,7 @@ class SkillMatch:
 @dataclass
 class SkillAnalysis:
     """技能分析结果"""
-    similar_skills: List[SkillMatch]  # 相似技能
+    similar_skills: list[SkillMatch]  # 相似技能
     overlap_ratio: float               # 重叠程度 0-1
     suggestion: str                    # 建议
     can_merge: bool                   # 是否可以合并
@@ -43,7 +42,7 @@ class SkillRetrievalAgent(BaseAgent):
 
     async def find_matching_skills(
         self, user_input: str, top_k: int = 3
-    ) -> List[SkillMatch]:
+    ) -> list[SkillMatch]:
         """查找最匹配当前任务的技能"""
         store = get_skill_store()
         all_skills = store.list_all()
@@ -76,7 +75,7 @@ class SkillRetrievalAgent(BaseAgent):
             self.logger.error("SkillRetrieval", f"检索失败: {e}")
             return []
 
-    def _parse_matches(self, response: str, skills: List[Skill]) -> List[SkillMatch]:
+    def _parse_matches(self, response: str, skills: list[Skill]) -> list[SkillMatch]:
         """解析 LLM 返回的匹配结果"""
         import json
         import re
@@ -114,7 +113,7 @@ class SkillCreatorAgent(BaseAgent):
 
     async def create_skill_from_teaching(
         self, user_input: str
-    ) -> Tuple[bool, str, Optional[Skill]]:
+    ) -> tuple[bool, str, Optional[Skill]]:
         """从教导中创建技能"""
         from agents.skill_trainer import SkillTrainer
 
@@ -132,7 +131,7 @@ class SkillUpdaterAgent(BaseAgent):
 
     async def update_skill(
         self, skill_name: str, feedback: str
-    ) -> Tuple[bool, str, Optional[Skill]]:
+    ) -> tuple[bool, str, Optional[Skill]]:
         """基于反馈更新技能"""
         store = get_skill_store()
         skill = store.get_by_name(skill_name)
@@ -193,7 +192,7 @@ class SkillOrganizerAgent(BaseAgent):
     def system_prompt(self) -> str:
         return """你是一个技能库管理员，负责定期整理技能库，发现并处理重复或过时的技能。"""
 
-    async def analyze_skill_duplication(self) -> List[SkillAnalysis]:
+    async def analyze_skill_duplication(self) -> list[SkillAnalysis]:
         """分析技能库中的重复技能"""
         store = get_skill_store()
         all_skills = store.list_all()
@@ -259,7 +258,7 @@ class SkillOrganizerAgent(BaseAgent):
 
     async def merge_skills(
         self, skill1_name: str, skill2_name: str
-    ) -> Tuple[bool, str, Optional[Skill]]:
+    ) -> tuple[bool, str, Optional[Skill]]:
         """合并两个技能"""
         store = get_skill_store()
         s1 = store.get_by_name(skill1_name)
@@ -336,7 +335,7 @@ class SkillManagerAgent:
 
     async def find_skills_for_task(
         self, user_input: str
-    ) -> Tuple[bool, List[SkillMatch], str]:
+    ) -> tuple[bool, list[SkillMatch], str]:
         """为任务找到匹配的技能
 
         Returns:
@@ -356,17 +355,17 @@ class SkillManagerAgent:
 
     async def create_skill(
         self, user_input: str
-    ) -> Tuple[bool, str, Optional[Skill]]:
+    ) -> tuple[bool, str, Optional[Skill]]:
         """创建新技能"""
         return await self.creator.create_skill_from_teaching(user_input)
 
     async def update_skill(
         self, skill_name: str, feedback: str
-    ) -> Tuple[bool, str, Optional[Skill]]:
+    ) -> tuple[bool, str, Optional[Skill]]:
         """更新技能"""
         return await self.updater.update_skill(skill_name, feedback)
 
-    async def organize_skills(self) -> Tuple[bool, str, List[SkillAnalysis]]:
+    async def organize_skills(self) -> tuple[bool, str, list[SkillAnalysis]]:
         """整理技能库"""
         analyses = await self.organizer.analyze_skill_duplication()
 
@@ -382,7 +381,7 @@ class SkillManagerAgent:
 
     async def merge_skills(
         self, skill1: str, skill2: str
-    ) -> Tuple[bool, str, Optional[Skill]]:
+    ) -> tuple[bool, str, Optional[Skill]]:
         """合并技能"""
         return await self.organizer.merge_skills(skill1, skill2)
 

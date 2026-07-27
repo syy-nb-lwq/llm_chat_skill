@@ -42,6 +42,7 @@ class Config(BaseSettings):
     log_level: str = Field("INFO")
     log_to_file: bool = Field(False)
     log_dir: Path = Field("logs")
+    log_format: str = Field("text", description="Log output format: text or json")
 
     # Feature flags
     skill_dag_enabled: bool = Field(False)
@@ -50,6 +51,9 @@ class Config(BaseSettings):
     multi_provider_enabled: bool = Field(False, description="Enable multiple providers")
     semantic_memory_enabled: bool = Field(False, description="Enable semantic memory")
     soul_enabled: bool = Field(False, description="Enable soul system")
+
+    # Auth (C-01)
+    owner_token: str = Field("", description="管理 API owner token;留空则跳过校验(单机环境)")
 
     # Embeddings
     embedding_provider: str = Field("mock", description="Embedding provider")
@@ -65,6 +69,11 @@ class Config(BaseSettings):
     intent_mode: str = Field("rule_first", description="Intent detection mode")
     intent_rule_threshold: int = Field(5, description="Rule threshold")
     intent_llm_fallback: bool = Field(True, description="Fallback to LLM")
+
+    # Heartbeat (P7-1)
+    heartbeat_enabled: bool = Field(False, description="Enable heartbeat scheduler")
+    heartbeat_interval_seconds: int = Field(1800, description="Heartbeat check interval in seconds")
+    heartbeat_path: Path = Field("heartbeat/HEARTBEAT.md")
 
     def validate(self) -> None:
         """Validate startup configuration."""

@@ -1,5 +1,4 @@
 """能力分析模块 - 分析任务需要的能力与现有能力的差距"""
-from typing import List, Dict, Set
 from dataclasses import dataclass
 
 
@@ -8,9 +7,9 @@ class Capability:
     """能力定义"""
     name: str
     description: str
-    required_tools: List[str] = None  # 需要的基础工具
-    tags: List[str] = None
-    
+    required_tools: list[str] = None  # 需要的基础工具
+    tags: list[str] = None
+
     def __post_init__(self):
         self.required_tools = self.required_tools or []
         self.tags = self.tags or []
@@ -18,7 +17,7 @@ class Capability:
 
 class CapabilityAnalyzer:
     """能力分析器"""
-    
+
     # 基础能力库
     BASE_CAPABILITIES = {
         "fetch": Capability(
@@ -62,16 +61,16 @@ class CapabilityAnalyzer:
             tags=["输出"]
         ),
     }
-    
-    def analyze(self, task: str, plugins: List[str], skills: List[str] = None) -> Dict:
+
+    def analyze(self, task: str, plugins: list[str], skills: list[str] = None) -> dict:
         """
         分析任务需要的能力与现有能力的差距
-        
+
         Args:
             task: 任务描述
             plugins: 已有的插件能力
             skills: 已有的技能
-        
+
         Returns:
             分析结果：
             - needed: 需要的能力
@@ -81,20 +80,20 @@ class CapabilityAnalyzer:
         """
         plugins = set(plugins) if plugins else set()
         skills = set(skills) if skills else set()
-        
+
         # 根据任务推断需要的能力
         needed = self._infer_needed_capabilities(task)
-        
+
         # 已有能力
         available = plugins.copy()
         available.update(skills)
-        
+
         # 能力差距
         gap = needed - available
-        
+
         # 补足建议
         suggestions = self._generate_suggestions(gap, task)
-        
+
         return {
             "task": task,
             "needed_capabilities": list(needed),
@@ -103,12 +102,12 @@ class CapabilityAnalyzer:
             "suggestions": suggestions,
             "can_complete": len(gap) == 0
         }
-    
-    def _infer_needed_capabilities(self, task: str) -> Set[str]:
+
+    def _infer_needed_capabilities(self, task: str) -> set[str]:
         """推断任务需要的能力"""
         task_lower = task.lower()
         needed = set()
-        
+
         # 关键词匹配
         keywords_map = {
             "fetch": ["抓取", "爬取", "获取网页", "访问", "fetch", "crawl"],
@@ -120,17 +119,17 @@ class CapabilityAnalyzer:
             "visualize": ["可视化", "图表", "画图", "visualize"],
             "report": ["报告", "总结", "report"],
         }
-        
+
         for capability, keywords in keywords_map.items():
             if any(kw in task_lower for kw in keywords):
                 needed.add(capability)
-        
+
         return needed
-    
-    def _generate_suggestions(self, gap: Set[str], task: str) -> List[str]:
+
+    def _generate_suggestions(self, gap: set[str], task: str) -> list[str]:
         """生成补足建议"""
         suggestions = []
-        
+
         capability_hints = {
             "fetch": "需要添加网页抓取能力",
             "read": "需要添加文件读取能力",
@@ -141,14 +140,14 @@ class CapabilityAnalyzer:
             "visualize": "需要添加可视化技能",
             "report": "需要添加报告生成技能",
         }
-        
+
         for g in gap:
             if g in capability_hints:
                 suggestions.append(capability_hints[g])
-        
+
         if suggestions:
             suggestions.append(f"建议学习技能来处理：{task}")
-        
+
         return suggestions
 
 

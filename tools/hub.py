@@ -1,10 +1,11 @@
 """Unified tool hub for Python and external tool sources."""
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Optional
 
-from infra.logger import get_logger
+from infra.logger import get_logger, log_task_exception
 from tools.base import Tool, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
 
@@ -36,13 +37,13 @@ class ToolHub:
 
     def __init__(self):
         self.logger = get_logger()
-        self._sources: Dict[str, ToolSourceBase] = {}
-        self._tools: Dict[str, ToolInfo] = {}
+        self._sources: dict[str, ToolSourceBase] = {}
+        self._tools: dict[str, ToolInfo] = {}
         self._initialized = False
         # M0-06: 记录每个源最近一次连接状态 + 错误信息
-        self._source_state: Dict[str, str] = {}
-        self._source_last_error: Dict[str, str] = {}
-        self._source_connected_at: Dict[str, float] = {}
+        self._source_state: dict[str, str] = {}
+        self._source_last_error: dict[str, str] = {}
+        self._source_connected_at: dict[str, float] = {}
 
     def register_source(self, source: ToolSourceBase):
         if source.source.name in self._sources:
@@ -140,19 +141,19 @@ class ToolHub:
     def get_tool(self, name: str) -> Optional[ToolInfo]:
         return self._tools.get(name)
 
-    def list_tools(self) -> List[ToolInfo]:
+    def list_tools(self) -> list[ToolInfo]:
         return list(self._tools.values())
 
-    def list_tools_by_source(self, source_name: str) -> List[ToolInfo]:
+    def list_tools_by_source(self, source_name: str) -> list[ToolInfo]:
         return [tool for tool in self._tools.values() if tool.source_name == source_name]
 
-    def schemas(self) -> List[ToolSchema]:
+    def schemas(self) -> list[ToolSchema]:
         return [tool.schema for tool in self._tools.values()]
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return list(self._tools.keys())
 
-    def all(self) -> List[Any]:
+    def all(self) -> list[Any]:
         return [tool.instance for tool in self._tools.values()]
 
     def register_python_tool(self, tool: Tool):
@@ -185,7 +186,7 @@ class ToolHub:
     async def call_tool(
         self,
         tool_name: str,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         *,
         on_event: Optional[Callable[[str, Any], Awaitable[None]]] = None,
     ) -> ToolResult:
@@ -220,7 +221,7 @@ class ToolHub:
             )
         return result
 
-    async def _call_instance(self, instance: Any, params: Dict[str, Any]) -> ToolResult:
+    async def _call_instance(self, instance: Any, params: dict[str, Any]) -> ToolResult:
         if not hasattr(instance, "execute"):
             return ToolResult(success=False, error="Tool instance has no execute()")
         try:
@@ -255,10 +256,10 @@ class ToolHub:
                 instance=tool,
             )
 
-    def get_sources(self) -> List[ToolSource]:
+    def get_sources(self) -> list[ToolSource]:
         return [source.source for source in self._sources.values()]
 
-    def get_source_status(self) -> Dict[str, Dict]:
+    def get_source_status(self) -> dict[str, dict]:
         """返回每个工具源的状态(M0-06)。
 
         state 取值:
@@ -284,7 +285,7 @@ class ToolHub:
             for name, source in self._sources.items()
         }
 
-    def health_summary(self) -> Dict[str, Any]:
+    def health_summary(self) -> dict[str, Any]:
         """汇总健康状态,供 /api/health 暴露(M0-06)。
 
         返回字段:
@@ -326,8 +327,8 @@ def get_tool_hub() -> ToolHub:
             _hub.register_python_tool(WeatherTool())
             _hub.register_python_tool(SearchTool())
             _builtin_tools_added = True
-        except Exception:
-            pass
+        except Exception as e:  # P1-06: 不裸吞,记录便于排查
+            _hub.logger.warning("ToolHub", f"builtin tools 注册失败: {e}")
 
     return _hub
 
@@ -337,7 +338,8 @@ def reset_tool_hub():
     if _hub:
         try:
             asyncio.get_running_loop()
-            asyncio.create_task(_hub.disconnect_all())
+            _task = asyncio.create_task(_hub.disconnect_all())
+            _task.add_done_callback(log_task_exception)  # P1-04
         except RuntimeError:
             asyncio.run(_hub.disconnect_all())
     _hub = None

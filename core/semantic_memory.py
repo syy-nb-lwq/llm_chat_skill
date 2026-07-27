@@ -1,15 +1,14 @@
 """SemanticMemoryStore - 语义记忆存储,支持语义检索"""
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import asdict
+from typing import Any, Optional
 
 from core.memory_db import MemoryDB, MemoryEntry, get_memory_db
-from infra.embedding import BaseEmbeddingService, get_embedding_service
+from infra.embedding import BaseEmbeddingService
 from infra.logger import get_logger
 
 
 class SemanticMemoryStore:
     """语义记忆存储
-    
+
     结合 MemoryDB 和 Embedding 服务,提供:
     - 语义检索: 根据用户输入的语义查找相关记忆
     - 全文搜索: FTS5 关键词匹配
@@ -39,13 +38,13 @@ class SemanticMemoryStore:
         self,
         content: str,
         type: str = "context",
-        metadata: Optional[Dict[str, Any]] = None,
-        tags: Optional[List[str]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        tags: Optional[list[str]] = None,
         user_id: Optional[str] = None,
         generate_embedding: bool = True,
     ) -> MemoryEntry:
         """添加记忆
-        
+
         Args:
             content: 记忆内容
             type: 记忆类型 (failure/success/preference/context)
@@ -55,13 +54,13 @@ class SemanticMemoryStore:
             generate_embedding: 是否生成向量(需要 embedding_service)
         """
         embedding = None
-        
+
         if generate_embedding and self.embedding_service:
             try:
                 embedding = await self.embedding_service.embed(content)
             except Exception as e:
                 self.logger.warning("SemanticMemoryStore", f"生成嵌入向量失败: {e}")
-        
+
         return self.memory_db.add(
             type=type,
             content=content,
@@ -79,9 +78,9 @@ class SemanticMemoryStore:
         limit: int = 5,
         semantic_weight: float = 0.7,
         fts_weight: float = 0.3,
-    ) -> List[Tuple[MemoryEntry, float]]:
+    ) -> list[tuple[MemoryEntry, float]]:
         """混合搜索:结合语义和全文搜索
-        
+
         Args:
             query: 搜索查询
             type: 过滤记忆类型
@@ -89,12 +88,12 @@ class SemanticMemoryStore:
             limit: 返回数量
             semantic_weight: 语义搜索权重
             fts_weight: 全文搜索权重
-            
+
         Returns:
             List of (MemoryEntry, combined_score)
         """
-        results: Dict[str, Tuple[MemoryEntry, float]] = {}
-        
+        results: dict[str, tuple[MemoryEntry, float]] = {}
+
         # 语义搜索
         if self.enable_semantic and self.embedding_service:
             try:
@@ -108,7 +107,7 @@ class SemanticMemoryStore:
                     results[entry.id] = (entry, score * semantic_weight)
             except Exception as e:
                 self.logger.warning("SemanticMemoryStore", f"语义搜索失败: {e}")
-        
+
         # 全文搜索
         if self.enable_fts:
             try:
@@ -127,14 +126,14 @@ class SemanticMemoryStore:
                         results[entry.id] = (entry, fts_weight * max_fts_score)
             except Exception as e:
                 self.logger.warning("SemanticMemoryStore", f"全文搜索失败: {e}")
-        
+
         # 按分数排序
         sorted_results = sorted(results.values(), key=lambda x: -x[1])
         return sorted_results[:limit]
 
-    async def search_context(self, query: str, user_id: Optional[str] = None, limit: int = 3) -> List[str]:
+    async def search_context(self, query: str, user_id: Optional[str] = None, limit: int = 3) -> list[str]:
         """搜索上下文相关记忆,返回格式化字符串
-        
+
         用于将记忆注入到 LLM prompt 中
         """
         results = await self.search(
@@ -143,14 +142,14 @@ class SemanticMemoryStore:
             user_id=user_id,
             limit=limit,
         )
-        
+
         contexts = []
         for entry, score in results:
             contexts.append(f"[相关记忆 {entry.type}] {entry.content}")
-        
+
         return contexts
 
-    async def search_preferences(self, user_id: str, limit: int = 5) -> List[str]:
+    async def search_preferences(self, user_id: str, limit: int = 5) -> list[str]:
         """获取用户偏好"""
         recent = self.memory_db.get_recent(
             type="preference",
@@ -161,7 +160,7 @@ class SemanticMemoryStore:
 
     async def recall_recent_context(self, query: str, limit: int = 5) -> str:
         """回忆最近的上下文记忆
-        
+
         用于处理"上次那个项目"等指代
         """
         results = await self.search(
@@ -169,24 +168,24 @@ class SemanticMemoryStore:
             type="context",
             limit=limit,
         )
-        
+
         if not results:
             return ""
-        
+
         context_lines = ["=== 最近的上下文 ==="]
         for entry, score in results:
             context_lines.append(f"- {entry.content}")
             if entry.metadata:
                 context_lines.append(f"  (元数据: {entry.metadata})")
-        
+
         return "\n".join(context_lines)
 
     def add_sync(
         self,
         content: str,
         type: str = "context",
-        metadata: Optional[Dict[str, Any]] = None,
-        tags: Optional[List[str]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        tags: Optional[list[str]] = None,
         user_id: Optional[str] = None,
     ) -> MemoryEntry:
         """同步添加记忆(不生成向量)"""
@@ -199,7 +198,7 @@ class SemanticMemoryStore:
             embedding=None,
         )
 
-    def get_recent(self, type: Optional[str] = None, user_id: Optional[str] = None, limit: int = 20) -> List[MemoryEntry]:
+    def get_recent(self, type: Optional[str] = None, user_id: Optional[str] = None, limit: int = 20) -> list[MemoryEntry]:
         """获取最近的记忆"""
         return self.memory_db.get_recent(type=type, user_id=user_id, limit=limit)
 
@@ -211,7 +210,7 @@ class SemanticMemoryStore:
         """清理过期记忆"""
         return self.memory_db.cleanup_old(days=days)
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
         db_stats = self.memory_db.get_stats()
         return {

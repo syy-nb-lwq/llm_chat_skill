@@ -3,7 +3,7 @@ import asyncio
 import importlib
 import pkgutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from tools.base import Tool, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
@@ -18,7 +18,7 @@ class PythonSource(ToolSourceBase):
     def __init__(self, source: ToolSource):
         super().__init__(source)
         self._connected = False
-        self._tool_dirs: List[Path] = []
+        self._tool_dirs: list[Path] = []
 
     async def connect(self) -> bool:
         """扫描并加载 Python 工具"""
@@ -42,11 +42,11 @@ class PythonSource(ToolSourceBase):
         self._tools.clear()
         self._connected = False
 
-    async def list_tools(self) -> List[Tool]:
+    async def list_tools(self) -> list[Tool]:
         """列出所有工具"""
         return [t for t in self._tools.values() if isinstance(t, Tool)]
 
-    async def call_tool(self, tool_name: str, params: Dict[str, Any]) -> ToolResult:
+    async def call_tool(self, tool_name: str, params: dict[str, Any]) -> ToolResult:
         """调用工具"""
         tool = self._tools.get(tool_name)
         if not tool:
@@ -118,7 +118,7 @@ class PythonSource(ToolSourceBase):
 
 def create_python_source(
     name: str = "python",
-    directories: Optional[List[str]] = None,
+    directories: Optional[list[str]] = None,
 ) -> PythonSource:
     """创建 Python 工具源"""
     config = {"directories": directories or []}

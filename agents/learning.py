@@ -1,13 +1,14 @@
 """Learning Agent - 流转中枢:执行工具、获取数据"""
 import asyncio
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 from infra.logger import get_logger
 from tools.base import ToolResult
 from tools.hub import get_tool_hub
-
 
 # 参数值类型(支持 ${task.data.x} 占位符)
 ParamValue = Union[str, int, float, bool, list, dict, None]
@@ -18,8 +19,8 @@ class ToolTask:
     """工具任务"""
     id: str
     type: str
-    params: Dict = field(default_factory=dict)
-    depends_on: List[str] = field(default_factory=list)
+    params: dict = field(default_factory=dict)
+    depends_on: list[str] = field(default_factory=list)
     parallel_group: Optional[str] = None
     retry: int = 0               # 失败后重试次数(0 = 不重试)
     timeout_s: int = 30          # 单次执行超时秒
@@ -29,8 +30,8 @@ class ToolTask:
 _VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
-def _resolve_value(value: Any, results: Dict[str, ToolResult],
-                   user_input: Optional[Dict] = None) -> Any:
+def _resolve_value(value: Any, results: dict[str, ToolResult],
+                   user_input: Optional[dict] = None) -> Any:
     """递归解析占位符。
 
     支持:
@@ -94,8 +95,8 @@ def _resolve_value(value: Any, results: Dict[str, ToolResult],
     return value
 
 
-def resolve_params(params: Any, results: Dict[str, ToolResult],
-                   user_input: Optional[Dict] = None) -> Any:
+def resolve_params(params: Any, results: dict[str, ToolResult],
+                   user_input: Optional[dict] = None) -> Any:
     """公开 API:解析整个 params 树中的占位符。"""
     return _resolve_value(params, results, user_input)
 
@@ -118,45 +119,70 @@ class LearningAgent:
     async def execute_tool(
         self,
         tool_type: str,
-        params: Dict,
+        params: dict,
         on_event: Optional[Callable] = None,
         *,
         task_id: Optional[str] = None,
         retry: int = 0,
         timeout_s: int = 30,
+        fallback_to: Optional[str] = None,
     ) -> ToolResult:
-        """执行单个工具(支持重试 + 超时)"""
+        """执行单个工具(支持重试 + 超时 + 可观测 meta)。
+
+        结果 ``meta`` 中携带(M0-02):
+        - attempts: 实际尝试次数(1 = 一次就成功)
+        - retry_count: 重试次数(= attempts - 1)
+        - latency_ms: 累计耗时
+        - timeout_s: 指定的超时(秒)
+        - fallback_to: 失败时跳到的 task id(可空)
+        - tool: 真实调用的工具名
+        - used_fallback: 本次是否走了 fallback
+        """
         tool_info = self.hub.get_tool(tool_type)
         if not tool_info:
-            return ToolResult(success=False, error=f"工具不存在: {tool_type}")
+            return ToolResult(
+                success=False,
+                error=f"工具不存在: {tool_type}",
+                meta={"tool": tool_type, "attempts": 0, "latency_ms": 0.0},
+            )
 
         # 参数拷贝,避免污染调用方
         local_params = dict(params) if params else {}
+        attempts = max(1, retry + 1)
+        last_err = "unknown"
+        time.time()
+        total_latency = 0.0
 
-        async def _run_once() -> ToolResult:
+        for attempt in range(1, attempts + 1):
+            attempt_start = time.time()
             self.logger.info(tool_type, f"执行工具: {local_params}")
             try:
                 result = await asyncio.wait_for(
                     self.hub.call_tool(tool_type, local_params),
                     timeout=timeout_s,
                 )
-                if result.success:
-                    self.logger.info(tool_type, "执行成功")
-                else:
-                    self.logger.warning(tool_type, f"执行失败: {result.error}")
-                return result
             except asyncio.TimeoutError:
-                return ToolResult(success=False, error=f"超时({timeout_s}s)")
+                result = ToolResult(success=False, error=f"超时({timeout_s}s)")
             except Exception as e:
-                return ToolResult(success=False, error=str(e))
+                result = ToolResult(success=False, error=str(e))
+            attempt_latency = (time.time() - attempt_start) * 1000.0
+            total_latency += attempt_latency
 
-        attempts = max(1, retry + 1)
-        last_err = "unknown"
-        for attempt in range(1, attempts + 1):
-            result = await _run_once()
+            # 每个 attempt 的明细都写入 meta,保留最后一次
+            merged_meta = {
+                **(result.meta or {}),
+                "tool": tool_type,
+                "attempts": attempt,
+                "retry_count": attempt - 1,
+                "latency_ms": round(total_latency, 3),
+                "timeout_s": timeout_s,
+                "fallback_to": fallback_to,
+                "used_fallback": bool(fallback_to) and not result.success,
+            }
+            result.meta = merged_meta
+
             if result.success:
-                # 把重试次数写入 meta,供 ExecutionCritic 评估
-                result.meta = {**result.meta, "retry_count": attempt - 1}
+                self.logger.info(tool_type, "执行成功")
                 if on_event:
                     await on_event("tool_result", {
                         "task_id": task_id or tool_type,
@@ -165,24 +191,38 @@ class LearningAgent:
                         "meta": result.meta,
                     })
                 return result
+
             last_err = result.error
             if attempt < attempts:
                 self.logger.warning("Learning", f"{tool_type} 第 {attempt} 次失败: {last_err},重试")
 
+        result = ToolResult(
+            success=False,
+            error=last_err,
+            meta={
+                "tool": tool_type,
+                "attempts": attempts,
+                "retry_count": attempts - 1,
+                "latency_ms": round(total_latency, 3),
+                "timeout_s": timeout_s,
+                "fallback_to": fallback_to,
+                "used_fallback": bool(fallback_to),
+            },
+        )
         if on_event:
             await on_event("tool_error", {
                 "task_id": task_id or tool_type,
                 "tool": tool_type,
                 "error": last_err,
             })
-        return ToolResult(success=False, error=last_err, meta={"retry_count": attempts - 1})
+        return result
 
     async def execute_dag(
         self,
-        tasks: List[ToolTask],
+        tasks: list[ToolTask],
         on_event: Optional[Callable] = None,
-        user_input: Optional[Dict] = None,
-    ) -> Dict[str, ToolResult]:
+        user_input: Optional[dict] = None,
+    ) -> dict[str, ToolResult]:
         """DAG 执行
 
         - 自动拓扑调度,依赖完成才启动下游
@@ -207,12 +247,12 @@ class LearningAgent:
                 self.logger.error("Learning", f"任务 {t.id} 缺少依赖: {missing}")
 
         # 只保留依赖完整的任务
-        pending: Dict[str, ToolTask] = {
+        pending: dict[str, ToolTask] = {
             t.id: t for t in tasks
             if all(d in all_ids for d in t.depends_on)
         }
-        results: Dict[str, ToolResult] = {}
-        running: Dict[str, asyncio.Task] = {}
+        results: dict[str, ToolResult] = {}
+        running: dict[str, asyncio.Task] = {}
 
         async def emit(event: str, payload: dict):
             if on_event:
@@ -221,7 +261,7 @@ class LearningAgent:
         # 计算每个任务"上游失败时仍可启动"的依赖集合。
 # 默认严格: 上游失败 → 下游被跳过。
 # 例外: 上游 task.fallback_to == 本任务 id → 即使上游失败也允许启动(接管)。
-        fallback_allow: Dict[str, set] = {}
+        fallback_allow: dict[str, set] = {}
         for t in pending.values():
             allowed: set = set()
             for d in t.depends_on:
@@ -244,7 +284,7 @@ class LearningAgent:
                         break
                 if deps_ok:
                     # 解析参数变量
-                    resolved = resolve_params(task.params, results)
+                    resolved = resolve_params(task.params, results, user_input)
                     del pending[task_id]
                     if on_event:
                         await on_event("tool_call", {
@@ -261,6 +301,7 @@ class LearningAgent:
                         task_id=task.id,
                         retry=task.retry,
                         timeout_s=task.timeout_s,
+                        fallback_to=task.fallback_to,
                     )
                     running[task_id] = asyncio.create_task(coro)
 
@@ -300,7 +341,7 @@ class LearningAgent:
         return results
 
 
-def _has_cycle(tasks: List[ToolTask]) -> bool:
+def _has_cycle(tasks: list[ToolTask]) -> bool:
     """检测循环依赖"""
     visited = set()
     rec_stack = set()

@@ -1,28 +1,21 @@
 """MemoryStore & ExecutionCritic 测试"""
-import asyncio
-import json
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from core.memory import (
-    FailureRecord,
-    MemoryStore,
-    SkillPatch,
-    SuccessRecord,
-    get_memory_store,
-)
 from core.critic import (
-    ExecutionCritic,
     ExecutionContext,
+    ExecutionCritic,
     TaskExecutionSummary,
     build_execution_context,
 )
+from core.memory import (
+    MemoryStore,
+    SkillPatch,
+)
 from infra.config import get_self_evolution_enabled
-
 
 # ---- 临时目录 fixture ----
 
@@ -116,12 +109,24 @@ def test_pending_patches(mem_store):
         suggestion={"type": "increase_retry"},
         confidence=0.8,
     )
+    auto_patch = SkillPatch(
+        id="patch_001_auto",
+        trace_id="trace_001_auto",
+        timestamp="2026-07-13T10:00:01",
+        target_skill="travel_plan",
+        patch_type="improve_skill",
+        diagnosis="高置信度优化",
+        suggestion={"type": "improve_skill"},
+        confidence=0.95,
+        status="auto_approved",
+    )
     mem_store.add_pending_patch(patch_obj)
+    mem_store.add_pending_patch(auto_patch)
 
     patches = mem_store.get_pending_patches()
-    assert len(patches) == 1
-    assert patches[0].id == "patch_001"
-    assert patches[0].confidence == 0.8
+    assert len(patches) == 2
+    assert patches[0].id == "patch_001_auto"
+    assert patches[1].id == "patch_001"
 
 
 def test_approve_and_reject_patch(mem_store):
@@ -259,9 +264,18 @@ async def test_critic_partial_failure(mem_store):
 
 @pytest.mark.asyncio
 async def test_critic_high_confidence_auto_approve(mem_store):
-    """高置信度建议自动生效 - 部分失败场景"""
+    """高置信度建议仅进入待审核队列，不再直接改 skill。"""
     with patch("core.critic.get_self_evolution_enabled", return_value=True):
         critic = ExecutionCritic(memory_store=mem_store)
+
+        async def stub_analyze(context, success_rate, fallback_count):
+            return (
+                "需要优化",
+                {"type": "improve_skill", "target_skill": "travel_plan", "method": "new method"},
+                0.95,
+            )
+
+        critic._analyze = stub_analyze
         context = ExecutionContext(
             trace_id="critic_003",
             scenario="travel",
@@ -274,9 +288,12 @@ async def test_critic_high_confidence_auto_approve(mem_store):
             latency_ms=30000.0,
         )
         result = await critic.evaluate(context)
-        # 部分失败时,应该生成建议
         assert result.suggestion is not None
         assert "failure_record" in result.records_generated
+        assert "patch_auto_approved" in result.records_generated
+
+        patches = mem_store.get_pending_patches()
+        assert any(p.status == "auto_approved" for p in patches)
 
 
 def test_build_execution_context():
@@ -334,10 +351,10 @@ async def test_memory_and_critic_integration(temp_mem_dir):
             )
 
             result = await critic.evaluate(context)
-            
+
             # 验证记录生成
             assert "failure_record" in result.records_generated
-            
+
             # 验证 MemoryStore 中有记录
             failures = store.get_recent_failures(top_k=10)
             assert any(f.trace_id == "e2e_001" for f in failures)

@@ -1,5 +1,7 @@
 """Local Provider (Ollama)"""
-from typing import List, Dict, Optional, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Optional
+
 import httpx
 
 from infra.providers.base import BaseProvider, ChatDelta
@@ -22,7 +24,7 @@ class LocalProvider(BaseProvider):
 
     async def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,
@@ -46,6 +48,10 @@ class LocalProvider(BaseProvider):
                     "content": msg.get("content", ""),
                 })
 
+        options = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
                 f"{self.base_url}/api/chat",
@@ -53,10 +59,7 @@ class LocalProvider(BaseProvider):
                     "model": model,
                     "messages": ollama_messages,
                     "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens,
-                    },
+                    "options": options,
                 },
             )
             resp.raise_for_status()
@@ -65,7 +68,7 @@ class LocalProvider(BaseProvider):
 
     async def chat_stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,
@@ -87,6 +90,10 @@ class LocalProvider(BaseProvider):
                     "content": msg.get("content", ""),
                 })
 
+        options = {"temperature": temperature}
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream(
                 "POST",
@@ -95,10 +102,7 @@ class LocalProvider(BaseProvider):
                     "model": model,
                     "messages": ollama_messages,
                     "stream": True,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens,
-                    },
+                    "options": options,
                 },
             ) as resp:
                 resp.raise_for_status()

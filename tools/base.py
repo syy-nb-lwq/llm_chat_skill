@@ -1,7 +1,7 @@
 """工具协议"""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -17,7 +17,7 @@ class ToolResult:
     success: bool
     data: Any = None
     error: str = ""
-    meta: Dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def to_content(self) -> str:
         """给 LLM 看的字符串形式"""
@@ -44,7 +44,7 @@ class ToolParam:
     description: str = ""
     required: bool = True
     default: Any = None
-    enum: Optional[List] = None
+    enum: Optional[list] = None
 
 
 @dataclass
@@ -52,11 +52,11 @@ class ToolSchema:
     """工具对外暴露的 schema(给 LLM / 前端用)"""
     name: str
     description: str
-    params: List[ToolParam] = field(default_factory=list)
-    returns: Dict[str, str] = field(default_factory=dict)
-    examples: List[Dict[str, Any]] = field(default_factory=list)
+    params: list[ToolParam] = field(default_factory=list)
+    returns: dict[str, str] = field(default_factory=dict)
+    examples: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "name": self.name,
             "description": self.description,
@@ -88,7 +88,7 @@ class Tool(ABC):
     @abstractmethod
     def execute(self, **kwargs) -> ToolResult: ...
 
-    def validate_params(self, params: Dict[str, Any]) -> tuple:
+    def validate_params(self, params: dict[str, Any]) -> tuple:
         """默认按 schema 做必填校验"""
         s = self.schema()
         required = {p.name for p in s.params if p.required}
@@ -106,7 +106,7 @@ class ToolRegistry:
     """工具注册表"""
 
     def __init__(self):
-        self._tools: Dict[str, Tool] = {}
+        self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool):
         if not tool.name:
@@ -118,19 +118,19 @@ class ToolRegistry:
     def get(self, name: str) -> Optional[Tool]:
         return self._tools.get(name)
 
-    def all(self) -> List[Tool]:
+    def all(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return list(self._tools.keys())
 
-    def validate_params(self, name: str, params: Dict) -> tuple:
+    def validate_params(self, name: str, params: dict) -> tuple:
         tool = self.get(name)
         if not tool:
             return False, f"未知工具: {name}"
         return tool.validate_params(params)
 
-    def schemas(self) -> List[Dict]:
+    def schemas(self) -> list[dict]:
         return [t.schema().to_dict() for t in self.all()]
 
 
@@ -153,7 +153,7 @@ def reset_tool_registry():
 
 def _register_builtins(reg: ToolRegistry):
     """注册内置工具(延迟 import 避免循环)"""
-    from tools.weather import WeatherTool
     from tools.search import SearchTool
+    from tools.weather import WeatherTool
     reg.register(WeatherTool())
     reg.register(SearchTool())

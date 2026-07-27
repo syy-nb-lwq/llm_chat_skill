@@ -4,13 +4,14 @@
 """
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Optional
 
-from infra.logger import get_logger
+from infra.logger import get_logger, log_task_exception
 
 
 class HeartbeatStatus(Enum):
@@ -38,7 +39,7 @@ class HeartbeatTask:
 @dataclass
 class HeartbeatResult:
     """心跳执行结果"""
-    tasks_executed: List[str] = field(default_factory=list)
+    tasks_executed: list[str] = field(default_factory=list)
     tasks_skipped: int = 0
     status: HeartbeatStatus = HeartbeatStatus.IDLE
     message: str = ""
@@ -47,49 +48,47 @@ class HeartbeatResult:
 
 class HeartbeatLoader:
     """Heartbeat 配置加载器"""
-    
+
     def __init__(self, heartbeat_path: Optional[Path] = None):
         if heartbeat_path is None:
             heartbeat_path = Path(__file__).parent.parent / "heartbeat" / "HEARTBEAT.md"
         self.heartbeat_path = heartbeat_path
         self.logger = get_logger()
-    
-    def load(self) -> List[HeartbeatTask]:
+
+    def load(self) -> list[HeartbeatTask]:
         """加载 HEARTBEAT.md 配置"""
         if not self.heartbeat_path.exists():
             self.logger.info("HeartbeatLoader", "HEARTBEAT.md 不存在,跳过")
             return []
-        
+
         try:
             content = self.heartbeat_path.read_text(encoding="utf-8")
             return self._parse_content(content)
         except Exception as e:
             self.logger.error("HeartbeatLoader", f"加载失败: {e}")
             return []
-    
-    def _parse_content(self, content: str) -> List[HeartbeatTask]:
+
+    def _parse_content(self, content: str) -> list[HeartbeatTask]:
         """解析 HEARTBEAT.md 内容"""
         tasks = []
         lines = content.strip().split("\n")
-        
+
         task_id = 1
-        current_desc = None
-        current_condition = None
-        
+
         for line in lines:
             stripped = line.strip()
-            
+
             # 跳过空行和注释
             if not stripped or stripped.startswith("#") or stripped.startswith("<!--"):
                 continue
-            
+
             # 检查是否是任务行 (以 - 开头)
             if stripped.startswith("-"):
                 desc = stripped[1:].strip()
-                
+
                 # 检查是否有条件标记
                 condition = self._extract_condition(desc)
-                
+
                 if condition:
                     task = HeartbeatTask(
                         id=f"task_{task_id}",
@@ -99,9 +98,9 @@ class HeartbeatLoader:
                     )
                     tasks.append(task)
                     task_id += 1
-        
+
         return tasks
-    
+
     def _extract_condition(self, description: str) -> Optional[str]:
         """从描述中提取触发条件"""
         # 常见的条件模式
@@ -112,21 +111,21 @@ class HeartbeatLoader:
             r"每周[一二三四五六日天]\s*(\d{1,2}:\d{2})",  # 每周一 9:00
             r"当.*时|如果.*|当.*后",             # 当某条件满足时
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, description)
             if match:
                 return description  # 返回完整描述作为条件
-        
+
         # 如果没有明确条件,视为默认条件 (每隔 30 分钟)
         return "每隔 30 分钟"
 
 
 class HeartbeatScheduler:
     """心跳调度器"""
-    
+
     HEARTBEAT_OK = "HEARTBEAT_OK"  # 无任务时的特殊标记
-    
+
     def __init__(
         self,
         interval_seconds: int = 1800,  # 默认 30 分钟
@@ -138,17 +137,18 @@ class HeartbeatScheduler:
         self.logger = get_logger()
         self._running = False
         self._task: Optional[asyncio.Task] = None
-    
+
     async def start(self) -> None:
         """启动调度器"""
         if self._running:
             self.logger.warning("HeartbeatScheduler", "调度器已在运行")
             return
-        
+
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
+        self._task.add_done_callback(log_task_exception)  # P1-04
         self.logger.info("HeartbeatScheduler", f"启动,间隔 {self.interval} 秒")
-    
+
     async def stop(self) -> None:
         """停止调度器"""
         self._running = False
@@ -159,7 +159,7 @@ class HeartbeatScheduler:
             except asyncio.CancelledError:
                 pass
         self.logger.info("HeartbeatScheduler", "已停止")
-    
+
     async def _run_loop(self) -> None:
         """运行循环"""
         while self._running:
@@ -167,16 +167,16 @@ class HeartbeatScheduler:
                 await self._execute_heartbeat()
             except Exception as e:
                 self.logger.error("HeartbeatScheduler", f"执行失败: {e}")
-            
+
             await asyncio.sleep(self.interval)
-    
+
     async def _execute_heartbeat(self) -> HeartbeatResult:
         """执行一次心跳检查"""
         tasks = self.loader.load()
-        
+
         if not tasks:
             return HeartbeatResult(status=HeartbeatStatus.IDLE, message=self.HEARTBEAT_OK)
-        
+
         # 检查哪些任务需要执行
         tasks_to_run = []
         for task in tasks:
@@ -184,53 +184,53 @@ class HeartbeatScheduler:
                 continue
             if self._should_execute(task):
                 tasks_to_run.append(task)
-        
+
         if not tasks_to_run:
             return HeartbeatResult(
                 status=HeartbeatStatus.IDLE,
                 message=self.HEARTBEAT_OK,
                 tasks_skipped=len(tasks),
             )
-        
+
         # 通知回调
         if self.on_tasks_ready:
             try:
                 self.on_tasks_ready(tasks_to_run)
             except Exception as e:
                 self.logger.error("HeartbeatScheduler", f"回调失败: {e}")
-        
+
         return HeartbeatResult(
             status=HeartbeatStatus.COMPLETED,
             tasks_executed=[t.id for t in tasks_to_run],
             tasks_skipped=len(tasks) - len(tasks_to_run),
         )
-    
+
     def _should_execute(self, task: HeartbeatTask) -> bool:
         """判断任务是否应该执行"""
         if not task.last_run:
             return True
-        
+
         try:
             last = datetime.fromisoformat(task.last_run)
             now = datetime.now()
-            
+
             # 解析条件
             condition = task.condition
-            
+
             if "每隔" in condition and "分钟" in condition:
                 match = re.search(r"(\d+)\s*分钟", condition)
                 if match:
                     interval_minutes = int(match.group(1))
                     elapsed = (now - last).total_seconds() / 60
                     return elapsed >= interval_minutes
-            
+
             elif "每隔" in condition and "小时" in condition:
                 match = re.search(r"(\d+)\s*小时", condition)
                 if match:
                     interval_hours = int(match.group(1))
                     elapsed = (now - last).total_seconds() / 3600
                     return elapsed >= interval_hours
-            
+
             elif "每天" in condition:
                 match = re.search(r"(\d{1,2}):(\d{2})", condition)
                 if match:
@@ -241,14 +241,14 @@ class HeartbeatScheduler:
                     # 检查是否已过目标时间且上次运行不在今天
                     if now_time >= target_time and last.date() < now.date():
                         return True
-            
+
             # 默认:检查是否超过 30 分钟
             elapsed = (now - last).total_seconds() / 60
             return elapsed >= 30
-            
+
         except Exception:
             return True  # 解析失败时默认执行
-    
+
     async def trigger_now(self) -> HeartbeatResult:
         """立即触发一次心跳"""
         return await self._execute_heartbeat()
@@ -256,32 +256,48 @@ class HeartbeatScheduler:
 
 class HeartbeatAgent:
     """心跳 Agent - 处理主动任务"""
-    
-    def __init__(self, scheduler: Optional[HeartbeatScheduler] = None):
+
+    def __init__(
+        self,
+        scheduler: Optional[HeartbeatScheduler] = None,
+        agent_handle: Optional[Callable[[str], Awaitable[str]]] = None,
+    ):
         self.scheduler = scheduler or HeartbeatScheduler()
         self.logger = get_logger()
-        self._executing_tasks: List[HeartbeatTask] = []
-    
+        self._executing_tasks: list[HeartbeatTask] = []
+        # 异步回调: (task.description) -> result_text,由外部注入真实 Agent 执行入口
+        self._agent_handle = agent_handle
+
     async def start(self) -> None:
         """启动心跳处理"""
         await self.scheduler.start()
-    
+
     async def stop(self) -> None:
         """停止心跳处理"""
         await self.scheduler.stop()
-    
+
     async def execute_task(self, task: HeartbeatTask) -> str:
-        """执行单个任务"""
+        """执行单个任务
+
+        优先调用注入的 ``agent_handle`` 真实执行;
+        未注入时降级为记录日志,不再假装执行成功。
+        """
         self.logger.info("HeartbeatAgent", f"执行任务: {task.description}")
-        
+
         # 更新状态
         task.last_run = datetime.now().isoformat()
         task.last_status = HeartbeatStatus.RUNNING
-        
+
         try:
-            # 这里应该调用 LLM 执行实际任务
-            # 目前只是模拟
-            result = f"任务 '{task.description}' 执行完成"
+            if self._agent_handle is not None:
+                result = await self._agent_handle(task.description)
+            else:
+                # 未接入 Agent,明确降级而非假装成功
+                self.logger.warning(
+                    "HeartbeatAgent",
+                    f"未注入 agent_handle,任务降级跳过: {task.description}",
+                )
+                result = f"[降级] 未接入 Agent,任务未真实执行: {task.description}"
             task.last_result = result
             task.last_status = HeartbeatStatus.COMPLETED
             return result
@@ -290,15 +306,15 @@ class HeartbeatAgent:
             task.last_status = HeartbeatStatus.ERROR
             task.last_result = f"执行失败: {e}"
             raise
-    
-    async def execute_pending_tasks(self) -> List[str]:
+
+    async def execute_pending_tasks(self) -> list[str]:
         """执行所有待处理任务"""
         result = await self.scheduler.trigger_now()
-        
+
         if result.status == HeartbeatStatus.IDLE:
             self.logger.info("HeartbeatAgent", result.message)
             return []
-        
+
         results = []
         for task_id in result.tasks_executed:
             for task in self.scheduler.loader.load():
@@ -308,7 +324,7 @@ class HeartbeatAgent:
                         results.append(r)
                     except Exception as e:
                         results.append(f"任务失败: {e}")
-        
+
         return results
 
 

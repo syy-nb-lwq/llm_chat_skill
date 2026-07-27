@@ -5,6 +5,7 @@
   python -m pytest tests/test_skill_execution.py -v
 """
 import pytest
+
 from skills.manager import get_skill_store
 
 
@@ -28,9 +29,9 @@ class TestSkillLoading:
         """每个技能都有必需字段"""
         store = get_skill_store()
         skills = store.list_all()
-        
+
         for skill in skills:
-            assert skill.name, f"技能缺少 name"
+            assert skill.name, "技能缺少 name"
             assert skill.capability, f"技能 {skill.name} 缺少 capability"
             assert skill.method, f"技能 {skill.name} 缺少 method"
             print(f"✓ {skill.name} 字段完整")
@@ -73,10 +74,10 @@ class TestSkillExecution:
         """测试技能是否能处理对应输入"""
         # 获取匹配的技能
         matched = skill_store.match(case["user_input"])
-        
+
         print(f"\n输入: {case['user_input']}")
         print(f"匹配技能: {matched}")
-        
+
         # 如果有匹配的技能，验证它包含预期的工具
         if matched:
             # 检查工具是否匹配

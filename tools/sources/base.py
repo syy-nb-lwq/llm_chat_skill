@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from tools.base import ToolResult, ToolSchema
 
@@ -21,7 +21,7 @@ class ToolSource:
     name: str                    # 源名称
     type: SourceType              # 源类型
     enabled: bool = True          # 是否启用
-    config: Dict[str, Any] = field(default_factory=dict)  # 源配置
+    config: dict[str, Any] = field(default_factory=dict)  # 源配置
     description: str = ""         # 源描述
 
 
@@ -30,7 +30,7 @@ class ToolSourceBase(ABC):
 
     def __init__(self, source: ToolSource):
         self.source = source
-        self._tools: Dict[str, Any] = {}  # name -> Tool instance or MCP tool info
+        self._tools: dict[str, Any] = {}  # name -> Tool instance or MCP tool info
 
     @abstractmethod
     async def connect(self) -> bool:
@@ -43,12 +43,12 @@ class ToolSourceBase(ABC):
         ...
 
     @abstractmethod
-    async def list_tools(self) -> List[Any]:
+    async def list_tools(self) -> list[Any]:
         """列出所有可用工具"""
         ...
 
     @abstractmethod
-    async def call_tool(self, tool_name: str, params: Dict[str, Any]) -> ToolResult:
+    async def call_tool(self, tool_name: str, params: dict[str, Any]) -> ToolResult:
         """调用工具"""
         ...
 
@@ -57,7 +57,7 @@ class ToolSourceBase(ABC):
         """获取工具 schema"""
         ...
 
-    def get_tools(self) -> Dict[str, Any]:
+    def get_tools(self) -> dict[str, Any]:
         """获取所有工具"""
         return self._tools
 

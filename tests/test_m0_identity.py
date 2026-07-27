@@ -7,14 +7,11 @@
 - build_execution_context 透传 identity
 """
 import asyncio
-import json
-import time
-from pathlib import Path
 
 import pytest
 
-from core.identity import IdentityContext, new_id
 from core.critic import build_execution_context
+from core.identity import IdentityContext, new_id
 from tools.base import ToolResult
 
 
@@ -41,7 +38,7 @@ def test_identity_child_preserves_turn():
 
 
 def test_build_execution_context_uses_task_specs():
-    res = ToolResult(success=True, data="x", meta={"attempts": 2, "latency_ms": 12})
+    res = ToolResult(success=False, error="boom", meta={"attempts": 2, "latency_ms": 12})
     spec = {
         "t1": {"type": "weather_query", "retry": 1, "timeout_s": 10, "fallback_to": "t2"},
     }
@@ -63,8 +60,31 @@ def test_build_execution_context_uses_task_specs():
     assert ctx.tasks[0].tool == "weather_query"
     # 2 次尝试意味着 retry_count = 1
     assert ctx.tasks[0].retry_count == 1
-    # spec 中有 fallback_to
+    # P0-06: 主路径失败 + spec 声明 fallback_to 才算 used_fallback
     assert ctx.tasks[0].used_fallback is True
+
+
+def test_build_execution_context_fallback_not_used_when_primary_succeeds():
+    """P0-06: 主路径成功时,即使 spec 声明了 fallback_to 也不算 used_fallback。
+
+    旧 critic 把"声明 fallback_to"等同于"已用 fallback",与 learning.py 的
+    ``bool(fallback_to) and not result.success`` 语义冲突,统计虚高。
+    """
+    res = ToolResult(success=True, data="x", meta={"attempts": 1, "latency_ms": 5})
+    spec = {
+        "t1": {"type": "weather_query", "retry": 0, "timeout_s": 10, "fallback_to": "t2"},
+    }
+    ctx = build_execution_context(
+        trace_id="t_ok",
+        scenario="weather",
+        intent="skill",
+        selected_skill=None,
+        tool_results={"t1": res},
+        latency_ms=10,
+        task_specs=spec,
+    )
+    assert ctx.tasks[0].success is True
+    assert ctx.tasks[0].used_fallback is False
 
 
 def test_build_execution_context_fallback_when_meta_attempts_missing():
@@ -86,9 +106,9 @@ def test_build_execution_context_fallback_when_meta_attempts_missing():
 @pytest.mark.asyncio
 async def test_agent_handle_unique_execution_id_per_call(monkeypatch):
     """同 session 多次 handle 必须生成不同 execution_id。"""
-    from infra.llm import LLMClient
-    from core.agent import Agent
     from agents import manager as mgr_mod
+    from core.agent import Agent
+    from infra.llm import LLMClient
 
     monkeypatch.setattr(mgr_mod.ManagerAgent, "should_answer_directly", lambda self, t: True)
 

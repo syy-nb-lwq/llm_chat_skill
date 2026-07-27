@@ -1,6 +1,8 @@
 """OpenAI Provider"""
-from typing import List, Dict, Optional, AsyncIterator
-from openai import AsyncOpenAI, APIError, APITimeoutError, RateLimitError
+from collections.abc import AsyncIterator
+from typing import Optional
+
+from openai import AsyncOpenAI
 
 from infra.providers.base import BaseProvider, ChatDelta
 
@@ -30,7 +32,7 @@ class OpenAIProvider(BaseProvider):
 
     async def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,
@@ -49,7 +51,7 @@ class OpenAIProvider(BaseProvider):
 
     async def chat_stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,

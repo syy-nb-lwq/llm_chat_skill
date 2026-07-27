@@ -16,7 +16,6 @@ import logging
 
 import pytest
 
-
 # ===== 1. _Utf8Stream 行为 =====
 
 def test_utf8_stream_encodes_str_to_utf8_bytes():
@@ -26,8 +25,8 @@ def test_utf8_stream_encodes_str_to_utf8_bytes():
     sink = io.BytesIO()
     s = _Utf8Stream(sink)
     n = s.write("你好,世界")
-    assert n == len("你好,世界".encode("utf-8"))
-    assert sink.getvalue() == "你好,世界".encode("utf-8")
+    assert n == len("你好,世界".encode())
+    assert sink.getvalue() == "你好,世界".encode()
 
 
 def test_utf8_stream_passthrough_for_bytes():

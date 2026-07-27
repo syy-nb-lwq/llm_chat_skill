@@ -107,6 +107,7 @@ async def test_weather_tool_uses_httpx_async(monkeypatch):
 @pytest.mark.asyncio
 async def test_weather_tool_handles_httpx_timeout(monkeypatch):
     import httpx
+
     from tools.weather import WeatherTool
 
     tool = WeatherTool()

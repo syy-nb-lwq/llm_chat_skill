@@ -2,10 +2,10 @@
 import json
 import sqlite3
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from infra.logger import get_logger
 
@@ -16,17 +16,17 @@ class MemoryEntry:
     id: str
     type: str  # "failure" | "success" | "preference" | "context"
     content: str  # 原始文本内容
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    embedding: Optional[List[float]] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    embedding: Optional[list[float]] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    tags: List[str] = field(default_factory=list)
-    user_id: Optional[str] = None  # 多用户支持
+    tags: list[str] = field(default_factory=list)
+    user_id: Optional[str] = None  # 单用户场景下用于会话/记忆隔离标识
 
 
 class MemoryDB:
     """SQLite + FTS5 记忆数据库
-    
+
     表结构:
     - memories: 主存储表
     - memories_fts: FTS5 全文搜索虚拟表
@@ -44,7 +44,7 @@ class MemoryDB:
         """初始化数据库"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         # 主表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -59,7 +59,7 @@ class MemoryDB:
                 user_id TEXT
             )
         """)
-        
+
         # FTS5 虚拟表用于全文搜索
         cursor.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -69,12 +69,12 @@ class MemoryDB:
                 tokenize='unicode61'
             )
         """)
-        
+
         # 索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)")
-        
+
         conn.commit()
         conn.close()
 
@@ -96,9 +96,9 @@ class MemoryDB:
         self,
         type: str,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        embedding: Optional[List[float]] = None,
-        tags: Optional[List[str]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        embedding: Optional[list[float]] = None,
+        tags: Optional[list[str]] = None,
         user_id: Optional[str] = None,
     ) -> MemoryEntry:
         """添加记忆"""
@@ -113,10 +113,10 @@ class MemoryDB:
             tags=tags or [],
             user_id=user_id,
         )
-        
+
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             INSERT INTO memories (id, type, content, metadata, embedding, created_at, updated_at, tags, user_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -131,15 +131,15 @@ class MemoryDB:
             json.dumps(entry.tags, ensure_ascii=False),
             entry.user_id,
         ))
-        
+
         # 更新 FTS 表
         cursor.execute("""
             INSERT INTO memories_fts (id, content) VALUES (?, ?)
         """, (entry.id, entry.content))
-        
+
         conn.commit()
         conn.close()
-        
+
         self.logger.info("MemoryDB", f"添加记忆: {entry.id}, type={type}")
         return entry
 
@@ -147,90 +147,90 @@ class MemoryDB:
         """根据 ID 获取记忆"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         cursor.execute("SELECT * FROM memories WHERE id = ?", (id,))
         row = cursor.fetchone()
         conn.close()
-        
+
         return self._row_to_entry(row) if row else None
 
-    def search_fts(self, query: str, type: Optional[str] = None, limit: int = 10) -> List[MemoryEntry]:
+    def search_fts(self, query: str, type: Optional[str] = None, limit: int = 10) -> list[MemoryEntry]:
         """全文搜索"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         # FTS5 搜索
         sql = """
             SELECT m.* FROM memories m
             JOIN memories_fts fts ON m.id = fts.id
             WHERE memories_fts MATCH ?
         """
-        params: List[Any] = [query]
-        
+        params: list[Any] = [query]
+
         if type:
             sql += " AND m.type = ?"
             params.append(type)
-        
+
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
-        
+
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
-        
+
         return [self._row_to_entry(row) for row in rows]
 
     def search_vector(
         self,
-        query_embedding: List[float],
+        query_embedding: list[float],
         type: Optional[str] = None,
         limit: int = 10,
         threshold: float = 0.7,
-    ) -> List[tuple[MemoryEntry, float]]:
+    ) -> list[tuple[MemoryEntry, float]]:
         """向量相似度搜索
-        
+
         Returns:
             List of (MemoryEntry, similarity_score) sorted by score descending
         """
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         sql = "SELECT * FROM memories WHERE embedding IS NOT NULL"
-        params: List[Any] = []
-        
+        params: list[Any] = []
+
         if type:
             sql += " AND type = ?"
             params.append(type)
-        
+
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
-        
+
         # 计算余弦相似度
-        results: List[tuple[MemoryEntry, float]] = []
+        results: list[tuple[MemoryEntry, float]] = []
         for row in rows:
             entry = self._row_to_entry(row)
             if entry.embedding:
                 similarity = self._cosine_similarity(query_embedding, entry.embedding)
                 if similarity >= threshold:
                     results.append((entry, similarity))
-        
+
         # 按相似度降序
         results.sort(key=lambda x: -x[1])
         return results[:limit]
 
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
+    def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """计算余弦相似度"""
         if len(a) != len(b):
             return 0.0
-        
+
         dot_product = sum(x * y for x, y in zip(a, b))
         norm_a = sum(x * x for x in a) ** 0.5
         norm_b = sum(x * x for x in b) ** 0.5
-        
+
         if norm_a == 0 or norm_b == 0:
             return 0.0
-        
+
         return dot_product / (norm_a * norm_b)
 
     def get_recent(
@@ -238,134 +238,134 @@ class MemoryDB:
         type: Optional[str] = None,
         user_id: Optional[str] = None,
         limit: int = 20,
-    ) -> List[MemoryEntry]:
+    ) -> list[MemoryEntry]:
         """获取最近的记忆"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         sql = "SELECT * FROM memories WHERE 1=1"
-        params: List[Any] = []
-        
+        params: list[Any] = []
+
         if type:
             sql += " AND type = ?"
             params.append(type)
-        
+
         if user_id:
             sql += " AND user_id = ?"
             params.append(user_id)
-        
+
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        
+
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         conn.close()
-        
+
         return [self._row_to_entry(row) for row in rows]
 
-    def update(self, id: str, content: Optional[str] = None, metadata: Optional[Dict] = None) -> bool:
+    def update(self, id: str, content: Optional[str] = None, metadata: Optional[dict] = None) -> bool:
         """更新记忆"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
-        updates: List[str] = []
-        params: List[Any] = []
-        
+
+        updates: list[str] = []
+        params: list[Any] = []
+
         if content:
             updates.append("content = ?")
             params.append(content)
             # 更新 FTS 表
             cursor.execute("UPDATE memories_fts SET content = ? WHERE id = ?", (content, id))
-        
+
         if metadata:
             updates.append("metadata = ?")
             params.append(json.dumps(metadata, ensure_ascii=False))
-        
+
         updates.append("updated_at = ?")
         params.append(datetime.now().isoformat())
-        
+
         params.append(id)
-        
+
         cursor.execute(f"UPDATE memories SET {', '.join(updates)} WHERE id = ?", params)
         conn.commit()
         success = cursor.rowcount > 0
         conn.close()
-        
+
         return success
 
     def delete(self, id: str) -> bool:
         """删除记忆"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         cursor.execute("DELETE FROM memories WHERE id = ?", (id,))
         cursor.execute("DELETE FROM memories_fts WHERE id = ?", (id,))
-        
+
         conn.commit()
         success = cursor.rowcount > 0
         conn.close()
-        
+
         return success
 
     def cleanup_old(self, days: int = 90) -> int:
         """清理过期记忆
-        
+
         Args:
             days: 保留最近多少天的记忆
-            
+
         Returns:
             删除的记忆条数
         """
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         cutoff = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         from datetime import timedelta
         cutoff = cutoff - timedelta(days=days)
-        
+
         # 只删除非重要记忆
         cursor.execute("""
-            DELETE FROM memories 
-            WHERE created_at < ? 
+            DELETE FROM memories
+            WHERE created_at < ?
             AND type NOT IN ('preference', 'context')
             AND id NOT IN (
                 SELECT id FROM memories WHERE metadata LIKE '%"important":true%'
             )
         """, (cutoff.isoformat(),))
-        
+
         count = cursor.rowcount
-        
+
         # 重建 FTS
         cursor.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
-        
+
         conn.commit()
         conn.close()
-        
+
         self.logger.info("MemoryDB", f"清理过期记忆: 删除 {count} 条")
         return count
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         # 总数
         cursor.execute("SELECT COUNT(*) FROM memories")
         total = cursor.fetchone()[0]
-        
+
         # 按类型统计
         cursor.execute("SELECT type, COUNT(*) FROM memories GROUP BY type")
         by_type = dict(cursor.fetchall())
-        
+
         # 有向量的记忆数
         cursor.execute("SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL")
         with_embedding = cursor.fetchone()[0]
-        
+
         # 数据库大小
         db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
-        
+
         conn.close()
-        
+
         return {
             "total": total,
             "by_type": by_type,

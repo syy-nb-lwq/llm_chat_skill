@@ -1,12 +1,10 @@
 """SkillMerger - 技能版本合并:当同一 Skill 有多个版本时,LLM 判断哪个更好或合并为新版本"""
 import json
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Optional
 
 from infra.logger import get_logger
 from skills.models import Skill, SkillStep
-from core.memory import get_memory_store
 
 
 @dataclass
@@ -15,7 +13,7 @@ class MergeResult:
     success: bool
     merged_skill: Optional[Skill] = None
     reason: str = ""
-    kept_versions: List[str] = field(default_factory=list)
+    kept_versions: list[str] = field(default_factory=list)
 
 
 # ---- Feature Flag ----
@@ -64,7 +62,7 @@ class SkillMerger:
     async def merge(
         self,
         skill_name: str,
-        versions: List[Skill],
+        versions: list[Skill],
     ) -> MergeResult:
         """合并同一技能多个版本
 
@@ -132,7 +130,7 @@ class SkillMerger:
                 reason=str(e),
             )
 
-    def _build_merge_prompt(self, skill_name: str, versions: List[Skill]) -> str:
+    def _build_merge_prompt(self, skill_name: str, versions: list[Skill]) -> str:
         """构建合并 prompt"""
         lines = [
             f"技能名称: {skill_name}",
@@ -168,7 +166,7 @@ class SkillMerger:
         self,
         skill_name: str,
         response: str,
-        versions: List[Skill],
+        versions: list[Skill],
     ) -> Optional[Skill]:
         """解析 LLM 合并响应"""
         import re
@@ -207,7 +205,7 @@ class SkillMerger:
 
         return merged
 
-    def _parse_steps(self, steps_data: List[Dict]) -> List[SkillStep]:
+    def _parse_steps(self, steps_data: list[dict]) -> list[SkillStep]:
         """解析步骤数据"""
         steps = []
         for i, s in enumerate(steps_data):
@@ -227,7 +225,7 @@ class SkillMerger:
     async def suggest_merge(
         self,
         skill_name: str,
-        versions: List[Skill],
+        versions: list[Skill],
     ) -> Optional[str]:
         """建议合并(但不执行),返回 LLM 的分析和建议
 
@@ -261,7 +259,7 @@ class SkillMerger:
 
 def merge_skills(
     skill_name: str,
-    versions: List[Skill],
+    versions: list[Skill],
 ) -> MergeResult:
     """便捷函数:同步合并技能(内部使用 asyncio.run)"""
     import asyncio
