@@ -12,10 +12,8 @@
 """
 from __future__ import annotations
 
-import hashlib
 import hmac
 import secrets
-import time
 from functools import wraps
 from typing import Optional
 
@@ -27,17 +25,19 @@ from infra.logger import get_logger
 logger = get_logger()
 
 # ===== 生成 =====
+# P0-04: 全部用 secrets.token_hex 提供足够熵,去掉时间戳前缀避免被预测。
+# session_id/client_id 用 16 字节(32 hex 字符)熵;user_id 用 8 字节已足够。
 
 def gen_user_id() -> str:
     return f"u-{secrets.token_hex(8)}"
 
 
 def gen_session_id() -> str:
-    return f"s-{int(time.time()*1000)}-{secrets.token_hex(4)}"
+    return f"s-{secrets.token_hex(16)}"
 
 
 def gen_client_id() -> str:
-    return f"c-{int(time.time()*1000)}-{secrets.token_hex(6)}"
+    return f"c-{secrets.token_hex(16)}"
 
 
 # ===== Owner Token =====

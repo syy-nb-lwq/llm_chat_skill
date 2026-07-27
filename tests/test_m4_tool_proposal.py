@@ -1,11 +1,17 @@
 """M4-01/M4-02/M4-03/M4-04/M4-05 测试。"""
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
+from tools.approval import (
+    ToolApprovalService,
+)
+from tools.declarative_http import (
+    DeclarativeHTTPTool,
+    SandboxRunner,
+    _enforce_network_policy,
+    _host_in_allowed,
+)
 from tools.proposal import (
     NetworkPolicy,
     SideEffectLevel,
@@ -15,20 +21,7 @@ from tools.proposal import (
     ToolProposalStatus,
     ToolProposalStore,
     ToolTestCase,
-    get_tool_proposal_store,
-    reset_tool_proposal_store,
 )
-from tools.approval import (
-    ToolApprovalService,
-    reset_tool_approval_service,
-)
-from tools.declarative_http import (
-    DeclarativeHTTPTool,
-    SandboxRunner,
-    _host_in_allowed,
-    _enforce_network_policy,
-)
-
 
 # ===== M4-01:数据模型 =====
 

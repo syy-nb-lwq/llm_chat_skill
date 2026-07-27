@@ -1,12 +1,14 @@
 """补充测试:覆盖本次 review 发现的问题"""
 import asyncio
+
 import pytest
 
 from agents.learning import (
-    LearningAgent, ToolTask, resolve_params,
+    LearningAgent,
+    ToolTask,
+    resolve_params,
 )
-from tools.base import Tool, ToolResult, ToolSchema, ToolParam
-
+from tools.base import Tool, ToolParam, ToolResult, ToolSchema
 
 # ===== resolve_params =====
 

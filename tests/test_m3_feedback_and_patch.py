@@ -6,16 +6,12 @@
 - 审批 patch 生成新版本(M3-04)
 - 回滚可恢复旧版本
 """
-import asyncio
-import json
-from pathlib import Path
 
 import pytest
 
 from core.feedback import (
     FeedbackEvent,
     FeedbackStore,
-    get_feedback_store,
     reset_feedback_store,
 )
 
@@ -101,7 +97,9 @@ def test_skill_versions_coexist(skill_store):
 def test_publish_new_version_does_not_overwrite_old(skill_store):
     """新版本发布 → 旧版本仍可访问。"""
     from datetime import datetime
+
     import yaml
+
     from skills.models import Skill
 
     base = skill_store.base_path

@@ -1,9 +1,7 @@
 """意图检测器测试"""
 import pytest
-from core.intent_detector import (
-    IntentCategory, IntentDetector, get_intent_detector,
-    is_chitchat, is_task
-)
+
+from core.intent_detector import IntentCategory, IntentDetector, get_intent_detector, is_chitchat, is_task
 
 
 class TestIntentDetector:
@@ -79,22 +77,22 @@ class TestIntentDetector:
         """复杂输入 → 需要 LLM"""
         result = detector.detect("帮我分析一下明天的会议安排")
         # 需要 LLM 判断具体任务类型
-        assert result.need_llm == True
+        assert result.need_llm
 
     # ===== 工具函数测试 =====
 
     def test_is_chitchat(self):
         """is_chitchat 工具函数"""
-        assert is_chitchat(IntentCategory.GREETING) == True
-        assert is_chitchat(IntentCategory.FAREWELL) == True
-        assert is_chitchat(IntentCategory.THANKS) == True
-        assert is_chitchat(IntentCategory.WEATHER) == False
+        assert is_chitchat(IntentCategory.GREETING)
+        assert is_chitchat(IntentCategory.FAREWELL)
+        assert is_chitchat(IntentCategory.THANKS)
+        assert not is_chitchat(IntentCategory.WEATHER)
 
     def test_is_task(self):
         """is_task 工具函数"""
-        assert is_task(IntentCategory.WEATHER) == True
-        assert is_task(IntentCategory.SEARCH) == True
-        assert is_task(IntentCategory.GREETING) == False
+        assert is_task(IntentCategory.WEATHER)
+        assert is_task(IntentCategory.SEARCH)
+        assert not is_task(IntentCategory.GREETING)
 
 
 class TestIntentDetectorEdgeCases:
@@ -129,7 +127,7 @@ class TestIntentDetectorEdgeCases:
         detector = IntentDetector()
         result = detector.detect("生成一个技能用来做每日的日报编写")
         # 应该交给 LLM 处理
-        assert result.need_llm == True
+        assert result.need_llm
 
 
 class TestEntityExtraction:

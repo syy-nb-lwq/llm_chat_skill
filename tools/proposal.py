@@ -17,14 +17,13 @@
 """
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 
 class SideEffectLevel(str, Enum):
@@ -55,8 +54,8 @@ AUTO_PUBLISH_ALLOWED = {
 @dataclass
 class NetworkPolicy:
     """网络访问策略(M4-04)。"""
-    allowed_hosts: List[str] = field(default_factory=list)   # 域名白名单(支持 "*.example.com")
-    denied_hosts: List[str] = field(default_factory=list)
+    allowed_hosts: list[str] = field(default_factory=list)   # 域名白名单(支持 "*.example.com")
+    denied_hosts: list[str] = field(default_factory=list)
     require_https: bool = True
 
 
@@ -68,7 +67,7 @@ class ToolParamSpec:
     description: str = ""
     required: bool = True
     default: Any = None
-    enum: Optional[List[Any]] = None
+    enum: Optional[list[Any]] = None
     location: str = "body"           # query/path/header/body
 
 
@@ -78,17 +77,17 @@ class ToolEndpoint:
     method: str                       # GET/POST/PUT/DELETE/PATCH
     path: str                         # 例如 "/users/{id}"
     summary: str = ""
-    params: List[ToolParamSpec] = field(default_factory=list)
-    returns: Dict[str, str] = field(default_factory=dict)
+    params: list[ToolParamSpec] = field(default_factory=list)
+    returns: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class ToolTestCase:
     """测试样例(M4-01/M4-03)。"""
     name: str
-    input: Dict[str, Any] = field(default_factory=dict)
+    input: dict[str, Any] = field(default_factory=dict)
     expected_status: int = 200
-    expected_keys: List[str] = field(default_factory=list)
+    expected_keys: list[str] = field(default_factory=list)
     expect_error: bool = False
 
 
@@ -123,11 +122,11 @@ class ToolProposal:
     runtime: str = "declarative_http"        # declarative_http / mcp / python (M4-01 默认仅 declarative_http/mcp)
     description: str = ""
     endpoint: Optional[ToolEndpoint] = None
-    permissions: List[str] = field(default_factory=list)
+    permissions: list[str] = field(default_factory=list)
     network_policy: NetworkPolicy = field(default_factory=NetworkPolicy)
     side_effect: str = SideEffectLevel.READ_ONLY.value
-    secret_refs: List[str] = field(default_factory=list)   # 引用名,非明文
-    test_cases: List[ToolTestCase] = field(default_factory=list)
+    secret_refs: list[str] = field(default_factory=list)   # 引用名,非明文
+    test_cases: list[ToolTestCase] = field(default_factory=list)
     status: str = ToolProposalStatus.DRAFT.value
     author: str = ""
     created_at: str = ""
@@ -153,25 +152,30 @@ class ToolProposal:
             })
         elif self.endpoint is not None and not isinstance(self.endpoint, ToolEndpoint):
             self.endpoint = ToolEndpoint(**asdict(self.endpoint))
+        # test_cases 也需要从 dict 转回 ToolTestCase(从 YAML 加载时)
+        self.test_cases = [
+            ToolTestCase(**tc) if isinstance(tc, dict) else tc
+            for tc in (self.test_cases or [])
+        ]
 
     # ===== 序列化 =====
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         return d
 
-    def to_yaml_dict(self) -> Dict[str, Any]:
+    def to_yaml_dict(self) -> dict[str, Any]:
         """给 ``yaml.safe_dump`` 用的纯 dict(``ToolEndpoint`` 已嵌套好)。"""
         return self.to_dict()
 
     # ===== 校验 =====
 
-    def validate(self) -> List[str]:
+    def validate(self) -> list[str]:
         """静态校验:M4-01/M4-05 必需的字段及一致性。
 
         返回错误列表;空列表表示通过。
         """
-        issues: List[str] = []
+        issues: list[str] = []
         if not re.match(r"^[A-Za-z][A-Za-z0-9_\-]*$", self.name or ""):
             issues.append(f"name 非法: {self.name!r}")
         if not re.match(r"^\d+\.\d+\.\d+$", self.version or ""):
@@ -253,15 +257,15 @@ class ToolProposalStore:
             return None
         return _proposal_from_dict(data)
 
-    def list_versions(self, name: str) -> List[str]:
+    def list_versions(self, name: str) -> list[str]:
         prefix = f"{name}@"
         return sorted(
             p.stem[len(prefix):]
             for p in self.dir.glob(f"{name}@*.yaml")
         )
 
-    def list_all(self) -> List[ToolProposal]:
-        out: List[ToolProposal] = []
+    def list_all(self) -> list[ToolProposal]:
+        out: list[ToolProposal] = []
         for p in self.dir.glob("*@*.yaml"):
             try:
                 import yaml
@@ -278,7 +282,7 @@ class ToolProposalStore:
         return False
 
 
-def _proposal_from_dict(d: Dict[str, Any]) -> ToolProposal:
+def _proposal_from_dict(d: dict[str, Any]) -> ToolProposal:
     """从 dict 反序列化为 ToolProposal(dataclass 自动处理嵌套)。"""
     return ToolProposal(**d)
 

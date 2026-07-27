@@ -14,13 +14,8 @@
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Dict, List
-
 import pytest
 import yaml
-
 
 # ===== 公共 fixtures =====
 
@@ -125,9 +120,9 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
     runtime = e2e_env["runtime"]
     llm = e2e_env["llm"]
 
+    from agents.manager import ManagerAgent
     from agents.skill_trainer import SkillTrainer
     from agents.teaching_session import TeachingSessionStore, TeachingStatus
-    from agents.manager import ManagerAgent
     from skills.manager import SkillStore, reset_skill_store
 
     user_id = "bob"
@@ -155,7 +150,7 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
         capability="",
         patterns=[],
     )
-    ts2 = await trainer.start_or_continue(
+    await trainer.start_or_continue(
         "分三块:完成/问题/计划",
         user_id=user_id, session_id=session_id,
     )
@@ -190,7 +185,7 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
 
     # TeachingSession 状态机应当推进到 ACTIVE(find_active_for 只返回非终态,
     # 所以发布后改用 list_active 然后过滤 user_id+session_id 校验)
-    all_sessions = teaching_store.list_active()  # 列表里通常没有刚 ACTIVE 的
+    teaching_store.list_active()  # 列表里通常没有刚 ACTIVE 的
     # 直接从磁盘重新读取
     import json as _json
     sess_files = list(runtime["teachings_path"].glob("*.json"))
@@ -301,7 +296,7 @@ async def test_execution_record_carries_skill_version(e2e_env):
     llm.queue("【今日完成】...【问题】...【明日计划】...")
 
     # 抓取 emit 事件
-    events: List[tuple] = []
+    events: list[tuple] = []
 
     def on_event(event: str, payload: dict):
         events.append((event, payload))

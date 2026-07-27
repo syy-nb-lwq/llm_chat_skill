@@ -1,12 +1,10 @@
 """Agent 单元测试 - mock LLM,不依赖真实 API"""
 import asyncio
 import json
-from typing import Any, Dict
 
 import pytest
 
 from infra.llm import LLMClient
-
 
 # ===== Mock LLM =====
 
@@ -61,7 +59,7 @@ async def test_manager_plan_parses_valid_json(monkeypatch):
     }, ensure_ascii=False)
     _patch_llm(monkeypatch, [valid])
 
-    from agents.manager import ManagerAgent, IntentType
+    from agents.manager import IntentType, ManagerAgent
     m = ManagerAgent()
     # 使用更长的输入避免被闲聊检测拦截
     plan = await m.plan("帮我查一下厦门今天的天气")
@@ -73,7 +71,7 @@ async def test_manager_plan_parses_valid_json(monkeypatch):
 @pytest.mark.asyncio
 async def test_manager_plan_invalid_then_valid(monkeypatch):
     """输入 "hi" 现在会被闲聊检测拦截,不调用 LLM"""
-    from agents.manager import ManagerAgent, IntentType
+    from agents.manager import IntentType, ManagerAgent
     m = ManagerAgent()
     plan = await m.plan("hi")
     # "hi" 应该是闲聊,不需要调用 LLM
@@ -84,7 +82,7 @@ async def test_manager_plan_invalid_then_valid(monkeypatch):
 @pytest.mark.asyncio
 async def test_manager_plan_all_fail_degrades(monkeypatch):
     """输入 "hi" 现在会被闲聊检测拦截"""
-    from agents.manager import ManagerAgent, IntentType
+    from agents.manager import IntentType, ManagerAgent
     m = ManagerAgent()
     plan = await m.plan("hi")
     # "hi" 应该是闲聊,不需要调用 LLM
@@ -113,7 +111,6 @@ def test_manager_should_learn_skill():
 async def test_orchestrator_stream(monkeypatch):
     _patch_llm(monkeypatch, ["ok"])
     from agents.orchestrator import OrchestratorAgent
-    from tools.base import ToolResult
     o = OrchestratorAgent()
     chunks = []
     async for c in o.stream("hello", {}, None):
@@ -192,7 +189,6 @@ async def test_manager_plan_passes_context_to_llm(monkeypatch):
             async for c in self._stream(messages):
                 yield c
 
-    from core.agent_base import get_llm_client as gab_g
     monkeypatch.setattr("infra.llm.get_llm_client", lambda: CapturingLLM())
     monkeypatch.setattr("core.agent_base.get_llm_client", lambda: CapturingLLM())
     from infra import llm as _l
@@ -262,6 +258,7 @@ async def test_manager_plan_without_context_keeps_old_behavior(monkeypatch):
 async def test_agent_handle_async_on_event_preserves_order(monkeypatch):
     """异步 on_event 时,事件必须按 emit 顺序完成(不依赖 create_task 调度顺序)。"""
     import asyncio
+
     from core.agent import Agent
 
     # 准备 LLM 剧本
@@ -294,8 +291,8 @@ async def test_agent_handle_async_on_event_preserves_order(monkeypatch):
 @pytest.mark.asyncio
 async def test_agent_handle_drains_pending_async_on_exception(monkeypatch):
     """handle 异常时,pending 的异步 emit 也要被 drain(不能泄漏)"""
-    from core.agent import Agent
     from agents import manager as mgr_mod
+    from core.agent import Agent
     from infra.llm import LLMClient
 
     # 走直答路径

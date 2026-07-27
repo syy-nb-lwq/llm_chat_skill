@@ -5,11 +5,12 @@
 - capability / method / examples 约束检查
 - ExecutionCritic 对无工具任务不再无条件得 100%
 """
-import pytest
 from unittest.mock import patch
 
-from core.result_validator import ResultValidator, ResultValidation
-from core.critic import ExecutionCritic, ExecutionContext, TaskExecutionSummary
+import pytest
+
+from core.critic import ExecutionContext, ExecutionCritic
+from core.result_validator import ResultValidator
 from skills.models import Skill
 
 

@@ -2,12 +2,17 @@
 import asyncio
 import json
 import sys
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -15,10 +20,20 @@ from backend.session import sessions
 from backend.websocket_handler import endpoint, register_handlers
 from infra.auth import require_owner_token  # C-01:管理 API owner token
 from infra.config import ConfigError, config
-from infra.logger import get_logger
+from infra.logger import bind_log_context, get_logger, log_task_exception, reset_log_context
 
 
-app = FastAPI(title="Skill Agent API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # P1-08: 从 @app.on_event 迁移到 lifespan 上下文管理器
+    # _startup / _shutdown 定义在下方,Python 在调用时(运行期)解析名字,
+    # 模块加载完成后即可访问,无需前向声明。
+    await _startup()
+    yield
+    await _shutdown()
+
+
+app = FastAPI(title="Skill Agent API", lifespan=lifespan)
 logger = get_logger()
 
 app.add_middleware(
@@ -30,6 +45,140 @@ app.add_middleware(
 )
 
 endpoint.register_route(app, "/pubsub")
+
+
+# ===== P1-03: 统一错误响应信封 =====
+# 所有 4xx/5xx 响应都遵循此格式,前端可统一处理。
+# 兼容:保留 `detail` 字段(与 FastAPI HTTPException 默认格式一致),
+# 新增 code/message/trace_id/details 字段供新代码使用。
+
+
+class ErrorResponse(BaseModel):
+    """统一错误响应信封(P1-03)。
+
+    字段:
+    - code: 机器可读的错误码(如 "not_found" / "validation_error" / "internal_error")
+    - message: 人类可读的错误描述
+    - detail: 兼容 FastAPI 默认格式(等于 message),前端旧代码可继续读此字段
+    - trace_id: 请求追踪 ID,与日志中的 trace_id 对应,便于排查
+    - details: 额外上下文(如字段级校验错误列表)
+    """
+
+    code: str
+    message: str
+    detail: str  # 兼容 FastAPI 默认字段
+    trace_id: str
+    details: Optional[Any] = None
+
+
+# HTTP 状态码 → 错误码映射
+_STATUS_CODE_MAP = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    409: "conflict",
+    422: "validation_error",
+    500: "internal_error",
+    502: "bad_gateway",
+    503: "service_unavailable",
+}
+
+
+def _make_error_response(
+    status_code: int,
+    message: str,
+    details: Any = None,
+    trace_id: Optional[str] = None,
+) -> JSONResponse:
+    """构造统一格式的错误响应。"""
+    tid = trace_id or str(uuid.uuid4())
+    code = _STATUS_CODE_MAP.get(status_code, "error")
+    body = ErrorResponse(
+        code=code,
+        message=message,
+        detail=message,  # 兼容 FastAPI 默认 detail 字段
+        trace_id=tid,
+        details=details,
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(),
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """把 HTTPException(含 Starlette 原生 404/405 等)转为统一错误信封(P1-03)。
+
+    保持 `detail` 字段兼容前端旧代码,新增 code/trace_id。
+    注册 StarletteHTTPException(而非 fastapi.HTTPException)可覆盖
+    路由不存在等场景下 Starlette 默认返回的 {"detail":"Not Found"}。
+    """
+    trace_id = getattr(request.state, "trace_id", None) or str(uuid.uuid4())
+    details = exc.detail if isinstance(exc.detail, (dict, list)) else None
+    message = exc.detail if isinstance(exc.detail, str) else "请求错误"
+    return _make_error_response(
+        status_code=exc.status_code,
+        message=message,
+        details=details,
+        trace_id=trace_id,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    """把 422 校验错误转为统一错误信封(P1-03)。
+
+    FastAPI 默认返回 `{"detail": [...]}`,这里改为统一信封,
+    同时把原始校验错误列表放到 `details` 字段,前端可据此刻画字段级错误。
+    """
+    trace_id = getattr(request.state, "trace_id", None) or str(uuid.uuid4())
+    return _make_error_response(
+        status_code=422,
+        message="请求参数校验失败",
+        details=exc.errors(),
+        trace_id=trace_id,
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """捕获未处理的异常,返回 500 + 统一信封(P1-03)。
+
+    避免向客户端泄露堆栈,只在服务端日志记录完整 traceback。
+    """
+    import traceback
+    trace_id = getattr(request.state, "trace_id", None) or str(uuid.uuid4())
+    logger.error(
+        "unhandled_exception",
+        f"trace_id={trace_id} path={request.url.path} error={exc}",
+        data={"traceback": traceback.format_exc()},
+    )
+    return _make_error_response(
+        status_code=500,
+        message="服务器内部错误",
+        details=None,
+        trace_id=trace_id,
+    )
+
+
+@app.middleware("http")
+async def _attach_trace_id(request: Request, call_next):
+    """为每个请求生成 trace_id,挂到 request.state 供 exception_handler 使用(P1-03)。
+
+    P1-05: 同时绑定到日志上下文,使请求范围内的所有日志都带 trace_id。
+    """
+    trace_id = str(uuid.uuid4())
+    request.state.trace_id = trace_id
+    token = bind_log_context(trace_id=trace_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Trace-Id"] = trace_id
+        return response
+    finally:
+        reset_log_context(token)
 
 
 class FeatureFlagUpdate(BaseModel):
@@ -59,7 +208,6 @@ async def _stop_reflect_loop():
         app.state.reflect_loop = None
 
 
-@app.on_event("startup")
 async def _startup():
     try:
         config.validate()
@@ -84,6 +232,7 @@ async def _startup():
     )
 
     app.state.gc_task = asyncio.create_task(_gc_loop())
+    app.state.gc_task.add_done_callback(log_task_exception)  # P1-04
     app.state.reflect_loop = None
 
     from tools.hub import get_tool_hub
@@ -103,6 +252,7 @@ async def _startup():
     # MCP 工具源(P7-3):mcp_enabled 时解析 mcp_servers 并注册到 ToolHub
     if config.mcp_enabled and config.mcp_servers:
         import json as _json
+
         from tools.sources.mcp_source import create_mcp_source
         try:
             mcp_servers = _json.loads(config.mcp_servers)
@@ -132,8 +282,8 @@ async def _startup():
 
     # M2-04:启动初始化 embedding 服务,绑定到统一 MemoryRepository
     try:
-        from infra.embedding import init_embedding_service
         from core.memory_repository import get_memory_repository
+        from infra.embedding import init_embedding_service
         embedding_svc = init_embedding_service(
             provider=config.embedding_provider,
             api_key=config.embedding_api_key,
@@ -167,7 +317,6 @@ async def _startup():
             logger.warning("startup", f"heartbeat scheduler start failed: {exc}")
 
 
-@app.on_event("shutdown")
 async def _shutdown():
     gc_task = getattr(app.state, "gc_task", None)
     if gc_task is not None:
@@ -363,7 +512,7 @@ async def choose_teaching_decision(
     session_id: str = "default",
 ):
     """处理用户在重复技能上的决策:reuse / update_new / cancel。"""
-    from agents.teaching_session import get_teaching_store, TeachingStatus
+    from agents.teaching_session import TeachingStatus, get_teaching_store
     store = get_teaching_store()
     ts = store.find_active_for(user_id, session_id)
     if not ts:
@@ -796,9 +945,10 @@ async def approve_patch(patch_id: str):
     if target_skill and (
         updates or data.get("diff") or data.get("patch_type") == "user_correction" or pre_review_status == "auto_approved"
     ):
-        from skills.validator import validate_skill as _validate_skill
-        from skills.models import Skill as _Skill
         from datetime import datetime as _dt
+
+        from skills.models import Skill as _Skill
+        from skills.validator import validate_skill as _validate_skill
 
         new_version = _bump_version(existing.version if existing else "1.0.0")
         base_method = existing.method if existing else ""
@@ -910,11 +1060,12 @@ def _publish_skill_version(skill) -> tuple:
     SkillTrainer.persist 的简化包装,直接写 YAML + 设置 active。
     """
     try:
+        from datetime import datetime as _dt
+
+        import yaml
+
         from skills.manager import get_skill_store
         from skills.registry import SkillConflictError
-        import yaml
-        from pathlib import Path
-        from datetime import datetime as _dt
 
         store = get_skill_store()
         target_dir = store.base_path / "user"
@@ -965,7 +1116,7 @@ async def submit_feedback(payload: dict):
       - content: 反馈内容
       - rating: 1~5(可选)
     """
-    from core.feedback import FeedbackEvent, FeedbackStore, get_feedback_store
+    from core.feedback import FeedbackEvent, get_feedback_store
     fs = get_feedback_store()
     ev = FeedbackEvent(
         execution_id=payload.get("execution_id") or "",
@@ -980,7 +1131,6 @@ async def submit_feedback(payload: dict):
     path = fs.save(ev)
     # correction 类型:绑定原 execution_id,生成 SkillPatch
     if ev.type == "correction":
-        from core.memory import get_memory_store
         from core.memory_repository import get_memory_repository
         try:
             repo = get_memory_repository()
@@ -1114,8 +1264,8 @@ async def list_skill_versions(name: str):
 @app.get("/api/skills/{name}/audit")
 async def skill_audit(name: str):
     """汇总该技能的所有版本、近期 patch 与 episode。"""
-    from skills.manager import get_skill_store
     from core.memory_repository import get_memory_repository
+    from skills.manager import get_skill_store
     store = get_skill_store()
     versions = store._registry.list_versions(name)
     active = store._registry._active_versions.get(name)
@@ -1133,9 +1283,9 @@ async def skill_audit(name: str):
 @app.get("/api/diag")
 async def diag():
     """汇总 providers / features / tool sources / embedding 状态。"""
-    from tools.hub import get_tool_hub
-    from infra.embedding import get_embedding_service
     from core.memory_repository import get_memory_repository
+    from infra.embedding import get_embedding_service
+    from tools.hub import get_tool_hub
 
     hub = get_tool_hub()
     return {

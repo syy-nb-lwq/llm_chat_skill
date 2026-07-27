@@ -6,17 +6,15 @@
   Layer 2: LLM 深度理解 (最后手段)
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import Optional
 
 from core.agent_base import BaseAgent
 from core.context import Context
+from core.intent_detector import IntentCategory, get_intent_detector, is_chitchat
 from core.memory import get_memory_store
-from core.semantic_memory import get_semantic_memory, SemanticMemoryStore
-from core.intent_detector import (
-    IntentCategory, IntentResult, IntentDetector, 
-    get_intent_detector, is_chitchat, is_task
-)
+from core.semantic_memory import SemanticMemoryStore, get_semantic_memory
 from skills.manager import Skill, get_skill_store
+
 
 # Feature Flag
 def _semantic_memory_enabled() -> bool:
@@ -34,7 +32,7 @@ class PlanResult:
     intent_detail: str = ""        # 意图详情描述
     selected_skill: Optional["Skill"] = None
     is_retry: bool = False        # 是否是重试意图
-    tool_tasks: List[Dict] = field(default_factory=list)
+    tool_tasks: list[dict] = field(default_factory=list)
     need_llm: bool = False        # 是否需要 LLM 处理
 
 
@@ -82,7 +80,7 @@ class ManagerAgent(BaseAgent):
     # 内置兜底工具(ToolHub 不可用时使用)
     _BUILTIN_TOOLS = ["weather_query", "web_search"]
 
-    def _get_available_tool_names(self) -> List[str]:
+    def _get_available_tool_names(self) -> list[str]:
         """从 ToolHub 动态读取已注册工具名(M4 动态工具支持)。
 
         ToolHub 不可用或为空时,回退到内置列表,保证旧环境可用。
@@ -128,6 +126,7 @@ class ManagerAgent(BaseAgent):
         skills_list = self._format_skills(skills)
         tool_names = self._get_available_tool_names()
         tools_str = ", ".join(tool_names)
+        first_tool = tool_names[0] if tool_names else "tool_name"
         return f"""你是一个任务规划助手。作为流转中枢,你需要:
 
 1. 识别用户意图(包括重试、上下文关联等)
@@ -142,15 +141,52 @@ class ManagerAgent(BaseAgent):
 已有技能列表:
 {skills_list}
 
-严格按以下 JSON 格式输出:
+严格按以下 JSON 格式输出。tool_tasks 中每个任务**必须**包含 id/depends_on/parallel_group
+三个字段(无依赖时 depends_on 给空数组,无并行组时 parallel_group 给空字符串),
+否则 DAG 执行器无法调度任务:
+
 {{
   "intent": "用户意图简短描述",
   "selected_skill": "选择的技能名称(没有则填空字符串)",
-  "is_retry": true/false,  // 用户是否要求重试上一次的执行
+  "is_retry": true/false,
   "tool_tasks": [
-    {{"type": "{tool_names[0] if tool_names else 'tool_name'}", "params": {{}}}}
+    {{
+      "id": "t1",
+      "type": "{first_tool}",
+      "params": {{}},
+      "depends_on": [],
+      "parallel_group": ""
+    }},
+    {{
+      "id": "t2",
+      "type": "{first_tool}",
+      "params": {{"city": "${{t1.data.city}}"}},
+      "depends_on": ["t1"],
+      "parallel_group": ""
+    }},
+    {{
+      "id": "t3",
+      "type": "{first_tool}",
+      "params": {{}},
+      "depends_on": ["t1"],
+      "parallel_group": "after_t1"
+    }},
+    {{
+      "id": "t4",
+      "type": "{first_tool}",
+      "params": {{}},
+      "depends_on": ["t2", "t3"],
+      "parallel_group": ""
+    }}
   ]
-}}"""
+}}
+
+示例说明:
+- t1 无依赖,先执行
+- t2 依赖 t1,且用 `${{t1.data.city}}` 引用 t1 的返回值
+- t3 同样依赖 t1,与 t2 通过相同的 parallel_group="after_t1" 并行执行
+- t4 依赖 t2 和 t3,等它们都完成后再执行
+- 单步任务时也要给出全部字段(id/depends_on/parallel_group)"""
 
     def __init__(self):
         super().__init__()
@@ -190,7 +226,7 @@ class ManagerAgent(BaseAgent):
 
         # ===== Layer 0/1: 快速规则匹配(无 LLM) =====
         intent_result = self.intent_detector.detect(user_input)
-        
+
         # 闲聊类 → 直接返回
         if is_chitchat(intent_result.category):
             self.logger.info("Manager", f"闲聊检测: {intent_result.category.value}")
@@ -200,7 +236,7 @@ class ManagerAgent(BaseAgent):
                 selected_skill=None,
                 tool_tasks=[],
             )
-        
+
         # 教导类 → 直接返回
         if intent_result.category == IntentCategory.TEACH:
             self.logger.info("Manager", "教导检测: 检测到教导意图")
@@ -210,7 +246,7 @@ class ManagerAgent(BaseAgent):
                 selected_skill=None,
                 tool_tasks=[],
             )
-        
+
         # 教导关键词补充检测
         if self.should_learn_skill(user_input):
             self.logger.info("Manager", "教导检测(补充): 检测到教导意图")
@@ -260,13 +296,13 @@ class ManagerAgent(BaseAgent):
                 intent_detail="需要 LLM 深度理解",
                 need_llm=True,
             )
-        
+
         # ===== Layer 2: LLM 深度理解 =====
         if plan.need_llm:
             llm_result = await self._llm_plan(user_input, context)
             if llm_result:
                 return llm_result
-        
+
         return plan
 
     async def _llm_plan(self, user_input: str, context: Optional[Context]) -> Optional[PlanResult]:
@@ -388,7 +424,7 @@ class ManagerAgent(BaseAgent):
         lines.append("请结合对话历史,识别本轮真实意图。")
         return "\n".join(lines)
 
-    def _auto_id_tool_tasks(self, tasks: List[Dict]) -> List[Dict]:
+    def _auto_id_tool_tasks(self, tasks: list[dict]) -> list[dict]:
         result = []
         for i, t in enumerate(tasks):
             task = dict(t)
@@ -415,7 +451,7 @@ class ManagerAgent(BaseAgent):
         ]
         return any(kw in intent_detail.lower() for kw in simple_keywords)
 
-    def _format_skills(self, skills: List[Skill]) -> str:
+    def _format_skills(self, skills: list[Skill]) -> str:
         if not skills:
             return "(暂无技能)"
         lines = []
@@ -434,7 +470,7 @@ class ManagerAgent(BaseAgent):
         - M2-05:真正 await 异步检索,不再用 ``run_until_complete`` 静默忽略。
         - M2-06:只召回当前 user 的 + global 的记忆。
         """
-        hints: List[str] = []
+        hints: list[str] = []
 
         # 异步走语义记忆(M2-01/M2-05/M2-06)
         try:
@@ -447,16 +483,16 @@ class ManagerAgent(BaseAgent):
                     limit=3,
                 )
             )
-        except Exception:
-            pass
+        except Exception as e:  # P1-06: 不裸吞,记录便于排查
+            self.logger.debug("Manager", f"语义记忆 recall 失败: {e}")
 
         # 也兼容旧的 SemanticMemoryStore
         if not hints and self.semantic_memory:
             try:
                 results = await self.semantic_memory.search_context(user_input, limit=3)
                 hints.extend(results)
-            except Exception:
-                pass
+            except Exception as e:  # P1-06: 不裸吞
+                self.logger.debug("Manager", f"SemanticMemoryStore search 失败: {e}")
 
         # 回退到普通记忆
         if not hints:

@@ -44,7 +44,7 @@ class IdentityContext:
         if not self.execution_id:
             self.execution_id = new_id("exec")
 
-    def child(self) -> "IdentityContext":
+    def child(self) -> IdentityContext:
         """为重试/分支派生 execution_id，同时保留父指针。"""
         return IdentityContext(
             user_id=self.user_id,

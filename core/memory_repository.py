@@ -17,16 +17,15 @@
 """
 from __future__ import annotations
 
+import builtins
 import json
 import sqlite3
-import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+from typing import Any, Optional
 
 # ===== Enum =====
 
@@ -72,7 +71,7 @@ class MemoryItem:
     scope: str = MemoryScope.USER.value
     type: str = MemoryType.FACT.value
     content: str = ""
-    structured_value: Dict[str, Any] = field(default_factory=dict)
+    structured_value: dict[str, Any] = field(default_factory=dict)
     source_turn_id: str = ""
     confidence: float = 0.7
     sensitivity: str = "normal"  # normal / secret / pii
@@ -80,9 +79,9 @@ class MemoryItem:
     valid_until: str = ""
     supersedes_id: str = ""
     status: str = MemoryStatus.ACTIVE.value
-    tags: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    embedding: Optional[List[float]] = None
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    embedding: Optional[list[float]] = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -95,7 +94,7 @@ class MemoryItem:
         if not self.updated_at:
             self.updated_at = now
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @property
@@ -179,7 +178,7 @@ class _MemoryDB:
             conn.executescript(self.SCHEMA)
             # 旧库兼容:补齐缺失列
             for col_def in self.ALT_COLUMNS.split(","):
-                col_name = col_def.strip().split(" ", 1)[0]
+                col_def.strip().split(" ", 1)[0]
                 try:
                     conn.execute(
                         f"ALTER TABLE memories ADD COLUMN {col_def}",
@@ -281,6 +280,12 @@ class _MemoryDB:
                 """,
                 row,
             )
+            # P0-05: FTS5 表没有主键约束,INSERT 会让同 id 重复膨胀,
+            # 同一条记忆 upsert N 次后 FTS 命中会变 N 倍。先 DELETE 再 INSERT。
+            cursor.execute(
+                "DELETE FROM memories_fts WHERE id = ?",
+                (item.id,),
+            )
             cursor.execute(
                 "INSERT INTO memories_fts(id, content) VALUES(?, ?)",
                 (item.id, item.content),
@@ -307,9 +312,9 @@ class _MemoryDB:
         scope: Optional[str] = None,
         type: Optional[str] = None,
         limit: int = 50,
-    ) -> List[MemoryItem]:
+    ) -> builtins.list[MemoryItem]:
         sql = "SELECT * FROM memories WHERE status != 'expired'"
-        params: List[Any] = []
+        params: list[Any] = []
         if user_id:
             # M2-06:作用域过滤,允许 user 看到自己的 + global
             sql += " AND (user_id = ? OR scope = 'global')"
@@ -364,7 +369,7 @@ class _MemoryDB:
         user_id: Optional[str] = None,
         type: Optional[str] = None,
         limit: int = 10,
-    ) -> List[MemoryItem]:
+    ) -> builtins.list[MemoryItem]:
         conn = sqlite3.connect(str(self.db_path))
         try:
             cursor = conn.cursor()
@@ -374,7 +379,7 @@ class _MemoryDB:
                 WHERE memories_fts MATCH ?
                   AND m.status != 'expired'
             """
-            params: List[Any] = [query]
+            params: list[Any] = [query]
             if user_id:
                 sql += " AND (m.user_id = ? OR m.scope = 'global')"
                 params.append(user_id)
@@ -391,16 +396,16 @@ class _MemoryDB:
 
     def search_vector(
         self,
-        query_embedding: List[float],
+        query_embedding: builtins.list[float],
         *,
         user_id: Optional[str] = None,
         limit: int = 10,
-    ) -> List[Tuple[MemoryItem, float]]:
+    ) -> builtins.list[tuple[MemoryItem, float]]:
         conn = sqlite3.connect(str(self.db_path))
         try:
             cursor = conn.cursor()
             sql = "SELECT * FROM memories WHERE embedding IS NOT NULL AND status != 'expired'"
-            params: List[Any] = []
+            params: list[Any] = []
             if user_id:
                 sql += " AND (user_id = ? OR scope = 'global')"
                 params.append(user_id)
@@ -408,7 +413,7 @@ class _MemoryDB:
             rows = cursor.fetchall()
         finally:
             conn.close()
-        out: List[Tuple[MemoryItem, float]] = []
+        out: list[tuple[MemoryItem, float]] = []
         for r in rows:
             item = self._row_to_item(r)
             if not item.embedding:
@@ -434,7 +439,7 @@ class _MemoryDB:
             conn.close()
         return count
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         conn = sqlite3.connect(str(self.db_path))
         try:
             cursor = conn.cursor()
@@ -455,7 +460,7 @@ class _MemoryDB:
         }
 
 
-def _cosine(a: List[float], b: List[float]) -> float:
+def _cosine(a: list[float], b: list[float]) -> float:
     if len(a) != len(b) or not a:
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
@@ -493,9 +498,9 @@ class EpisodeRecord:
     user_feedback: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     skill_diagnosis: str = ""
-    tool_attempts: Dict[str, Any] = field(default_factory=dict)
+    tool_attempts: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     # 兼容旧 FailureRecord 字段
@@ -552,7 +557,7 @@ class MemoryRepository:
         self._embedding_service = service
         self._embedding_failed = False
 
-    async def _try_embed(self, text: str) -> Optional[List[float]]:
+    async def _try_embed(self, text: str) -> Optional[list[float]]:
         if not self._embedding_service or self._embedding_failed:
             return None
         try:
@@ -580,7 +585,7 @@ class MemoryRepository:
         scope: Optional[str] = None,
         type: Optional[str] = None,
         limit: int = 50,
-    ) -> List[MemoryItem]:
+    ) -> list[MemoryItem]:
         return self._db.list(user_id=user_id, scope=scope, type=type, limit=limit)
 
     def get_memory(self, item_id: str) -> Optional[MemoryItem]:
@@ -610,9 +615,9 @@ class MemoryRepository:
 
     def list_episodes(
         self, user_id: Optional[str] = None, limit: int = 20
-    ) -> List[EpisodeRecord]:
+    ) -> list[EpisodeRecord]:
         files = sorted(self.episodes_dir.glob("*.json"), reverse=True)
-        out: List[EpisodeRecord] = []
+        out: list[EpisodeRecord] = []
         for path in files:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -649,9 +654,9 @@ class MemoryRepository:
         project_id: str = "",
         type: Optional[str] = None,
         limit: int = 5,
-    ) -> List[MemoryItem]:
+    ) -> list[MemoryItem]:
         """混合召回:M2-06 作用域过滤 + 全文/向量。"""
-        seen: Dict[str, MemoryItem] = {}
+        seen: dict[str, MemoryItem] = {}
 
         # FTS
         try:
@@ -698,7 +703,7 @@ class MemoryRepository:
         project_id: str = "",
         type: Optional[str] = None,
         limit: int = 5,
-    ) -> List[str]:
+    ) -> list[str]:
         items = await self.recall(
             query=query,
             user_id=user_id,
@@ -706,7 +711,7 @@ class MemoryRepository:
             type=type,
             limit=limit,
         )
-        out: List[str] = []
+        out: list[str] = []
         for it in items:
             label = {
                 MemoryType.PREFERENCE.value: "[偏好]",
@@ -724,7 +729,7 @@ class MemoryRepository:
     def cleanup(self) -> int:
         return self._db.cleanup_expired()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         return self._db.get_stats()
 
 

@@ -1,9 +1,8 @@
 """技能 DAG 执行器 - 把 Skill.steps 转成 ToolTask,交给 Learning 执行"""
-from typing import Dict, List, Optional, Tuple
 
 from agents.learning import ToolTask
 from infra.logger import get_logger
-from skills.models import Skill, SkillStep
+from skills.models import Skill
 from tools.base import ToolResult
 
 
@@ -14,7 +13,7 @@ class DAGExecutor:
         self.learning = learning
         self.logger = get_logger()
 
-    def skill_to_tasks(self, skill: Skill) -> Tuple[List[ToolTask], List[str]]:
+    def skill_to_tasks(self, skill: Skill) -> tuple[list[ToolTask], list[str]]:
         """把 skill.steps 转成 ToolTask 列表。
 
         Returns:
@@ -22,8 +21,8 @@ class DAGExecutor:
             - tasks: 可执行的 ToolTask 列表
             - issues: 转换过程中发现的问题(空 tool / 未知 tool 等)
         """
-        tasks: List[ToolTask] = []
-        issues: List[str] = []
+        tasks: list[ToolTask] = []
+        issues: list[str] = []
 
         tool_names = self.learning.registry.names()
 
@@ -48,7 +47,7 @@ class DAGExecutor:
         return tasks, issues
 
     async def run_skill(self, skill: Skill, user_input,
-                        on_event=None) -> Dict[str, ToolResult]:
+                        on_event=None) -> dict[str, ToolResult]:
         """执行一个技能(DAG)。
 
         user_input 可以是 str 或 dict:
@@ -57,7 +56,7 @@ class DAGExecutor:
         """
         tasks, issues = self.skill_to_tasks(skill)
         for i in issues:
-            self.logger.warning("flow_step", "DAGExecutor", i)
+            self.logger.warning("DAGExecutor", i)
         if not tasks:
             return {}
         if isinstance(user_input, str):

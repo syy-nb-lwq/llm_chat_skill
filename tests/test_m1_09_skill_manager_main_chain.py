@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import shutil
 import sys
 import tempfile
@@ -26,8 +25,8 @@ def isolated_skills(monkeypatch):
         for f in repo_user.glob("*.yaml"):
             shutil.copy(f, tmp / f.name)
     # 重建 SkillStore + SkillManagerAgent 单例
-    from skills import manager as sm
     from agents import skill_manager_agent as sma
+    from skills import manager as sm
     sm.reset_skill_store()
     sma._singleton = None
     fresh = sm.SkillStore(path=str(tmp))
@@ -42,7 +41,7 @@ def _agent_for(monkeypatch):
     """构造一个使用隔离 store 的 Agent。"""
     from skills import manager as sm
     sm.reset_skill_store()
-    store = sm.SkillStore(path=str(isolated_skills.__wrapped__ if False else None))
+    sm.SkillStore(path=str(isolated_skills.__wrapped__ if False else None))
 
 
 @pytest.mark.asyncio
@@ -121,7 +120,7 @@ async def test_rollback_via_main_chain(isolated_skills):
         captured.append((event, payload))
 
     agent = Agent(session_id="test", user_id="alice")
-    ans = await agent.handle(f"回滚 demo 到 {target}", on_event=on_event)
+    await agent.handle(f"回滚 demo 到 {target}", on_event=on_event)
 
     payload = next(p for e, p in captured if e == "skill_manager_result")
     assert payload["action"] == "rollback"

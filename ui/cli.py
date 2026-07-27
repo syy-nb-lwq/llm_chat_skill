@@ -11,11 +11,11 @@ from core.agent import Agent
 
 def _cmd_diagnose() -> int:
     """打印配置/工具/embedding 诊断信息,返回退出码。"""
-    from infra.config import config, ConfigError
+    from infra.config import ConfigError, config
     # Windows 默认 stdout 可能是 GBK,无法打印部分 Unicode 符号;
     # 这里用 ASCII 标记,保证跨编码可读。
-    OK = "[OK]"
-    NO = "[--]"
+    OK = "[OK]"  # noqa: N806 - ASCII 显示标记,需大写
+    NO = "[--]"  # noqa: N806 - ASCII 显示标记,需大写
 
     print("=" * 60)
     print("Skill Agent 诊断")
@@ -29,9 +29,9 @@ def _cmd_diagnose() -> int:
     print(f"  openai_api_key   : {'(set)' if config.openai_api_key else '(MISSING)'}")
     if config.anthropic_api_key:
         print(f"  anthropic_model  : {config.anthropic_model}")
-        print(f"  anthropic_api_key: (set)")
+        print("  anthropic_api_key: (set)")
     if config.multi_provider_enabled:
-        print(f"  multi_provider   : enabled")
+        print("  multi_provider   : enabled")
 
     # ---- 2. Feature flags ----
     print("\n[Feature flags]")

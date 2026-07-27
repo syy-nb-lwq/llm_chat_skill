@@ -1,5 +1,6 @@
 """Learning DAG 执行测试"""
 import asyncio
+
 import pytest
 
 from agents.learning import LearningAgent, ToolTask, resolve_params
@@ -32,7 +33,6 @@ def test_resolve_missing_yields_empty():
 
 def test_execute_tasks_sync_serial():
     """旧 API 兼容 - 现在走 execute_dag(单元素)"""
-    import asyncio
     la = LearningAgent()
 
     async def _run():
@@ -65,7 +65,7 @@ async def test_execute_dag_simple(monkeypatch):
     la = LearningAgent()
 
     # 用 monkeypatch 替换 tools 中的 weather_query 为 stub
-    from tools.base import Tool, ToolResult, ToolSchema, ToolParam
+    from tools.base import Tool, ToolParam, ToolResult, ToolSchema
 
     class StubTool(Tool):
         name = "stub_1"
@@ -88,7 +88,7 @@ async def test_execute_dag_simple(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_dag_with_dependency(monkeypatch):
     la = LearningAgent()
-    from tools.base import Tool, ToolResult, ToolSchema, ToolParam
+    from tools.base import Tool, ToolParam, ToolResult, ToolSchema
 
     class StubA(Tool):
         name = "stub_a"

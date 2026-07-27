@@ -7,13 +7,13 @@
 """
 from __future__ import annotations
 
+import builtins
 import json
-import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from infra.logger import get_logger
 
@@ -34,7 +34,7 @@ class FeedbackEvent:
         if not self.id:
             self.id = f"fb-{uuid.uuid4().hex[:10]}"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -49,7 +49,7 @@ class FeedbackStore:
         self.index_path = self.base / "_index.json"
         self.logger = get_logger()
 
-    def _index(self) -> Dict[str, Any]:
+    def _index(self) -> dict[str, Any]:
         if not self.index_path.exists():
             return {"feedback": {}}
         try:
@@ -57,7 +57,7 @@ class FeedbackStore:
         except Exception:
             return {"feedback": {}}
 
-    def _save_index(self, idx: Dict[str, Any]) -> None:
+    def _save_index(self, idx: dict[str, Any]) -> None:
         self.index_path.write_text(
             json.dumps(idx, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -79,9 +79,9 @@ class FeedbackStore:
         user_id: str = "default",
         execution_id: Optional[str] = None,
         limit: int = 20,
-    ) -> List[Dict[str, Any]]:
+    ) -> builtins.list[dict[str, Any]]:
         files = sorted(self.base.glob("*.json"), reverse=True)
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for path in files:
             if path.name == "_index.json":
                 continue
@@ -98,10 +98,10 @@ class FeedbackStore:
                 break
         return out
 
-    def get_for_execution(self, execution_id: str) -> List[Dict[str, Any]]:
+    def get_for_execution(self, execution_id: str) -> builtins.list[dict[str, Any]]:
         idx = self._index()
         ids = idx.get("feedback", {}).get(execution_id, []) or []
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for fid in ids:
             path = self.base / f"{execution_id}__{fid}.json"
             if not path.exists():

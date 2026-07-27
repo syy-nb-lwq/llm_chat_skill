@@ -1,9 +1,10 @@
 """LLM 客户端封装 - 支持多 Provider"""
 import asyncio
-from typing import List, Dict, Optional, AsyncIterator, Union
+from collections.abc import AsyncIterator
+from typing import Optional, Union
 
 from infra.config import config
-from infra.providers import get_provider_manager, BaseProvider
+from infra.providers import BaseProvider, get_provider_manager
 
 
 class LLMClient:
@@ -11,7 +12,7 @@ class LLMClient:
 
     def __init__(self, provider_name: Optional[str] = None):
         """初始化 LLMClient
-        
+
         Args:
             provider_name: 指定 Provider 名称,默认使用配置的默认 Provider
         """
@@ -29,7 +30,7 @@ class LLMClient:
 
     async def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         temperature: Optional[float] = None,
         stream: bool = False,
@@ -43,28 +44,28 @@ class LLMClient:
         # 切换 Provider
         if provider:
             self._provider = get_provider_manager().get(provider)
-        
+
         temp = temperature if temperature is not None else config.temperature
-        
+
         if stream:
             return self._stream(messages, temp, model)
         return await self._complete(messages, temp, model)
 
     async def _complete(
-        self, 
-        messages: List[Dict[str, str]], 
+        self,
+        messages: list[dict[str, str]],
         temperature: float,
         model: Optional[str] = None,
     ) -> str:
         return await self.provider.chat(
-            messages, 
-            model=model, 
+            messages,
+            model=model,
             temperature=temperature,
         )
 
     async def _stream(
-        self, 
-        messages: List[Dict[str, str]], 
+        self,
+        messages: list[dict[str, str]],
         temperature: float,
         model: Optional[str] = None,
     ) -> AsyncIterator[str]:
@@ -77,7 +78,7 @@ class LLMClient:
 
     async def chat_with_retry(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         max_retries: int = 3,
         temperature: Optional[float] = None,
@@ -89,8 +90,8 @@ class LLMClient:
         for attempt in range(1, max_retries + 1):
             try:
                 return await self.chat(
-                    messages, 
-                    temperature=temperature, 
+                    messages,
+                    temperature=temperature,
                     model=model,
                     provider=provider,
                 )
@@ -103,7 +104,7 @@ class LLMClient:
 
     async def stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         temperature: Optional[float] = None,
         model: Optional[str] = None,
@@ -112,7 +113,7 @@ class LLMClient:
         async for token in self._stream(messages, temperature or config.temperature, model):
             yield token
 
-    def count_tokens(self, messages: List[Dict[str, str]]) -> int:
+    def count_tokens(self, messages: list[dict[str, str]]) -> int:
         """估算 token 数(优先 tiktoken,失败回退到字符估算)"""
         try:
             import tiktoken

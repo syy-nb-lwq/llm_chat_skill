@@ -1,6 +1,6 @@
 """Skill storage facade backed by loader + registry."""
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 import yaml
 
@@ -53,10 +53,10 @@ class SkillStore:
     def get_by_name(self, name: str) -> Optional[Skill]:
         return self._registry.get(name)
 
-    def list_all(self) -> List[Skill]:
+    def list_all(self) -> list[Skill]:
         return self._registry.all()
 
-    def list_tool_names(self) -> List[str]:
+    def list_tool_names(self) -> list[str]:
         """当前 ToolHub 中可用的工具名(给 Skill 校验流水线用)。"""
         try:
             from tools.hub import get_tool_hub
@@ -69,19 +69,19 @@ class SkillStore:
         skill = self._registry._by_id.get(skill_id)
         if not skill:
             return False
-        removed = self.delete_by_name(skill.name)
+        removed = self.delete_version(skill.name, skill.version)
         return bool(removed)
 
     def remove(self, skill_name: str) -> bool:
         return bool(self.delete_by_name(skill_name))
 
-    def delete_by_name(self, skill_name: str) -> List[str]:
+    def delete_by_name(self, skill_name: str) -> list[str]:
         removed = self._delete_files(skill_name=skill_name)
         if removed:
             self.reload()
         return removed
 
-    def delete_version(self, skill_name: str, version: str) -> List[str]:
+    def delete_version(self, skill_name: str, version: str) -> list[str]:
         removed = self._delete_files(skill_name=skill_name, version=version)
         if removed:
             self.reload()
@@ -90,11 +90,11 @@ class SkillStore:
     def update_skill(
         self,
         skill_name: str,
-        updates: Dict[str, object],
+        updates: dict[str, object],
         *,
         version: Optional[str] = None,
-    ) -> List[str]:
-        updated_files: List[str] = []
+    ) -> list[str]:
+        updated_files: list[str] = []
         for path in self._candidate_files(skill_name, version):
             if path.suffix.lower() != ".yaml":
                 continue
@@ -112,13 +112,13 @@ class SkillStore:
             self.reload()
         return updated_files
 
-    def match(self, user_input: str, top_k: int = 3) -> List[Skill]:
+    def match(self, user_input: str, top_k: int = 3) -> list[Skill]:
         return self._registry.match(user_input, top_k)
 
-    def validate(self, tool_names: List[str]) -> List[str]:
+    def validate(self, tool_names: list[str]) -> list[str]:
         return self._registry.validate(tool_names)
 
-    def _candidate_files(self, skill_name: str, version: Optional[str] = None) -> List[Path]:
+    def _candidate_files(self, skill_name: str, version: Optional[str] = None) -> list[Path]:
         patterns = []
         if version:
             patterns.extend(
@@ -132,7 +132,7 @@ class SkillStore:
         else:
             patterns.extend([f"{skill_name}*.yaml", f"{skill_name}*.md"])
 
-        candidates: List[Path] = []
+        candidates: list[Path] = []
         roots = [self.base_path, self.base_path / "builtin", self.base_path / "user"]
         root_parent = self.base_path.parent
         roots.append(root_parent / "backend" / "skills")
@@ -149,8 +149,8 @@ class SkillStore:
                         candidates.append(path)
         return candidates
 
-    def _delete_files(self, skill_name: str, version: Optional[str] = None) -> List[str]:
-        removed: List[str] = []
+    def _delete_files(self, skill_name: str, version: Optional[str] = None) -> list[str]:
+        removed: list[str] = []
         for path in self._candidate_files(skill_name, version):
             try:
                 path.unlink()

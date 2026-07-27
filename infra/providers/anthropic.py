@@ -1,5 +1,7 @@
 """Anthropic Provider (Claude)"""
-from typing import List, Dict, Optional, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Optional
+
 import anthropic
 
 from infra.providers.base import BaseProvider, ChatDelta
@@ -20,7 +22,7 @@ class AnthropicProvider(BaseProvider):
         self.default_model = default_model
         self.max_tokens = max_tokens
 
-    def _convert_messages(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def _convert_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
         """OpenAI 格式转 Anthropic 格式"""
         converted = []
         for msg in messages:
@@ -36,7 +38,7 @@ class AnthropicProvider(BaseProvider):
 
     async def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,
@@ -67,7 +69,7 @@ class AnthropicProvider(BaseProvider):
 
     async def chat_stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         *,
         model: Optional[str] = None,
         temperature: float = 0.7,

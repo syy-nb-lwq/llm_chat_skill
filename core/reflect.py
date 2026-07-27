@@ -1,12 +1,12 @@
 """SelfReflectLoop - 主动反思循环:在低负载时主动复盘近期经验,生成洞察"""
 import asyncio
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from infra.config import get_self_evolution_enabled
-from infra.logger import get_logger
+from infra.logger import get_logger, log_task_exception
 
 
 @dataclass
@@ -17,9 +17,9 @@ class ReflectionReport:
     trigger_reason: str  # "high_failure_count" / "same_scenario_3x" / "user_request"
     failure_count: int
     success_count: int
-    high_freq_failures: List[Dict]  # 高频失败场景
-    skill_suggestions: List[Dict]   # 可优化技能建议
-    strengthened_skills: List[str]   # 强化技能(成功率高的)
+    high_freq_failures: list[dict]  # 高频失败场景
+    skill_suggestions: list[dict]   # 可优化技能建议
+    strengthened_skills: list[str]   # 强化技能(成功率高的)
     memory_summary: str             # 记忆摘要
     pending_patches_count: int
 
@@ -78,6 +78,7 @@ class SelfReflectLoop:
 
         self._running = True
         self._task = asyncio.create_task(self._loop())
+        self._task.add_done_callback(log_task_exception)  # P1-04
         self.logger.info("SelfReflectLoop", f"启动反思循环,检查间隔: {self.config.check_interval_s}s")
 
     async def stop(self):
@@ -136,14 +137,14 @@ class SelfReflectLoop:
         report = await self._generate_report(recent_failures, store, trigger_reason)
         return report
 
-    def _check_triggers(self, failures: List) -> Optional[str]:
+    def _check_triggers(self, failures: list) -> Optional[str]:
         """检查触发条件"""
         # 条件1: 24h 内失败超过阈值
         if len(failures) >= self.config.failure_threshold:
             return "high_failure_count"
 
         # 条件2: 同一场景失败超过阈值
-        scenario_counts: Dict[str, int] = {}
+        scenario_counts: dict[str, int] = {}
         for f in failures:
             scenario = getattr(f, 'scenario', '') or ''
             if scenario:
@@ -157,7 +158,7 @@ class SelfReflectLoop:
 
     async def _generate_report(
         self,
-        failures: List,
+        failures: list,
         store,
         trigger_reason: str,
     ) -> ReflectionReport:
@@ -189,10 +190,10 @@ class SelfReflectLoop:
 
         return report
 
-    def _analyze_failures(self, failures: List) -> List[Dict]:
+    def _analyze_failures(self, failures: list) -> list[dict]:
         """分析失败记录,提取高频场景"""
         # 按场景分组统计
-        by_scenario: Dict[str, List] = {}
+        by_scenario: dict[str, list] = {}
         for f in failures:
             scenario = getattr(f, 'scenario', '') or 'unknown'
             if scenario not in by_scenario:
@@ -218,7 +219,7 @@ class SelfReflectLoop:
         high_freq.sort(key=lambda x: -x["count"])
         return high_freq[:5]  # 最多 5 个高频场景
 
-    def _find_common_pattern(self, strings: List[str]) -> str:
+    def _find_common_pattern(self, strings: list[str]) -> str:
         """找出一组字符串的共同模式"""
         if not strings:
             return ""
@@ -237,10 +238,10 @@ class SelfReflectLoop:
 
     async def _generate_insights(
         self,
-        high_freq: List[Dict],
-        failures: List,
+        high_freq: list[dict],
+        failures: list,
         store: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """生成洞察和建议"""
         insights = {
             "skill_suggestions": [],
@@ -259,7 +260,7 @@ class SelfReflectLoop:
         # 找出成功率高的技能:从成功记录按 matched_skill 聚合,取 top 3
         if store is not None:
             try:
-                skill_counts: Dict[str, int] = {}
+                skill_counts: dict[str, int] = {}
                 success_path = store.successes_dir / "success_index.jsonl"
                 if success_path.exists():
                     for line in success_path.read_text(encoding="utf-8").splitlines():
@@ -279,8 +280,8 @@ class SelfReflectLoop:
 
     def _save_report(self, report: ReflectionReport):
         """保存反思报告"""
-        from pathlib import Path
         import json
+        from pathlib import Path
 
         base = Path(__file__).parent.parent / "memory" / "reflections"
         base.mkdir(parents=True, exist_ok=True)

@@ -1,24 +1,21 @@
 """Agent 核心 - 多智能体协作"""
 import asyncio
 import time
-import uuid
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any, Optional
 
-from agents.manager import ManagerAgent, IntentType
-from agents.orchestrator import OrchestratorAgent
 from agents.learning import LearningAgent, ToolTask
+from agents.manager import IntentType, ManagerAgent
+from agents.orchestrator import OrchestratorAgent
 from agents.skill_manager_agent import get_skill_manager_agent
 from agents.skill_trainer import SkillTrainer
 from core.context import Context
 from core.critic import ExecutionCritic, build_execution_context
 from core.dag import DAGExecutor
-from core.identity import IdentityContext, new_id
+from core.identity import IdentityContext
 from core.memory import get_memory_store
 from core.memory_repository import (
     EpisodeRecord,
-    MemoryItem,
-    MemoryScope,
-    MemoryType,
     get_memory_repository,
 )
 from infra.config import config
@@ -80,7 +77,7 @@ class Agent:
         old = msgs[:max(0, len(msgs) - self._window_size)]
         if not old:
             return
-        text_blocks: List[str] = []
+        text_blocks: list[str] = []
         for m in old:
             content = (m.content or "").strip()
             if not content:
@@ -119,6 +116,23 @@ class Agent:
         # M0-01:每次 handle 创建新的 execution_id(非 session 级常量)
         identity_ctx = identity or self._new_execution()
 
+        # P1-05:绑定 execution_id 到日志上下文,使本次 handle 范围内的日志都可按 execution_id 过滤
+        from infra.logger import bind_log_context, reset_log_context
+        _log_token = bind_log_context(execution_id=identity_ctx.execution_id)
+        try:
+            return await self._handle_inner(
+                user_input, on_event, identity_ctx, start
+            )
+        finally:
+            reset_log_context(_log_token)
+
+    async def _handle_inner(
+        self,
+        user_input: str,
+        on_event: Optional[Callable],
+        identity_ctx: IdentityContext,
+        start: float,
+    ) -> str:
         # M2-07:把 session 摘要注入 system prompt(经 context.to_llm_messages 之前)
         if self._session_summary:
             self.context.metadata["session_summary"] = self._session_summary
@@ -145,8 +159,8 @@ class Agent:
             if not asyncio.iscoroutinefunction(on_event):
                 try:
                     on_event(event, payload)
-                except Exception:
-                    pass
+                except Exception as e:  # P1-06: 不裸吞,记录便于排查
+                    self.logger.debug("Agent", f"emit(sync) {event} callback failed: {e}")
                 return
             try:
                 # 把"调用 on_event 并返回结果"包装成 future
@@ -168,8 +182,8 @@ class Agent:
 
                 # 保存 _deferred 协程本身,drain 时用 ensure_future 启动并 await
                 pending_async.append(_deferred())
-            except Exception:
-                pass
+            except Exception as e:  # P1-06: 不裸吞
+                self.logger.debug("Agent", f"emit(async) {event} enqueue failed: {e}")
 
         async def _drain_pending():
             """按 emit 顺序串行 await 所有 pending 任务。"""
@@ -179,8 +193,8 @@ class Agent:
                 for coro in batch:
                     try:
                         await asyncio.ensure_future(coro)
-                    except Exception:
-                        pass
+                    except Exception as e:  # P1-06: 不裸吞
+                        self.logger.debug("Agent", f"emit task failed: {e}")
 
         try:
             # ===== 意图规划(统一入口) =====
@@ -323,8 +337,8 @@ class Agent:
             entities = self._extract_entities(user_input)
 
             # 执行工具
-            tool_results: Dict = {}
-            task_specs: Dict[str, Dict[str, Any]] = {}
+            tool_results: dict = {}
+            task_specs: dict[str, dict[str, Any]] = {}
             if plan.tool_tasks:
                 emit("thinking", {"stage": "tools_running", "count": len(plan.tool_tasks)})
 
@@ -334,6 +348,7 @@ class Agent:
                 # 如果启用了 Skill DAG 且 plan 关联到了带结构化 steps 的 skill,
                 # 优先用 DAGExecutor 把 skill.steps 翻成 ToolTask(忽略 Manager 输出的 task 列表)。
                 used_dag = False
+                tasks: list[ToolTask] = []
                 if self.dag_enabled and plan.selected_skill and plan.selected_skill.has_structured_steps():
                     skill_tasks, issues = self.dag.skill_to_tasks(plan.selected_skill)
                     for i in issues:
@@ -456,8 +471,8 @@ class Agent:
                     diagnosis=f"exception: {e}",
                     success_rate=0.0,
                 )
-            except Exception:
-                pass
+            except Exception as ep:  # P1-06: 不裸吞
+                self.logger.debug("Agent", f"episode 记录失败(异常路径): {ep}")
             raise
         finally:
             # 统一 await 所有异步 emit,保证事件按 emit 顺序完成
@@ -472,7 +487,7 @@ class Agent:
         self._session_summary = ""
         self.logger.info("Agent", "RESET")
 
-    def chat(self, user_input: str) -> str:
+    def chat(self, user_input: str) -> Optional[str]:
         """同步包装:旧 API 兼容。
 
         返回 ``Agent.handle`` 的字符串结果。如果已在事件循环内,
@@ -493,8 +508,8 @@ class Agent:
 
     @staticmethod
     def _summarize_results(
-        tool_results: Dict[str, Any],
-        task_specs: Dict[str, Dict[str, Any]],
+        tool_results: dict[str, Any],
+        task_specs: dict[str, dict[str, Any]],
     ):
         if not tool_results:
             return 1.0, 0, 0
@@ -518,8 +533,8 @@ class Agent:
         intent: str,
         selected_skill: Optional[Any],
         skill_version: Optional[str],
-        tool_results: Dict[str, Any],
-        task_specs: Dict[str, Dict[str, Any]],
+        tool_results: dict[str, Any],
+        task_specs: dict[str, dict[str, Any]],
         duration: float,
         diagnosis: str,
         success_rate: float,
@@ -572,18 +587,18 @@ class Agent:
         "拉萨", "香港", "澳门", "台北",
     }
 
-    def _get_last_tool_tasks(self) -> Optional[List[Dict]]:
+    def _get_last_tool_tasks(self) -> Optional[list[dict]]:
         """获取上一次的 tool_tasks"""
         return self.context.get_last_tool_tasks()
 
-    def _extract_entities(self, text: str) -> Dict[str, Any]:
+    def _extract_entities(self, text: str) -> dict[str, Any]:
         """轻量实体提取。
 
         当前支持:
         - city:  已知中国城市名(直接字典匹配)
         - date:  today / tomorrow / YYYY-MM-DD
         """
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         for c in self._KNOWN_CITIES:
             if c in text:
                 out["city"] = c

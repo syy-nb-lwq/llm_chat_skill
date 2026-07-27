@@ -2,13 +2,13 @@
 import json
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from infra.llm import get_llm_client
 from infra.logger import get_logger
 
 
-def _try_validate_schema(obj: Any, schema: Dict) -> Optional[str]:
+def _try_validate_schema(obj: Any, schema: dict) -> Optional[str]:
     """用 jsonschema 严格校验对象,返回错误信息;通过则返回 None。
 
     优先 jsonschema(精确),失败回退到简化检查(类型 + required + enum + 嵌套 dict.key)。
@@ -124,19 +124,19 @@ class BaseAgent(ABC):
         self,
         user_prompt: str,
         *,
-        output_schema: Optional[Dict] = None,
+        output_schema: Optional[dict] = None,
         temperature: Optional[float] = None,
         retries: int = 3,
     ) -> Any:
         """单轮 LLM 调用"""
         # 组装 messages
         messages = []
-        
+
         # 添加 Soul prompt (如果启用)
         soul_prompt = self.get_soul_prompt()
         if soul_prompt:
             messages.append({"role": "system", "content": soul_prompt})
-        
+
         # 添加 Agent 自己的 system prompt
         system = self.system_prompt()
         if system:
@@ -145,7 +145,7 @@ class BaseAgent(ABC):
                 messages[0]["content"] = messages[0]["content"] + "\n\n" + system
             else:
                 messages.append({"role": "system", "content": system})
-        
+
         messages.append({"role": "user", "content": user_prompt})
         last_err = None
         for attempt in range(1, retries + 1):
@@ -169,14 +169,14 @@ class BaseAgent(ABC):
             self.logger.warning(self.name, f"{last_err},重试 ({attempt}/{retries})")
         raise ValueError(f"{self.name}: 重试 {retries} 次仍无法产出符合 schema 的输出: {last_err}")
 
-    async def think_json(self, user_prompt: str, schema: Dict) -> Dict:
+    async def think_json(self, user_prompt: str, schema: dict) -> dict:
         return await self.think(user_prompt, output_schema=schema)
 
 
 _JSON_RE = re.compile(r"\{[\s\S]*\}")
 
 
-def _try_parse_json(raw: str, schema: Optional[Dict]) -> Optional[Dict]:
+def _try_parse_json(raw: str, schema: Optional[dict]) -> Optional[dict]:
     """尝试提取 JSON 并(可选)按 schema 校验"""
     if not raw:
         return None

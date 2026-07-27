@@ -1,7 +1,5 @@
 """Skill 加载器 - 从 YAML/MD 文件加载技能"""
-import re
 from pathlib import Path
-from typing import List
 
 import yaml
 
@@ -16,12 +14,12 @@ class SkillLoader:
     可通过 source_map 把特定子目录(如 backend/skills/)纳入。
     """
 
-    def __init__(self, base_path: Path, extra_dirs: List[Path] = None):
+    def __init__(self, base_path: Path, extra_dirs: list[Path] = None):
         self.base_path = Path(base_path)
         self.extra_dirs = [Path(p) for p in (extra_dirs or []) if p]
         self.logger = get_logger()
 
-    def load_all(self) -> List[Skill]:
+    def load_all(self) -> list[Skill]:
         skills = []
         seen_paths = set()
 
@@ -81,6 +79,14 @@ class SkillLoader:
         lines = text.strip().split("\n")
         name = lines[0].strip("# ").strip()
         method = "\n".join(lines[1:]).strip()
+        # 根据路径推断 source,与 front-matter 分支保持一致
+        parts_path = path.parts
+        if "user" in parts_path:
+            inferred_source = "taught"
+        elif "backend" in parts_path:
+            inferred_source = "imported"
+        else:
+            inferred_source = "imported"
         return Skill(
             name=name,
             version="1.0.0",
@@ -90,7 +96,7 @@ class SkillLoader:
             tags=[],
             steps=[],
             examples=[],
-            source="imported",
+            source=inferred_source,
         )
 
     def _parse_skill(self, data: dict) -> Skill:

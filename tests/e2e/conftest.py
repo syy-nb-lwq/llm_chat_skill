@@ -8,10 +8,9 @@
 """
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import pytest
 
@@ -47,9 +46,9 @@ class ScriptedLLMProvider:
     supports_streaming = True
 
     def __init__(self) -> None:
-        self.calls: List[List[Dict[str, str]]] = []
-        self._queue: List[str] = []
-        self._default_json: Dict[str, Any] = {
+        self.calls: list[list[dict[str, str]]] = []
+        self._queue: list[str] = []
+        self._default_json: dict[str, Any] = {
             "intent": "skill",
             "selected_skill": "DailyReport",
             "is_retry": False,
@@ -64,11 +63,11 @@ class ScriptedLLMProvider:
         else:
             self._queue.append(json.dumps(payload, ensure_ascii=False))
 
-    def queue_many(self, payloads: List[Any]) -> None:
+    def queue_many(self, payloads: list[Any]) -> None:
         for p in payloads:
             self.queue(p)
 
-    def _next(self, messages: List[Dict[str, str]]) -> str:
+    def _next(self, messages: list[dict[str, str]]) -> str:
         # 记录每次调用
         self.calls.append(messages)
         if self._queue:
@@ -119,12 +118,12 @@ def isolated_runtime(tmp_path, monkeypatch):
     memory_path.mkdir(parents=True, exist_ok=True)
 
     # 1) 重置所有可能受影响的全局单例
+    from agents import teaching_session as ts_mod
     from infra import llm as llm_mod
     from infra import logger as logger_mod
     from skills import manager as skill_mod
-    from agents import teaching_session as ts_mod
-    from tools.hub import reset_tool_hub
     from tools.base import reset_tool_registry
+    from tools.hub import reset_tool_hub
 
     llm_mod.reset_llm_client()
     logger_mod.get_logger().__init__()
@@ -154,9 +153,9 @@ def fake_llm(monkeypatch):
 
     返回 ScriptedLLMProvider 实例,允许测试在执行前 queue 脚本响应。
     """
-    from infra.providers.manager import get_provider_manager, reset_provider_manager
     from infra import llm as llm_mod
     from infra.config import config as cfg_singleton
+    from infra.providers.manager import get_provider_manager, reset_provider_manager
 
     # 确保 ProviderManager 重置干净
     reset_provider_manager()

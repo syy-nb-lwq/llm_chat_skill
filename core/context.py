@@ -1,7 +1,7 @@
 """上下文管理"""
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -9,8 +9,8 @@ class Message:
     """消息"""
     role: str  # user / assistant / system / tool
     content: str
-    tool_call: Optional[Dict] = None
-    tool_tasks: Optional[List[Dict]] = None  # 存储本次执行的 tool_tasks
+    tool_call: Optional[dict] = None
+    tool_tasks: Optional[list[dict]] = None  # 存储本次执行的 tool_tasks
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -18,17 +18,17 @@ class Message:
 class Context:
     """对话上下文(多轮对话记忆)"""
 
-    messages: List[Message] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    messages: list[Message] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # ----- 写入 -----
-    def add_message(self, role: str, content: str, tool_call: Optional[Dict] = None):
+    def add_message(self, role: str, content: str, tool_call: Optional[dict] = None):
         self.messages.append(Message(role=role, content=content, tool_call=tool_call))
 
     def add_user_message(self, content: str):
         self.add_message("user", content)
 
-    def add_assistant_message(self, content: str, tool_call: Optional[Dict] = None):
+    def add_assistant_message(self, content: str, tool_call: Optional[dict] = None):
         self.add_message("assistant", content, tool_call)
 
     def add_system_message(self, content: str):
@@ -38,12 +38,12 @@ class Context:
         self.add_message("tool", content)
 
     # ----- tool_tasks 存储 -----
-    def set_last_tool_tasks(self, tasks: List[Dict]):
+    def set_last_tool_tasks(self, tasks: list[dict]):
         """存储上一次的 tool_tasks"""
         if self.messages:
             self.messages[-1].tool_tasks = tasks
 
-    def get_last_tool_tasks(self) -> Optional[List[Dict]]:
+    def get_last_tool_tasks(self) -> Optional[list[dict]]:
         """获取上一次的 tool_tasks"""
         for msg in reversed(self.messages):
             if msg.tool_tasks:
@@ -57,11 +57,11 @@ class Context:
                 return msg.content
         return None
 
-    def get_recent(self, n: int) -> List[Message]:
+    def get_recent(self, n: int) -> list[Message]:
         return self.messages[-n:]
 
     # ----- LLM 格式 -----
-    def to_llm_format(self) -> List[Dict]:
+    def to_llm_format(self) -> list[dict]:
         result = []
         for msg in self.messages:
             item = {"role": msg.role, "content": msg.content}
@@ -70,12 +70,12 @@ class Context:
             result.append(item)
         return result
 
-    def to_llm_messages(self, max_tokens: int = 4000) -> List[Dict]:
+    def to_llm_messages(self, max_tokens: int = 4000) -> list[dict]:
         """生成 LLM 输入,token 超限时压缩早期消息"""
         msgs = self.to_llm_format()
         return self._truncate(msgs, max_tokens)
 
-    def _truncate(self, msgs: List[Dict], max_tokens: int) -> List[Dict]:
+    def _truncate(self, msgs: list[dict], max_tokens: int) -> list[dict]:
         """简单按字符长度估算(避免引入 tiktoken 依赖在这里)
         策略:保留 system + 最近 N 条;总字符数不超过 max_tokens*2(经验值)。
         """

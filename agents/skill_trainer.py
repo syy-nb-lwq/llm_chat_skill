@@ -9,13 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-from core.agent_base import BaseAgent
-from skills.manager import get_skill_store, SkillStore
-from skills.models import Skill, SkillStep
-from skills.validator import validate_skill
+from typing import Optional
 
 from agents.teaching_session import (
     REQUIRED_FIELDS,
@@ -24,7 +18,10 @@ from agents.teaching_session import (
     TeachingStatus,
     get_teaching_store,
 )
-
+from core.agent_base import BaseAgent
+from skills.manager import SkillStore, get_skill_store
+from skills.models import Skill, SkillStep
+from skills.validator import validate_skill
 
 _TEACHING_KEYWORDS = [
     "以后", "记住", "下次", "按这个", "按我的", "原则", "方法论",
@@ -90,7 +87,7 @@ class SkillTrainer(BaseAgent):
     def _heuristic_teaching(self, text: str) -> bool:
         return any(kw in text for kw in _TEACHING_KEYWORDS)
 
-    async def detect(self, user_input: str) -> Tuple[bool, float, str]:
+    async def detect(self, user_input: str) -> tuple[bool, float, str]:
         if not self._heuristic_teaching(user_input):
             return False, 0.0, "启发式未命中"
 
@@ -216,7 +213,7 @@ class SkillTrainer(BaseAgent):
         self.teaching_store.save(ts)
         return True
 
-    def confirm_and_publish(self, user_id: str, session_id: str) -> Tuple[bool, str, Optional[Skill]]:
+    def confirm_and_publish(self, user_id: str, session_id: str) -> tuple[bool, str, Optional[Skill]]:
         """用户在草稿阶段确认 → 校验 → 写盘 → 注册。"""
         ts = self.teaching_store.find_active_for(user_id, session_id)
         if not ts or ts.status not in (TeachingStatus.DRAFT,):
@@ -360,7 +357,7 @@ class SkillTrainer(BaseAgent):
             author="user",
         )
 
-    def persist(self, skill: Skill) -> Tuple[bool, str]:
+    def persist(self, skill: Skill) -> tuple[bool, str]:
         try:
             base_path = self.skill_store.base_path
             target_dir = base_path / "user"
@@ -384,7 +381,7 @@ class SkillTrainer(BaseAgent):
             return False, str(e)
 
     async def teach(self, user_input: str, user_id: str = "default",
-                    session_id: str = "default") -> Tuple[bool, str, Optional[Skill]]:
+                    session_id: str = "default") -> tuple[bool, str, Optional[Skill]]:
         """兼容旧单轮 teach()。
 
         - 走 TeachingSession 状态机

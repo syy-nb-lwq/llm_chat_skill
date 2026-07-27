@@ -31,8 +31,8 @@ def test_manager_builtin_tools_fallback():
 
 def test_manager_dynamic_schema_uses_hub_tools():
     """ToolHub 注册了新工具后,schema enum 应包含该工具名。"""
-    from tools.hub import get_tool_hub, reset_tool_hub
     from tools.base import Tool, ToolResult, ToolSchema
+    from tools.hub import get_tool_hub, reset_tool_hub
     reset_tool_hub()
     hub = get_tool_hub()
 
@@ -55,8 +55,8 @@ def test_manager_dynamic_schema_uses_hub_tools():
 
 def test_manager_system_prompt_lists_dynamic_tools():
     """system_prompt 中应包含 ToolHub 中的工具名。"""
-    from tools.hub import get_tool_hub, reset_tool_hub
     from tools.base import Tool, ToolResult, ToolSchema
+    from tools.hub import get_tool_hub, reset_tool_hub
     reset_tool_hub()
     hub = get_tool_hub()
 

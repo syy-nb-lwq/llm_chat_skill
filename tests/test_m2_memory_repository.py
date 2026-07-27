@@ -6,9 +6,6 @@
 - 删除 + 计数
 - Episode 写入与检索
 """
-import json
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -34,8 +31,7 @@ def repo(tmp_path, monkeypatch):
 
 def test_repo_singleton_isolated(monkeypatch):
     """单例测试:get_memory_repository 第二次调用返回同对象。"""
-    from core.memory_repository import get_memory_repository, reset_memory_repository
-    import core.memory_repository as mr_mod
+    from core.memory_repository import reset_memory_repository
 
     reset_memory_repository()
     a = get_memory_repository()
@@ -150,3 +146,41 @@ def test_recall_mixed_scope(repo):
     contents = [it.content for it in out]
     assert any("alice private" in c for c in contents)
     assert any("global weather" in c for c in contents)
+
+
+def test_fts_no_duplicate_after_repeated_upsert(repo):
+    """P0-05: 同一 id 反复 upsert 不应让 FTS 命中重复膨胀。
+
+    旧实现 ``INSERT INTO memories_fts`` 无前置 DELETE,upsert N 次后
+    FTS 检索该 id 会得到 N 行,统计虚高且 JOIN 后行数异常。
+    """
+    import sqlite3
+
+    item_id = "mem-p0-05-test"
+    for i in range(5):
+        repo.add_memory_item(MemoryItem(
+            id=item_id,
+            user_id="alice",
+            scope=MemoryScope.USER.value,
+            type=MemoryType.FACT.value,
+            content="alice prefers concise report",
+        ))
+
+    # 直接查 FTS 表,该 id 只能有 1 行
+    conn = sqlite3.connect(str(repo._db.db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM memories_fts WHERE id = ?",
+            (item_id,),
+        )
+        count = cur.fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 1, f"FTS 命中 {count} 行(应为 1),upsert 导致重复膨胀"
+
+    # recall 也只能拿到 1 条
+    import asyncio
+    results = asyncio.run(repo.recall("concise", user_id="alice"))
+    matches = [it for it in results if it.id == item_id]
+    assert len(matches) == 1, f"recall 命中 {len(matches)} 条(应为 1)"

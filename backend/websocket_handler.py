@@ -1,10 +1,9 @@
 """WebSocket 通信模块 - 基于 fastapi-websocket-pubsub"""
 from typing import Any
 
-from fastapi_websocket_pubsub import PubSubEndpoint, ALL_TOPICS
+from fastapi_websocket_pubsub import ALL_TOPICS, PubSubEndpoint
 
 from infra.logger import get_logger
-
 
 # ===== PubSub 端点 =====
 endpoint = PubSubEndpoint()
@@ -50,6 +49,7 @@ async def dispatcher(subscription, data: Any):
         if topic.startswith("chat/"):
             client_id = topic[5:]
             from backend.session import sessions
+
             # C-01:从 data 提取 user_id,缺失则服务端签发
             from infra.auth import extract_ws_identity
             uid, _sid, _ = extract_ws_identity(data or {})

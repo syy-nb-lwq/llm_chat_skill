@@ -1,32 +1,33 @@
 """Embedding 服务封装 - 支持多种嵌入模型"""
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Optional
+
 import httpx
 
 
 class BaseEmbeddingService(ABC):
     """嵌入服务抽象基类"""
-    
+
     @property
     @abstractmethod
     def dimension(self) -> int:
         """向量维度"""
         ...
-    
+
     @abstractmethod
-    async def embed(self, text: str) -> List[float]:
+    async def embed(self, text: str) -> list[float]:
         """将单条文本转为向量"""
         ...
-    
+
     @abstractmethod
-    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """批量将文本转为向量"""
         ...
 
 
 class OpenAIEmbedding(BaseEmbeddingService):
     """OpenAI Embedding 服务"""
-    
+
     def __init__(
         self,
         api_key: str,
@@ -38,17 +39,17 @@ class OpenAIEmbedding(BaseEmbeddingService):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self._dimension = dimension
-    
+
     @property
     def dimension(self) -> int:
         return self._dimension
-    
-    async def embed(self, text: str) -> List[float]:
+
+    async def embed(self, text: str) -> list[float]:
         """获取单条文本的嵌入向量"""
         results = await self.embed_batch([text])
         return results[0]
-    
-    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """批量获取嵌入向量"""
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
@@ -64,20 +65,20 @@ class OpenAIEmbedding(BaseEmbeddingService):
             )
             resp.raise_for_status()
             data = resp.json()
-            
+
             # 按输入顺序返回
             embeddings = [item["embedding"] for item in data["data"]]
-            
+
             # 如果指定了维度,进行截断
             if self._dimension and self._dimension < len(embeddings[0]):
                 embeddings = [e[:self._dimension] for e in embeddings]
-            
+
             return embeddings
 
 
 class LocalEmbedding(BaseEmbeddingService):
     """本地嵌入服务 (如 Ollama with nomic-embed-text)"""
-    
+
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
@@ -87,16 +88,16 @@ class LocalEmbedding(BaseEmbeddingService):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self._dimension = dimension
-    
+
     @property
     def dimension(self) -> int:
         return self._dimension
-    
-    async def embed(self, text: str) -> List[float]:
+
+    async def embed(self, text: str) -> list[float]:
         results = await self.embed_batch([text])
         return results[0]
-    
-    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Ollama 嵌入 API"""
         async with httpx.AsyncClient(timeout=120) as client:
             embeddings = []
@@ -116,15 +117,15 @@ class LocalEmbedding(BaseEmbeddingService):
 
 class MockEmbedding(BaseEmbeddingService):
     """Mock 嵌入服务(用于测试)"""
-    
+
     def __init__(self, dimension: int = 1536):
         self._dimension = dimension
-    
+
     @property
     def dimension(self) -> int:
         return self._dimension
-    
-    async def embed(self, text: str) -> List[float]:
+
+    async def embed(self, text: str) -> list[float]:
         # 返回假的向量(全 0.1)
         import hashlib
         # 基于文本内容生成确定性向量
@@ -132,8 +133,8 @@ class MockEmbedding(BaseEmbeddingService):
         import random
         random.seed(hash_val)
         return [random.random() for _ in range(self._dimension)]
-    
-    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [await self.embed(text) for text in texts]
 
 
@@ -155,7 +156,7 @@ def init_embedding_service(
     dimension: int = 1536,
 ) -> BaseEmbeddingService:
     """初始化嵌入服务
-    
+
     Args:
         provider: "openai" | "local" | "mock"
         api_key: API Key (OpenAI)
@@ -164,7 +165,7 @@ def init_embedding_service(
         dimension: 向量维度
     """
     global _embedding_service
-    
+
     if provider == "openai":
         _embedding_service = OpenAIEmbedding(
             api_key=api_key,
@@ -182,7 +183,7 @@ def init_embedding_service(
         _embedding_service = MockEmbedding(dimension=dimension)
     else:
         raise ValueError(f"Unknown embedding provider: {provider}")
-    
+
     return _embedding_service
 
 

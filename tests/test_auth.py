@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def test_gen_ids_format():
-    from infra.auth import gen_user_id, gen_session_id, gen_client_id
+    from infra.auth import gen_client_id, gen_session_id, gen_user_id
 
     uid = gen_user_id()
     sid = gen_session_id()
@@ -28,6 +28,28 @@ def test_gen_ids_format():
     # 每次生成唯一
     assert gen_user_id() != uid
     assert gen_client_id() != cid
+
+
+def test_gen_session_id_unpredictable():
+    """P0-04: session_id 不能含可预测时间戳,且必须有足够熵。
+
+    旧实现 ``s-{int(time.time()*1000)}-{token_hex(4)}`` 只有 16 bit 熵 + 时间戳,
+    被攻击者推算后可冒充会话。新实现用 ``secrets.token_hex(16)``(128 bit 熵)。
+    """
+    import re
+
+    from infra.auth import gen_client_id, gen_session_id
+
+    sid = gen_session_id()
+    cid = gen_client_id()
+
+    # 形如 s-<32 hex chars>;不含数字时间戳前缀
+    assert re.fullmatch(r"s-[0-9a-f]{32}", sid), f"sid 格式异常: {sid}"
+    assert re.fullmatch(r"c-[0-9a-f]{32}", cid), f"cid 格式异常: {cid}"
+
+    # 连续两次生成的 id 必须不同(概率意义下唯一)
+    sids = {gen_session_id() for _ in range(50)}
+    assert len(sids) == 50, "session_id 重复,熵不足"
 
 
 def test_extract_ws_identity_from_data():
@@ -87,6 +109,7 @@ def test_require_owner_token_disabled_by_default(monkeypatch):
 def test_require_owner_token_missing_token(monkeypatch):
     """配置了 owner_token 但请求没带 → 401。"""
     from fastapi import HTTPException
+
     from infra import auth as auth_mod
     from infra.config import config
 
@@ -101,7 +124,7 @@ def test_require_owner_token_missing_token(monkeypatch):
 def test_require_owner_token_wrong_token(monkeypatch):
     """token 不匹配 → 403。"""
     from fastapi import HTTPException
-    infra = pytest.importorskip("infra")
+    pytest.importorskip("infra")
     from infra import auth as auth_mod
     from infra.config import config
 
@@ -135,7 +158,7 @@ def test_management_routes_have_owner_token_dep():
     for route in app.routes:
         path = getattr(route, "path", "")
         deps = getattr(route, "dependant", None)
-        call = getattr(route, "endpoint", None)
+        getattr(route, "endpoint", None)
         method = ""
         for m in getattr(route, "methods", set()) or set():
             method = m

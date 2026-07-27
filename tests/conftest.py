@@ -1,6 +1,5 @@
 """pytest 全局 fixture"""
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -40,16 +39,15 @@ def event_loop():
 @pytest.fixture(autouse=True)
 def reset_singletons():
     """每个测试前重置全局单例,避免污染"""
+    # 清理 backend/skills 残留文件
+
+    from agents import teaching_session as ts_mod
+    from core import memory_repository as mem_repo_mod
     from infra import llm as llm_mod
     from infra import logger as logger_mod
     from skills import manager as skill_mod
-    from tools.hub import reset_tool_hub
     from tools.base import reset_tool_registry
-    from agents import teaching_session as ts_mod
-    from core import memory_repository as mem_repo_mod
-
-    # 清理 backend/skills 残留文件
-    import shutil
+    from tools.hub import reset_tool_hub
     backend_skills = Path(__file__).parent.parent / "backend" / "skills"
     if backend_skills.exists():
         for f in backend_skills.glob("*.md"):

@@ -1,28 +1,21 @@
 """MemoryStore & ExecutionCritic 测试"""
-import asyncio
-import json
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from core.memory import (
-    FailureRecord,
-    MemoryStore,
-    SkillPatch,
-    SuccessRecord,
-    get_memory_store,
-)
 from core.critic import (
-    ExecutionCritic,
     ExecutionContext,
+    ExecutionCritic,
     TaskExecutionSummary,
     build_execution_context,
 )
+from core.memory import (
+    MemoryStore,
+    SkillPatch,
+)
 from infra.config import get_self_evolution_enabled
-
 
 # ---- 临时目录 fixture ----
 
@@ -358,10 +351,10 @@ async def test_memory_and_critic_integration(temp_mem_dir):
             )
 
             result = await critic.evaluate(context)
-            
+
             # 验证记录生成
             assert "failure_record" in result.records_generated
-            
+
             # 验证 MemoryStore 中有记录
             failures = store.get_recent_failures(top_k=10)
             assert any(f.trace_id == "e2e_001" for f in failures)

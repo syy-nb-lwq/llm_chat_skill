@@ -1,6 +1,6 @@
 """Provider 管理器 - 动态注册和切换 Provider"""
-from typing import Dict, Type, Optional, Any
 from dataclasses import dataclass
+from typing import Any, Optional
 
 from infra.providers.base import BaseProvider
 
@@ -8,23 +8,23 @@ from infra.providers.base import BaseProvider
 @dataclass
 class ProviderConfig:
     """Provider 配置"""
-    provider_class: Type[BaseProvider]
-    config: Dict[str, Any]  # 传递给 Provider 构造函数的参数
+    provider_class: type[BaseProvider]
+    config: dict[str, Any]  # 传递给 Provider 构造函数的参数
 
 
 class ProviderManager:
     """Provider 动态注册和管理"""
 
     def __init__(self):
-        self._providers: Dict[str, ProviderConfig] = {}
-        self._instances: Dict[str, BaseProvider] = {}
+        self._providers: dict[str, ProviderConfig] = {}
+        self._instances: dict[str, BaseProvider] = {}
         self._current_provider: Optional[str] = None
 
     def register(
         self,
         name: str,
-        provider_class: Type[BaseProvider],
-        config: Dict[str, Any],
+        provider_class: type[BaseProvider],
+        config: dict[str, Any],
         set_current: bool = False,
     ) -> None:
         """注册一个 Provider

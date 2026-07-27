@@ -1,5 +1,6 @@
 """Orchestrator Agent - 流转中枢:整合数据、生成回答"""
-from typing import Dict, List, Optional, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Optional
 
 from core.agent_base import BaseAgent
 from core.context import Context
@@ -25,7 +26,7 @@ class OrchestratorAgent(BaseAgent):
     async def orchestrate(
         self,
         user_input: str,
-        tool_results: Dict[str, ToolResult],
+        tool_results: dict[str, ToolResult],
         selected_skill: Optional[Skill] = None,
         context: Optional[Context] = None,
     ) -> str:
@@ -42,7 +43,7 @@ class OrchestratorAgent(BaseAgent):
     async def stream(
         self,
         user_input: str,
-        tool_results: Dict[str, ToolResult],
+        tool_results: dict[str, ToolResult],
         selected_skill: Optional[Skill] = None,
         context: Optional[Context] = None,
     ) -> AsyncIterator[str]:
@@ -63,7 +64,7 @@ class OrchestratorAgent(BaseAgent):
             yield token
 
     async def _generate_with_methodology(
-        self, user_input: str, tool_data: str, method: str, steps: List,
+        self, user_input: str, tool_data: str, method: str, steps: list,
         ctx_block: str = "",
     ) -> str:
         prompt = self._build_prompt(user_input, tool_data, method, steps, ctx_block=ctx_block)
@@ -143,7 +144,7 @@ class OrchestratorAgent(BaseAgent):
             lines.append(f"- {role}: {content}")
         return "\n".join(lines)
 
-    def _format_tool_results(self, tool_results: Dict[str, ToolResult]) -> str:
+    def _format_tool_results(self, tool_results: dict[str, ToolResult]) -> str:
         if not tool_results:
             return "(无数据)"
         lines = []

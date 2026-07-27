@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from skills.models import Skill
 
@@ -29,8 +29,8 @@ class ResultValidation:
     """整体结果验证"""
     passed: bool
     score: float  # 0.0 ~ 1.0
-    issues: List[str] = field(default_factory=list)
-    checks: List[CheckResult] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
+    checks: list[CheckResult] = field(default_factory=list)
 
 
 class ResultValidator:
@@ -42,8 +42,8 @@ class ResultValidator:
         final_output: str,
         user_input: str = "",
     ) -> ResultValidation:
-        checks: List[CheckResult] = []
-        issues: List[str] = []
+        checks: list[CheckResult] = []
+        issues: list[str] = []
 
         output = (final_output or "").strip()
         if not output:
@@ -126,7 +126,7 @@ class ResultValidator:
         return ResultValidation(passed=passed, score=score, issues=issues, checks=checks)
 
 
-def _extract_capability_keywords(text: str) -> List[str]:
+def _extract_capability_keywords(text: str) -> list[str]:
     """提取 capability 中显式声明的结构化约束。"""
     import re
 
@@ -140,7 +140,7 @@ def _extract_capability_keywords(text: str) -> List[str]:
 
 
 
-def _extract_keywords(text: str) -> List[str]:
+def _extract_keywords(text: str) -> list[str]:
     """从中文/英文文本中提取关键词(简单分词)。"""
     import re
     # 保留中文连续字符和英文单词
@@ -150,13 +150,13 @@ def _extract_keywords(text: str) -> List[str]:
     return [t for t in tokens if t not in stop]
 
 
-def _extract_step_keywords(method: str) -> List[str]:
+def _extract_step_keywords(method: str) -> list[str]:
     """从 method 文本中提取步骤关键词。
 
     支持形如 "1) 完成 2) 问题 3) 计划" 或 "- 完成\\n- 问题" 的结构。
     """
     import re
-    steps: List[str] = []
+    steps: list[str] = []
     # 匹配 "数字) 文字" 或 "数字. 文字"
     for m in re.finditer(r"(?:\d+[)\.．、]\s*)([\u4e00-\u9fa5A-Za-z]{2,})", method):
         steps.append(m.group(1))

@@ -4,8 +4,8 @@
   python -m pytest tests/test_intent_dataset.py -v
 """
 import pytest
-from core.intent_detector import IntentCategory, IntentDetector, is_chitchat
 
+from core.intent_detector import IntentCategory, IntentDetector
 
 # ===== 测试数据集 =====
 INTENT_TEST_CASES = [
@@ -40,7 +40,7 @@ INTENT_TEST_CASES = [
         "expected_category": IntentCategory.SELF_QUERY,
         "description": "询问身份",
     },
-    
+
     # === 教导类 ===
     {
         "input": "教我做饭",
@@ -52,7 +52,7 @@ INTENT_TEST_CASES = [
         "expected_category": IntentCategory.TEACH,
         "description": "教导意图2",
     },
-    
+
     # === 重试类 ===
     {
         "input": "重新回答",
@@ -64,7 +64,7 @@ INTENT_TEST_CASES = [
         "expected_category": IntentCategory.RETRY,
         "description": "重试意图2",
     },
-    
+
     # === 天气类 ===
     {
         "input": "今天厦门天气怎么样",
@@ -76,7 +76,7 @@ INTENT_TEST_CASES = [
         "expected_category": IntentCategory.WEATHER,
         "description": "天气查询2",
     },
-    
+
     # === 搜索类 ===
     {
         "input": "什么是人工智能",
@@ -88,7 +88,7 @@ INTENT_TEST_CASES = [
         "expected_category": IntentCategory.SEARCH,
         "description": "搜索查询2",
     },
-    
+
     # === 复杂任务类(应交给LLM) ===
     {
         "input": "帮我分析一下明天的会议安排",
@@ -100,7 +100,7 @@ INTENT_TEST_CASES = [
         "expected_need_llm": True,
         "description": "技能生成-交给LLM",
     },
-    
+
     # === 边界情况 ===
     {
         "input": "好，我来教你怎么写日报",
@@ -136,17 +136,17 @@ class TestIntentDataset:
     def test_intent(self, detector, case):
         """测试每一条意图识别用例"""
         result = detector.detect(case["input"])
-        
+
         # 如果指定了 expected_category
         if "expected_category" in case:
             assert result.category == case["expected_category"], \
                 f"输入: {case['input']}, 期望: {case['expected_category'].value}, 实际: {result.category.value}"
-        
+
         # 如果指定了 expected_not_category
         if "expected_not_category" in case:
             assert result.category != case["expected_not_category"], \
                 f"输入: {case['input']}, 不应识别为: {case['expected_not_category'].value}, 实际: {result.category.value}"
-        
+
         # 如果指定了 expected_need_llm
         if "expected_need_llm" in case:
             assert result.need_llm == case["expected_need_llm"], \
@@ -161,15 +161,15 @@ class TestIntentSummary:
         print("\n" + "=" * 60)
         print("意图识别测试数据集摘要")
         print("=" * 60)
-        
+
         categories = {}
         for case in INTENT_TEST_CASES:
             cat = case.get("expected_category", IntentCategory.UNKNOWN)
             cat_name = cat.value if isinstance(cat, IntentCategory) else "complex"
             categories[cat_name] = categories.get(cat_name, 0) + 1
-        
+
         for cat, count in sorted(categories.items()):
             print(f"  {cat}: {count} 条")
-        
+
         print(f"\n总计: {len(INTENT_TEST_CASES)} 条测试用例")
         print("=" * 60)

@@ -8,15 +8,14 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tools.base import Tool, ToolResult, ToolSchema
-from tools.hub import ToolHub, get_tool_hub, reset_tool_hub
+from tools.hub import ToolHub, reset_tool_hub
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
-
 
 # ===== Fake sources for controllable scenarios =====
 
@@ -30,7 +29,7 @@ class FakeSource(ToolSourceBase):
         *,
         connect_returns: bool = True,
         connect_raises: Optional[BaseException] = None,
-        tools: Optional[List[Tool]] = None,
+        tools: Optional[list[Tool]] = None,
     ):
         super().__init__(source)
         self._connect_returns = connect_returns
@@ -52,10 +51,10 @@ class FakeSource(ToolSourceBase):
         self._tools.clear()
         self._connected = False
 
-    async def list_tools(self) -> List[Any]:
+    async def list_tools(self) -> list[Any]:
         return list(self._tools.values())
 
-    async def call_tool(self, tool_name: str, params: Dict[str, Any]) -> ToolResult:
+    async def call_tool(self, tool_name: str, params: dict[str, Any]) -> ToolResult:
         t = self._tools.get(tool_name)
         if not isinstance(t, Tool):
             return ToolResult(success=False, error=f"no tool: {tool_name}")
@@ -303,6 +302,7 @@ class TestHealthEndpoint:
 
         # 用一个最小 FastAPI app 避免触发完整 startup(config.validate 会要求 OPENAI_API_KEY)
         from fastapi import FastAPI
+
         from backend.main import health as health_endpoint
 
         app = FastAPI()
@@ -352,6 +352,7 @@ class TestHealthEndpoint:
         monkeypatch.setattr(hub_mod, "_builtin_tools_added", True)
 
         from fastapi import FastAPI
+
         from backend.main import health as health_endpoint
 
         app = FastAPI()
@@ -371,6 +372,7 @@ class TestHealthEndpoint:
         monkeypatch.setattr(hub_mod, "_builtin_tools_added", True)
 
         from fastapi import FastAPI
+
         from backend.main import health as health_endpoint
 
         app = FastAPI()
@@ -392,6 +394,7 @@ class TestHealthEndpoint:
         monkeypatch.setattr(hub_mod, "get_tool_hub", boom)
 
         from fastapi import FastAPI
+
         from backend.main import health as health_endpoint
 
         app = FastAPI()

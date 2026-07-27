@@ -1,11 +1,9 @@
 """ExecutionCritic - 执行批评器:在每次 DAG 执行后评估结果质量"""
-import asyncio
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Optional
 
-from core.memory import FailureRecord, MemoryStore, SkillPatch, get_memory_store
+from core.memory import MemoryStore, SkillPatch, get_memory_store
 from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
 from tools.base import ToolResult
@@ -21,9 +19,9 @@ class EvaluationResult:
     latency_ms: float
     user_corrected: bool
     diagnosis: str
-    suggestion: Optional[Dict] = None
+    suggestion: Optional[dict] = None
     confidence: float = 0.5
-    records_generated: List[str] = field(default_factory=list)  # 生成的处理类型列表
+    records_generated: list[str] = field(default_factory=list)  # 生成的处理类型列表
 
 
 @dataclass
@@ -50,12 +48,12 @@ class ExecutionContext:
     intent: str = ""
     selected_skill: Optional[str] = None
     selected_skill_version: Optional[str] = None
-    tasks: List[TaskExecutionSummary] = field(default_factory=list)
+    tasks: list[TaskExecutionSummary] = field(default_factory=list)
     latency_ms: float = 0.0
     user_feedback: Optional[str] = None  # 下一轮用户是否有纠正
     final_output: Optional[str] = None  # M3-03:最终输出文本,供 ResultValidator 校验
     selected_skill_obj: Optional[Any] = None  # M3-03:技能对象,供结果校验
-    attempt_summary: Dict[str, Any] = field(default_factory=dict)  # retry/fallback/timeout 汇总
+    attempt_summary: dict[str, Any] = field(default_factory=dict)  # retry/fallback/timeout 汇总
 
 
 class ExecutionCritic:
@@ -153,11 +151,11 @@ class ExecutionCritic:
         )
 
         # 根据评估结果决定记录什么
-        records_generated: List[str] = []
+        records_generated: list[str] = []
 
         # 1. 失败情况:记录失败(success_rate < 1.0 都记录)
         if success_rate < 1.0:
-            failure_record = self.memory.record_failure(
+            self.memory.record_failure(
                 trace_id=context.trace_id,
                 scenario=context.scenario,
                 intent=context.intent,
@@ -246,12 +244,10 @@ class ExecutionCritic:
         context: ExecutionContext,
         success_rate: float,
         fallback_count: int,
-    ) -> tuple[str, Optional[Dict], float]:
+    ) -> tuple[str, Optional[dict], float]:
         """分析执行情况,生成诊断和建议。
 
-        策略:
-        1. 优先用规则快速判断(无 LLM 调用)
-        2. 仅在规则不足以判断时调用 LLM
+        策略:仅基于规则快速判断(无 LLM 调用)。
 
         Returns: (diagnosis, suggestion, confidence)
         """
@@ -306,75 +302,17 @@ class ExecutionCritic:
 
         return "未知情况", None, 0.0
 
-    async def suggest_improvements(
-        self,
-        context: ExecutionContext,
-    ) -> Optional[Dict]:
-        """可选:对复杂场景调用 LLM 生成改进建议(仅在 confidence < 0.7 时调用)"""
-        llm = self._get_llm_client()
-        if llm is None:
-            return None
-
-        # 构建 prompt
-        prompt = self._build_improvement_prompt(context)
-        if not prompt:
-            return None
-
-        try:
-            response = await llm.chat(
-                messages=[
-                    {"role": "system", "content": "你是一个技能优化专家。根据执行情况,给出改进建议。"},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-            )
-            # 尝试解析 JSON
-            import json, re
-            m = re.search(r"\{[\s\S]*\}", response)
-            if m:
-                return json.loads(m.group())
-        except Exception as e:
-            self.logger.warning("ExecutionCritic", f"LLM 建议生成失败: {e}")
-
-        return None
-
-    def _build_improvement_prompt(self, context: ExecutionContext) -> str:
-        """构建改进建议 prompt"""
-        if context.selected_skill is None:
-            return ""
-
-        lines = [
-            f"场景: {context.scenario}",
-            f"意图: {context.intent}",
-            f"技能: {context.selected_skill}",
-            f"执行结果:",
-        ]
-
-        for t in context.tasks:
-            status = "✓" if t.success else "✗"
-            fallback = " (fallback)" if t.used_fallback else ""
-            retry = f" (重试{t.retry_count}次)" if t.retry_count > 0 else ""
-            error = f" - {t.error}" if t.error else ""
-            lines.append(f"  {status} {t.tool}{fallback}{retry}{error}")
-
-        lines.append(f"耗时: {context.latency_ms:.0f}ms")
-        lines.append("")
-        lines.append("请分析失败原因,给出改进建议。输出 JSON 格式:")
-        lines.append('{"diagnosis": "...", "suggestion": {...}, "confidence": 0.0~1.0}')
-
-        return "\n".join(lines)
-
 
 def build_execution_context(
     trace_id: str,
     scenario: str,
     intent: str,
     selected_skill: Optional[str],
-    tool_results: Dict[str, ToolResult],
+    tool_results: dict[str, ToolResult],
     latency_ms: float,
     user_feedback: Optional[str] = None,
     *,
-    task_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    task_specs: Optional[dict[str, dict[str, Any]]] = None,
     execution_id: str = "",
     turn_id: str = "",
     user_id: str = "default",
@@ -392,8 +330,8 @@ def build_execution_context(
 
     M3-03: final_output / selected_skill_obj 供 ResultValidator 校验无工具任务。
     """
-    tasks: List[TaskExecutionSummary] = []
-    attempt_summary: Dict[str, Any] = {
+    tasks: list[TaskExecutionSummary] = []
+    attempt_summary: dict[str, Any] = {
         "tools": {},
         "total_retries": 0,
         "fallbacks_used": 0,
@@ -421,9 +359,11 @@ def build_execution_context(
         retry_count = max(0, attempts - 1)
 
         # used_fallback: 优先 meta,再 spec.fallback_to 决定
-        # 注意:即使 result.success 也有可能用 fallback(spec.fallback_to 在结果里反映"已经走过该路径")
+        # P0-06: 统一为"实际触发了 fallback 路径才算 used",
+        # 即 fallback_to 已声明 + 主路径失败。与 agents/learning.py 的语义对齐,
+        # 避免主路径成功但因声明了 fallback 就被误统计为 used_fallback。
         used_fallback = bool(meta.get("used_fallback", False))
-        if not used_fallback and spec.get("fallback_to"):
+        if not used_fallback and spec.get("fallback_to") and not result.success:
             used_fallback = True
 
         error = result.error or ""

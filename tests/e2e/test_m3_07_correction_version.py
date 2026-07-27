@@ -8,7 +8,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from pathlib import Path
@@ -29,8 +28,8 @@ def skill_dir(tmp_path, monkeypatch):
 
 
 def _publish_v1(skill_dir):
+
     import yaml
-    from datetime import datetime
     user_dir = skill_dir / "user"
     user_dir.mkdir(parents=True, exist_ok=True)
     p = user_dir / "DailyReport@1.0.0.yaml"
@@ -50,9 +49,8 @@ def _publish_v1(skill_dir):
 
 def test_correction_generates_new_version_and_rollback(skill_dir):
     """用户纠正 → 后端写入 patch → 审批 → 1.0.1 发布 → 回滚到 1.0.0。"""
-    import yaml
+    from backend.main import _bump_version, _publish_skill_version
     from skills.manager import SkillStore
-    from backend.main import _publish_skill_version, _bump_version
 
     _publish_v1(skill_dir)
 
@@ -61,7 +59,6 @@ def test_correction_generates_new_version_and_rollback(skill_dir):
     assert existing.version == "1.0.0"
 
     # 1) 写入 user_correction patch
-    import json
     from pathlib import Path
     patch_id = "patch_correction_1"
     patch_path = (

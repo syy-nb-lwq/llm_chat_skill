@@ -11,16 +11,16 @@
 """
 from __future__ import annotations
 
-import asyncio
 import http.server
 import json
 import socketserver
 import threading
-import time
-from pathlib import Path
 
 import pytest
 
+from tools.approval import ToolApprovalService
+from tools.declarative_http import DeclarativeHTTPTool
+from tools.hub import ToolHub
 from tools.proposal import (
     NetworkPolicy,
     SideEffectLevel,
@@ -31,10 +31,6 @@ from tools.proposal import (
     ToolProposalStore,
     ToolTestCase,
 )
-from tools.approval import ToolApprovalService
-from tools.declarative_http import DeclarativeHTTPTool
-from tools.hub import ToolHub
-
 
 # ===== mock http server =====
 

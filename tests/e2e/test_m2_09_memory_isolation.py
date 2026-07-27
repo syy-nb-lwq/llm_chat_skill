@@ -7,10 +7,7 @@
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -40,7 +37,9 @@ async def test_user_pref_persists_across_reload(runtime):
     repo = runtime["repo"]
     tmp = runtime["tmp"]
     from core.memory_repository import (
-        MemoryItem, MemoryScope, MemoryType,
+        MemoryItem,
+        MemoryScope,
+        MemoryType,
     )
 
     # 第一次会话写入
@@ -65,7 +64,9 @@ async def test_user_isolation(runtime):
     """alice 写入的事实不应被 bob 召回。"""
     repo = runtime["repo"]
     from core.memory_repository import (
-        MemoryItem, MemoryScope, MemoryType,
+        MemoryItem,
+        MemoryScope,
+        MemoryType,
     )
 
     # 用空白分隔的标记以便 FTS5 unicode61 能正确切词
@@ -93,7 +94,9 @@ async def test_user_isolation(runtime):
 async def test_delete_memory_not_recalled(runtime):
     repo = runtime["repo"]
     from core.memory_repository import (
-        MemoryItem, MemoryScope, MemoryType,
+        MemoryItem,
+        MemoryScope,
+        MemoryType,
     )
 
     item = MemoryItem(
@@ -112,7 +115,9 @@ async def test_delete_memory_not_recalled(runtime):
 async def test_forget_user_purges_all(runtime):
     repo = runtime["repo"]
     from core.memory_repository import (
-        MemoryItem, MemoryScope, MemoryType,
+        MemoryItem,
+        MemoryScope,
+        MemoryType,
     )
 
     for note in ("alpha-1", "beta-2", "gamma-3"):

@@ -10,10 +10,8 @@
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 from infra.logger import get_logger
 from tools.declarative_http import DeclarativeHTTPTool, SandboxRunner
@@ -31,8 +29,8 @@ class ApprovalResult:
     ok: bool
     status: str
     message: str
-    issues: List[str] = None
-    sandbox_results: List[Dict[str, Any]] = None
+    issues: list[str] = None
+    sandbox_results: list[dict[str, Any]] = None
 
     def __post_init__(self):
         if self.issues is None:
@@ -61,7 +59,7 @@ class ToolApprovalService:
         self.base_url_resolver = base_url_resolver
         self.logger = get_logger()
         # 记录每次审批的审计日志
-        self.audit_log: List[Dict[str, Any]] = []
+        self.audit_log: list[dict[str, Any]] = []
 
     @property
     def tool_hub(self):

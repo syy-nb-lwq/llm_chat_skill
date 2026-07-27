@@ -42,6 +42,7 @@ class Config(BaseSettings):
     log_level: str = Field("INFO")
     log_to_file: bool = Field(False)
     log_dir: Path = Field("logs")
+    log_format: str = Field("text", description="Log output format: text or json")
 
     # Feature flags
     skill_dag_enabled: bool = Field(False)

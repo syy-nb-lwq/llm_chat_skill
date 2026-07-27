@@ -13,26 +13,22 @@ import asyncio
 import json
 import socket
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 from urllib.parse import urlparse
-
-import yaml
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
 from tools.proposal import (
     NetworkPolicy,
-    SideEffectLevel,
     ToolEndpoint,
     ToolProposal,
     ToolTestCase,
 )
 
-
 # ===== 网络白名单 =====
 
 
-def _host_in_allowed(host: str, allowed: List[str]) -> bool:
+def _host_in_allowed(host: str, allowed: list[str]) -> bool:
     """判断 host 是否在白名单;支持 ``*.example.com`` 通配符。"""
     host = host.lower()
     for pat in allowed:
@@ -111,7 +107,7 @@ class DeclarativeHTTPTool(Tool):
             examples=[],
         )
 
-    def validate_params(self, params: Dict[str, Any]) -> Tuple[bool, str]:
+    def validate_params(self, params: dict[str, Any]) -> tuple[bool, str]:
         return super().validate_params(params)
 
     async def execute(self, **kwargs) -> ToolResult:
@@ -126,7 +122,7 @@ class DeclarativeHTTPTool(Tool):
             return ToolResult(success=False, error="提案缺少 endpoint")
 
         # 解析 secret_refs(无明文)
-        secret_values: Dict[str, str] = {}
+        secret_values: dict[str, str] = {}
         for ref in self.secret_refs:
             try:
                 if self.secret_resolver:
@@ -146,15 +142,15 @@ class DeclarativeHTTPTool(Tool):
 
     # ----- 内部 helper -----
 
-    def _build_request(self, params: Dict[str, Any]) -> Tuple[str, Dict[str, str], Any, Dict[str, Any]]:
+    def _build_request(self, params: dict[str, Any]) -> tuple[str, dict[str, str], Any, dict[str, Any]]:
         path = self.endpoint.path
         # path 参数替换
         for p in self.endpoint.params or []:
             if p.location == "path" and p.name in params:
                 path = path.replace("{" + p.name + "}", str(params[p.name]))
         # query 参数
-        query: Dict[str, Any] = {}
-        body_data: Dict[str, Any] = {}
+        query: dict[str, Any] = {}
+        body_data: dict[str, Any] = {}
         for p in self.endpoint.params or []:
             if p.name not in params:
                 continue
@@ -173,10 +169,10 @@ class DeclarativeHTTPTool(Tool):
             headers["Content-Type"] = "application/json"
         return url, headers, body, query
 
-    async def _do_http(self, url: str, headers: Dict[str, str], body: Any, query: Dict[str, Any]) -> ToolResult:
+    async def _do_http(self, url: str, headers: dict[str, str], body: Any, query: dict[str, Any]) -> ToolResult:
         """执行 HTTP 请求,使用 ``urllib.request`` 避免引入额外依赖。"""
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         method = self.endpoint.method.upper()
         req = urllib.request.Request(url, data=body.encode("utf-8") if isinstance(body, str) else body,
@@ -214,8 +210,8 @@ class SandboxResult:
     error: str = ""
     expected_status: int = 0
     actual_status: int = 0
-    expected_keys: List[str] = field(default_factory=list)
-    missing_keys: List[str] = field(default_factory=list)
+    expected_keys: list[str] = field(default_factory=list)
+    missing_keys: list[str] = field(default_factory=list)
     elapsed_ms: float = 0.0
 
 
@@ -235,10 +231,10 @@ class SandboxRunner:
         # 到占位 host(此时网络请求会被白名单拒绝,沙箱会失败)。
         self.proposal = proposal
         self.base_url = base_url or "https://example.invalid"
-        self.results: List[SandboxResult] = []
+        self.results: list[SandboxResult] = []
         self.logger = get_logger()
 
-    def run_all(self) -> Tuple[bool, List[SandboxResult], List[str]]:
+    def run_all(self) -> tuple[bool, list[SandboxResult], list[str]]:
         """返回 (all_passed, results, validation_issues)。"""
         issues = self.proposal.validate()
         if issues:
@@ -309,7 +305,7 @@ class SandboxRunner:
 # ===== Host 解析工具(M4-04) =====
 
 
-def resolve_host_ips(host: str) -> List[str]:
+def resolve_host_ips(host: str) -> list[str]:
     """解析 host 的 IP(用于审计与白名单检查)。"""
     try:
         return [info[4][0] for info in socket.getaddrinfo(host, None)]

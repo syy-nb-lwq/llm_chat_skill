@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from skills.manager import get_skill_store
 from skills.registry import SkillRegistry
@@ -27,7 +27,7 @@ class ManagerResult:
     ok: bool
     action: str                       # list / show / versions / rollback / activate / unknown
     message: str                      # 给用户展示的自然语言
-    details: List[dict] = None        # 结构化数据(给前端 / 测试用)
+    details: list[dict] = None        # 结构化数据(给前端 / 测试用)
     skill_name: str = ""
     version: str = ""
 
@@ -89,7 +89,7 @@ class SkillManagerAgent:
 
     # ===== 解析 =====
 
-    def _parse(self, text: str) -> Tuple[str, str, str]:
+    def _parse(self, text: str) -> tuple[str, str, str]:
         """返回 (action, skill_name, version)。"""
         low = text.lower().strip()
         for action, pat in self._ACTION_PATTERNS:

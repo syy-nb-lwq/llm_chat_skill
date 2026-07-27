@@ -2,13 +2,13 @@
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 from infra.logger import get_logger
 from tools.base import ToolResult
 from tools.hub import get_tool_hub
-
 
 # 参数值类型(支持 ${task.data.x} 占位符)
 ParamValue = Union[str, int, float, bool, list, dict, None]
@@ -19,8 +19,8 @@ class ToolTask:
     """工具任务"""
     id: str
     type: str
-    params: Dict = field(default_factory=dict)
-    depends_on: List[str] = field(default_factory=list)
+    params: dict = field(default_factory=dict)
+    depends_on: list[str] = field(default_factory=list)
     parallel_group: Optional[str] = None
     retry: int = 0               # 失败后重试次数(0 = 不重试)
     timeout_s: int = 30          # 单次执行超时秒
@@ -30,8 +30,8 @@ class ToolTask:
 _VAR_RE = re.compile(r"\$\{([^}]+)\}")
 
 
-def _resolve_value(value: Any, results: Dict[str, ToolResult],
-                   user_input: Optional[Dict] = None) -> Any:
+def _resolve_value(value: Any, results: dict[str, ToolResult],
+                   user_input: Optional[dict] = None) -> Any:
     """递归解析占位符。
 
     支持:
@@ -95,8 +95,8 @@ def _resolve_value(value: Any, results: Dict[str, ToolResult],
     return value
 
 
-def resolve_params(params: Any, results: Dict[str, ToolResult],
-                   user_input: Optional[Dict] = None) -> Any:
+def resolve_params(params: Any, results: dict[str, ToolResult],
+                   user_input: Optional[dict] = None) -> Any:
     """公开 API:解析整个 params 树中的占位符。"""
     return _resolve_value(params, results, user_input)
 
@@ -119,7 +119,7 @@ class LearningAgent:
     async def execute_tool(
         self,
         tool_type: str,
-        params: Dict,
+        params: dict,
         on_event: Optional[Callable] = None,
         *,
         task_id: Optional[str] = None,
@@ -150,7 +150,7 @@ class LearningAgent:
         local_params = dict(params) if params else {}
         attempts = max(1, retry + 1)
         last_err = "unknown"
-        start_overall = time.time()
+        time.time()
         total_latency = 0.0
 
         for attempt in range(1, attempts + 1):
@@ -219,10 +219,10 @@ class LearningAgent:
 
     async def execute_dag(
         self,
-        tasks: List[ToolTask],
+        tasks: list[ToolTask],
         on_event: Optional[Callable] = None,
-        user_input: Optional[Dict] = None,
-    ) -> Dict[str, ToolResult]:
+        user_input: Optional[dict] = None,
+    ) -> dict[str, ToolResult]:
         """DAG 执行
 
         - 自动拓扑调度,依赖完成才启动下游
@@ -247,12 +247,12 @@ class LearningAgent:
                 self.logger.error("Learning", f"任务 {t.id} 缺少依赖: {missing}")
 
         # 只保留依赖完整的任务
-        pending: Dict[str, ToolTask] = {
+        pending: dict[str, ToolTask] = {
             t.id: t for t in tasks
             if all(d in all_ids for d in t.depends_on)
         }
-        results: Dict[str, ToolResult] = {}
-        running: Dict[str, asyncio.Task] = {}
+        results: dict[str, ToolResult] = {}
+        running: dict[str, asyncio.Task] = {}
 
         async def emit(event: str, payload: dict):
             if on_event:
@@ -261,7 +261,7 @@ class LearningAgent:
         # 计算每个任务"上游失败时仍可启动"的依赖集合。
 # 默认严格: 上游失败 → 下游被跳过。
 # 例外: 上游 task.fallback_to == 本任务 id → 即使上游失败也允许启动(接管)。
-        fallback_allow: Dict[str, set] = {}
+        fallback_allow: dict[str, set] = {}
         for t in pending.values():
             allowed: set = set()
             for d in t.depends_on:
@@ -284,7 +284,7 @@ class LearningAgent:
                         break
                 if deps_ok:
                     # 解析参数变量
-                    resolved = resolve_params(task.params, results)
+                    resolved = resolve_params(task.params, results, user_input)
                     del pending[task_id]
                     if on_event:
                         await on_event("tool_call", {
@@ -341,7 +341,7 @@ class LearningAgent:
         return results
 
 
-def _has_cycle(tasks: List[ToolTask]) -> bool:
+def _has_cycle(tasks: list[ToolTask]) -> bool:
     """检测循环依赖"""
     visited = set()
     rec_stack = set()

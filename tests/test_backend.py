@@ -329,9 +329,9 @@ def test_auto_approved_patch_still_requires_review_gate(client, tmp_path, monkey
 
 
 def test_startup_fails_fast_on_invalid_config(monkeypatch):
+    import backend.main as backend_main
     from backend.main import app
     from infra.config import ConfigError
-    import backend.main as backend_main
 
     def boom(self):
         raise ConfigError("boom")
@@ -353,8 +353,9 @@ def test_websocket_init_and_ping_via_client():
     import asyncio
     import time
     from unittest.mock import MagicMock
-    from backend.websocket_handler import dispatcher, push_event
+
     from backend.session import sessions
+    from backend.websocket_handler import dispatcher
 
     client_id = f"test-cid-{int(time.time()*1000)}"
 
@@ -399,10 +400,10 @@ def test_websocket_init_and_ping_via_client():
 
             # 5) chat: 把 agent 的 handle 替换为 stub
             from core.agent import Agent
-            from agents import manager as mgr_mod
+            from core.agent_base import get_llm_client as gab_g
+
             # 让 LLM 完全 stub,避免 chat 路径真正发请求
             from infra.llm import LLMClient
-            from core.agent_base import get_llm_client as gab_g
 
             class StubLLM(LLMClient):
                 def __init__(self):
@@ -453,3 +454,90 @@ def test_websocket_init_and_ping_via_client():
             await sessions.destroy(client_id)
 
     asyncio.run(_drive())
+
+
+# ===== P1-03: 统一错误响应信封测试 =====
+
+
+def test_error_envelope_404(client):
+    """404 响应应符合统一错误信封格式(P1-03)。
+
+    信封字段:code/message/detail/trace_id/details
+    兼容:detail 字段保留(与 FastAPI 默认格式一致)
+    """
+    # 访问不存在的 tool proposal(GET /api/tools/proposals/{name}/{version} 会抛 404)
+    resp = client.get("/api/tools/proposals/nonexistent_xyz/1.0.0")
+    assert resp.status_code == 404
+    body = resp.json()
+    # 统一字段
+    assert "code" in body
+    assert body["code"] == "not_found"
+    assert "message" in body
+    assert "trace_id" in body
+    assert body["trace_id"]  # 非空
+    # 兼容字段
+    assert "detail" in body
+    assert body["detail"] == body["message"]
+    # details 可为 None
+    assert "details" in body
+
+
+def test_error_envelope_trace_id_header(client):
+    """响应头应包含 X-Trace-Id(P1-03)。"""
+    resp = client.get("/api/tools/proposals/nonexistent_xyz/1.0.0")
+    assert resp.status_code == 404
+    assert "x-trace-id" in {k.lower() for k in resp.headers.keys()}
+    trace_id = resp.headers.get("x-trace-id")
+    assert trace_id
+    # body 中的 trace_id 应与 header 一致
+    assert resp.json()["trace_id"] == trace_id
+
+
+def test_error_envelope_422_validation(client):
+    """422 校验错误也应走统一信封(P1-03)。
+
+    FeatureFlagUpdate 要求 enabled: bool,送非法类型触发 RequestValidationError。
+    require_owner_token 在未配置 owner_token 时放行,所以可直达 422。
+    """
+    # 缺少必填字段 enabled,触发 Pydantic 校验失败 → RequestValidationError → 422
+    resp = client.post(
+        "/api/features/self-evolution",
+        json={"persist": True},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "validation_error"
+    assert "trace_id" in body
+    assert body["trace_id"]  # 非空
+    assert "message" in body
+    # details 应包含原始校验错误列表
+    assert isinstance(body["details"], list)
+
+
+def test_error_envelope_route_not_found(client):
+    """不存在路由的 404 也应走统一错误信封(P1-03 bug 修复)。
+
+    之前 Starlette 原生 404 返回 {"detail":"Not Found"},
+    不会触发 fastapi.HTTPException handler。改注册 StarletteHTTPException
+    handler 后,所有 404(含路由不存在)都走统一信封。
+    """
+    resp = client.get("/api/this-route-does-not-exist-xyz")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["code"] == "not_found"
+    assert "message" in body
+    assert "trace_id" in body
+    assert body["trace_id"]  # 非空
+    assert body["detail"] == body["message"]  # 兼容字段
+    # X-Trace-Id 头也应存在
+    assert resp.headers.get("x-trace-id") == body["trace_id"]
+
+
+def test_error_envelope_method_not_allowed(client):
+    """405 Method Not Allowed 也应走统一错误信封(P1-03)。"""
+    resp = client.delete("/api/tools")  # /api/tools 只允许 GET
+    assert resp.status_code == 405
+    body = resp.json()
+    assert body["code"] == "method_not_allowed"
+    assert "trace_id" in body
+    assert body["trace_id"]

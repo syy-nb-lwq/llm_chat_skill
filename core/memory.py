@@ -1,10 +1,9 @@
 """MemoryStore - 跨 Session 长期记忆,让 Agent 记住历史失败和成功经验"""
 import json
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
@@ -25,7 +24,7 @@ class FailureRecord:
     fallback_count: int
     latency_ms: float
     diagnosis: str
-    suggestion: Optional[Dict] = None
+    suggestion: Optional[dict] = None
     user_corrected: bool = False
 
 
@@ -50,7 +49,7 @@ class SkillPatch:
     target_skill: str
     patch_type: str  # "improve_skill" / "new_skill" / "fix_method"
     diagnosis: str
-    suggestion: Dict
+    suggestion: dict
     confidence: float = 0.5  # 0.0 ~ 1.0
     status: str = "pending"  # pending / approved / rejected / auto_approved
     reviewed_by: Optional[str] = None
@@ -100,7 +99,7 @@ class MemoryStore:
         fallback_count: int,
         latency_ms: float,
         diagnosis: str,
-        suggestion: Optional[Dict] = None,
+        suggestion: Optional[dict] = None,
         user_corrected: bool = False,
         *,
         execution_id: Optional[str] = None,
@@ -187,9 +186,9 @@ class MemoryStore:
         self,
         scenario: Optional[str] = None,
         top_k: int = 5,
-    ) -> List[FailureRecord]:
+    ) -> list[FailureRecord]:
         """获取最近的失败记录,按时间倒序"""
-        records: List[FailureRecord] = []
+        records: list[FailureRecord] = []
         for month_dir in sorted(self.failures_dir.iterdir(), reverse=True):
             if not month_dir.is_dir():
                 continue
@@ -219,7 +218,7 @@ class MemoryStore:
                 break
         return records[:top_k]
 
-    def get_skill_hints(self, user_input: str) -> List[str]:
+    def get_skill_hints(self, user_input: str) -> list[str]:
         """获取与当前输入相关的历史教训提示
 
         策略:
@@ -228,8 +227,8 @@ class MemoryStore:
         """
         if not get_self_evolution_enabled():
             return []
-            
-        hints: List[str] = []
+
+        hints: list[str] = []
 
         # 从最近失败中找相关
         failures = self.get_recent_failures(top_k=10)
@@ -248,9 +247,9 @@ class MemoryStore:
 
         return hints[:5]  # 最多 5 条
 
-    def _get_success_hints(self, user_input: str, top_k: int = 3) -> List[str]:
+    def _get_success_hints(self, user_input: str, top_k: int = 3) -> list[str]:
         """从成功记录中提取提示"""
-        hints: List[str] = []
+        hints: list[str] = []
         path = self.successes_dir / "success_index.jsonl"
         if not path.exists():
             return hints
@@ -274,9 +273,9 @@ class MemoryStore:
 
         return hints
 
-    def get_pending_patches(self) -> List[SkillPatch]:
+    def get_pending_patches(self) -> list[SkillPatch]:
         """获取所有待审阅的改进建议。"""
-        patches: List[SkillPatch] = []
+        patches: list[SkillPatch] = []
         reviewable_statuses = {"pending", "auto_approved"}
         for path in self.patches_dir.glob("*.json"):
             try:
@@ -335,7 +334,7 @@ class MemoryStore:
                 continue
 
             # 读取所有记录
-            records: List[tuple] = []
+            records: list[tuple] = []
             for path in files:
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
@@ -353,7 +352,7 @@ class MemoryStore:
 
     # ---- 统计 ----
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """获取记忆统计"""
         total_failures = sum(
             1 for m in self.failures_dir.iterdir()
