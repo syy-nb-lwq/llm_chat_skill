@@ -81,6 +81,14 @@ class Tool(ABC):
 
     name: str = ""
     description: str = ""
+    #: 需要某个配置开关才启用(如 "code_exec_enabled")。
+    #:
+    #: **为什么需要它**:工具目录会被 `PythonSource` 扫描并自动注册 ——
+    #: 那是"把工具放进目录就能用"的便利。但有些工具是**安全开关**管的
+    #: (代码执行 = 执行 LLM 生成的代码),光靠"不手动注册"关不掉,
+    #: 扫描器照样会把它加载进来。
+    #: 声明了这个字段,扫描器就会去查对应开关。
+    required_flag: str = ""
 
     @abstractmethod
     def schema(self) -> ToolSchema: ...

@@ -1,11 +1,79 @@
 """MCP 工具源 - 接入 MCP (Model Context Protocol) 协议的工具"""
 import asyncio
 import json
+import shlex
+import sys
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from tools.base import ToolParam, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
+
+
+def parse_server_command(server_path: str) -> List[str]:
+    """把配置里的 `server_path` 解析成可执行命令。
+
+    配置形如:
+        `npx -y @modelcontextprotocol/server-filesystem D:\\workspace`
+        `uvx mcp-server-git --repository .`
+        `python C:\\tools\\my_server.py --port 8080`
+        `"C:\\Program Files\\node.exe" server.js`
+
+    **踩过的坑**:原先写的是
+        `sys.executable if not server_path.endswith(".exe") else server_path`
+    于是 `npx -y xxx` 会变成 `python npx -y xxx` —— python 去执行一个叫 npx 的
+    脚本,必然失败。MCP 服务器绝大多数是 `npx`/`uvx` 起的,**不是** .py 文件,
+    所以不能默认用 python 解释器。
+
+    规则:
+    1. 首个 token 以 `.py` 结尾 → 用当前解释器跑它
+    2. 否则 → 首个 token 就是可执行文件本身
+    3. 引号内的空格要保留(Windows 路径常见)
+    """
+    raw = (server_path or "").strip()
+    if not raw:
+        raise ValueError("server_path 不能为空")
+
+    # posix=False:保留引号,避免 Windows 反斜杠被当转义符
+    tokens = shlex.split(raw, posix=False)
+    cleaned: List[str] = []
+    for t in tokens:
+        t = t.strip()
+        if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
+            t = t[1:-1]
+        if t:
+            cleaned.append(t)
+
+    if not cleaned:
+        raise ValueError(f"无法解析 server_path: {server_path!r}")
+
+    if cleaned[0].lower().endswith(".py"):
+        return [sys.executable, *cleaned]
+    return cleaned
+
+
+def build_tool_schema(name: str, description: str, input_schema: Dict) -> ToolSchema:
+    """把 MCP 的 inputSchema 转成项目的 ToolSchema。
+
+    MCP 协议文档: https://modelcontextprotocol.io/
+    """
+    params = []
+    properties = (input_schema or {}).get("properties", {}) or {}
+    required = (input_schema or {}).get("required", []) or []
+
+    for param_name, param_info in properties.items():
+        params.append(ToolParam(
+            name=param_name,
+            type=(param_info or {}).get("type", "string"),
+            description=(param_info or {}).get("description", ""),
+            required=param_name in required,
+        ))
+
+    return ToolSchema(
+        name=name,
+        description=description,
+        params=params,
+    )
 
 
 class MCPTool:
@@ -19,23 +87,7 @@ class MCPTool:
 
     def schema(self) -> ToolSchema:
         """转换为标准 ToolSchema"""
-        params = []
-        properties = self.input_schema.get("properties", {})
-        required = self.input_schema.get("required", [])
-
-        for param_name, param_info in properties.items():
-            params.append(ToolParam(
-                name=param_name,
-                type=param_info.get("type", "string"),
-                description=param_info.get("description", ""),
-                required=param_name in required,
-            ))
-
-        return ToolSchema(
-            name=self.name,
-            description=self.description,
-            params=params,
-        )
+        return build_tool_schema(self.name, self.description, self.input_schema)
 
     async def execute(self, **kwargs) -> ToolResult:
         """执行 MCP 工具"""
@@ -50,13 +102,39 @@ class MCPSource(ToolSourceBase):
     MCP 协议文档: https://modelcontextprotocol.io/
     """
 
-    def __init__(self, source: ToolSource):
+    def __init__(self, source: ToolSource, read_timeout_s: int = 30):
         super().__init__(source)
         self._connected = False
         self._process = None
         self._reader = None
         self._writer = None
         self._request_id = 0
+        #: 读取响应的超时(秒)。**必须有** —— 否则一个不回话的服务器
+        #: 能让整个 agent 启动卡死(实测踩过)。
+        self.read_timeout_s = max(5, int(read_timeout_s))
+        #: stderr 尾部(诊断用),由后台任务持续收集
+        self._stderr_tail: List[str] = []
+        self._stderr_task: Optional[asyncio.Task] = None
+
+    # ===== 代理到 ToolSource =====
+    #
+    # `create_mcp_source()` 返回 **MCPSource 实例**,
+    # 而 `parse_mcp_servers()` 返回 **ToolSource 规格** ——
+    # 两种约定不一致,调用方一不小心就会拿到
+    # `'MCPSource' object has no attribute 'name'`。
+    # 这里把常用字段代理出来,两种拿法都能用。
+
+    @property
+    def name(self) -> str:
+        return self.source.name
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        return self.source.config
+
+    @property
+    def description(self) -> str:
+        return self.source.description
 
     async def connect(self) -> bool:
         """连接 MCP 服务器
@@ -85,6 +163,10 @@ class MCPSource(ToolSourceBase):
         self._tools.clear()
         self._connected = False
 
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            self._stderr_task = None
+
         if self._process:
             self._process.terminate()
             try:
@@ -93,11 +175,18 @@ class MCPSource(ToolSourceBase):
                 self._process.kill()
             self._process = None
 
-        if self._reader:
-            self._reader.close()
-            self._writer.close()
-            self._reader = None
-            self._writer = None
+        if self._writer:
+            # 只有 StreamWriter 有 close();`_reader` 是 StreamReader,
+            # 没有 close() 方法 —— 原先对两者都调 close(),
+            # 每次断开 MCP 都会抛
+            # `AttributeError: 'StreamReader' object has no attribute 'close'`。
+            # 读侧不用管:进程已经终止,管道随之关闭。
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+        self._reader = None
+        self._writer = None
 
     async def list_tools(self) -> List[Any]:
         """列出所有 MCP 工具"""
@@ -132,10 +221,25 @@ class MCPSource(ToolSourceBase):
             return ToolResult(success=False, error=str(e))
 
     def get_tool_schema(self, tool_name: str) -> Optional[ToolSchema]:
-        """获取工具 schema"""
-        tool = self._tools.get(tool_name)
-        if tool:
-            return tool.schema()
+        """获取工具 schema。
+
+        `self._tools` 里存的是服务器返回的**原始 dict**
+        (`_discover_tools` 直接塞进去的),不是 MCPTool 对象 ——
+        所以这里不能直接 `tool.schema()`,那会抛
+        `'dict' object has no attribute 'schema'`。
+        """
+        raw = self._tools.get(tool_name)
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            return build_tool_schema(
+                raw.get("name") or tool_name,
+                raw.get("description", ""),
+                raw.get("inputSchema") or {},
+            )
+        schema_fn = getattr(raw, "schema", None)
+        if callable(schema_fn):
+            return schema_fn()
         return None
 
     async def _connect_stdio(self, server_path: str) -> bool:
@@ -144,9 +248,9 @@ class MCPSource(ToolSourceBase):
         import sys
 
         # 启动 MCP 服务器进程
+        cmd = parse_server_command(server_path)
         self._process = await asyncio.create_subprocess_exec(
-            sys.executable if not server_path.endswith(".exe") else server_path,
-            *server_path.split() if " " in server_path else [server_path],
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -154,15 +258,22 @@ class MCPSource(ToolSourceBase):
         self._reader = self._process.stdout
         self._writer = self._process.stdin
 
-        # 发送 initialize 请求
-        await self._send_request("initialize", {
+        # **必须持续抽干 stderr。**
+        # stderr 是管道,缓冲区满了服务器就会阻塞在写 stderr 上,
+        # 于是它不再读 stdin → 双方死锁。
+        # npx/npm 第一次拉包时会往 stderr 打一堆日志,很容易撑满。
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
+
+        # 发送 initialize 请求。
+        #
+        # **注意这里不能再读一次响应** —— `_send_request` 内部已经读过了
+        # (它 return 的就是响应)。多读一次会等一条永远不会来的消息,
+        # 表现为"连接一直挂着" —— 这正是之前实测到的现象。
+        response = await self._send_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "skill-agent", "version": "1.0"}
         })
-
-        # 读取响应
-        response = await self._read_response()
         if response.get("error"):
             raise Exception(f"MCP 初始化失败: {response['error']}")
 
@@ -173,6 +284,20 @@ class MCPSource(ToolSourceBase):
         await self._discover_tools()
         self._connected = True
         return True
+
+    async def _drain_stderr(self) -> None:
+        """后台持续读 stderr,丢弃内容(只留最后几行用于诊断)。"""
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").rstrip()
+                if text:
+                    self._stderr_tail.append(text)
+                    del self._stderr_tail[:-20]
+        except Exception:
+            pass
 
     async def _connect_http(self, server_url: str) -> bool:
         """通过 HTTP 连接 MCP 服务器"""
@@ -262,11 +387,34 @@ class MCPSource(ToolSourceBase):
         await self._writer.drain()
 
     async def _read_response(self) -> Dict:
-        """读取响应"""
-        line = await self._reader.readline()
+        """读取一条 JSON-RPC 响应。
+
+        **必须有超时**:服务器不回、或回的不是 JSON,
+        都不该让整个 agent 启动卡在这里。
+        """
+        try:
+            line = await asyncio.wait_for(
+                self._reader.readline(), timeout=self.read_timeout_s
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"MCP 服务器 {self.source.name} 在 {self.read_timeout_s}s 内没有响应"
+                + (f"; stderr: {' | '.join(self._stderr_tail[-3:])}" if self._stderr_tail else "")
+            )
         if not line:
+            raise ConnectionError(
+                f"MCP 服务器 {self.source.name} 关闭了连接"
+                + (f"; stderr: {' | '.join(self._stderr_tail[-3:])}" if self._stderr_tail else "")
+            )
+        text = line.decode("utf-8", "replace").strip()
+        if not text:
             return {}
-        return json.loads(line.decode())
+        try:
+            return json.loads(text)
+        except Exception as exc:
+            raise ValueError(
+                f"MCP 服务器 {self.source.name} 返回了非 JSON 内容: {text[:200]!r}"
+            ) from exc
 
 
 def create_mcp_source(
@@ -288,3 +436,78 @@ def create_mcp_source(
         description=f"MCP 工具源 ({connection_type})",
     )
     return MCPSource(source)
+
+
+def parse_mcp_servers(raw: str) -> List[ToolSource]:
+    """把 `MCP_SERVERS` 配置解析成 MCP 工具源列表。
+
+    配置是 JSON 数组(单个服务器也允许写成对象):
+
+    ```json
+    [
+      {"name": "filesystem", "type": "stdio",
+       "server_path": "npx -y @modelcontextprotocol/server-filesystem D:\\workspace"},
+      {"name": "git", "type": "stdio", "server_path": "uvx mcp-server-git --repository ."},
+      {"name": "remote", "type": "http", "server_url": "https://example.com/mcp"}
+    ]
+    ```
+
+    **坏配置不能拖垮启动** —— 解析失败只跳过那个服务器并记录原因,
+    其余照常工作。多租户产品里,一个第三方 MCP 服务器挂掉
+    不应该让整个 agent 起不来。
+    """
+    from infra.logger import get_logger
+
+    logger = get_logger()
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        logger.warning("MCP", f"MCP_SERVERS 不是合法 JSON,已忽略: {exc}")
+        return []
+
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        logger.warning("MCP", "MCP_SERVERS 必须是数组或对象,已忽略")
+        return []
+
+    sources: List[ToolSource] = []
+    for idx, item in enumerate(data):
+        if not isinstance(item, dict):
+            logger.warning("MCP", f"MCP_SERVERS[{idx}] 不是对象,已跳过")
+            continue
+        name = str(item.get("name") or f"mcp_{idx}").strip()
+        conn_type = str(item.get("type") or "stdio").strip().lower()
+        if conn_type not in ("stdio", "http"):
+            logger.warning("MCP", f"MCP 服务器 {name} 的 type={conn_type!r} 不支持,已跳过")
+            continue
+        server_path = str(item.get("server_path") or "").strip()
+        server_url = str(item.get("server_url") or "").strip()
+        if conn_type == "stdio" and not server_path:
+            logger.warning("MCP", f"MCP 服务器 {name} 缺少 server_path,已跳过")
+            continue
+        if conn_type == "http" and not server_url:
+            logger.warning("MCP", f"MCP 服务器 {name} 缺少 server_url,已跳过")
+            continue
+        if not item.get("enabled", True):
+            logger.info("MCP", f"MCP 服务器 {name} 已禁用,跳过")
+            continue
+
+        sources.append(
+            ToolSource(
+                name=name,
+                type=SourceType.MCP,
+                enabled=True,
+                config={
+                    "type": conn_type,
+                    "server_path": server_path,
+                    "server_url": server_url,
+                },
+                description=str(item.get("description") or f"MCP 服务器 {name}"),
+            )
+        )
+    return sources

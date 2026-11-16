@@ -73,6 +73,17 @@ class Config(BaseSettings):
     soul_path: Path = Field("soul/SOUL.md")
     mcp_enabled: bool = Field(False, description="Enable MCP tools")
     mcp_servers: str = Field("", description="MCP servers JSON array")
+    # 代码执行工具(python_exec / write_script / list_scripts)
+    #
+    # **这是个安全开关,不是功能开关。** 执行的是 LLM 生成的代码。
+    # 默认开是因为当前形态是"团队内部/单机"使用;一旦对外开放给不可信用户,
+    # 必须关掉,或者换成容器隔离(子进程隔离 = 崩溃隔离,不是安全边界)。
+    code_exec_enabled: bool = Field(
+        True, description="Enable python_exec / write_script tools"
+    )
+    code_exec_timeout_s: int = Field(
+        30, description="代码执行超时秒数(上限 300)"
+    )
     intent_mode: str = Field("rule_first", description="Intent detection mode")
     intent_rule_threshold: int = Field(5, description="Rule threshold")
     intent_llm_fallback: bool = Field(True, description="Fallback to LLM")

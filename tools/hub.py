@@ -329,6 +329,24 @@ def get_tool_hub() -> ToolHub:
         except Exception:
             pass
 
+        # 代码执行/脚本工具 —— 受 CODE_EXEC_ENABLED 控制。
+        # 这是**安全开关**:执行的是 LLM 生成的代码,对外服务前应当关掉
+        # 或换成容器隔离(见 tools/python_exec.py 顶部的安全模型说明)。
+        try:
+            from infra.config import config
+
+            if config.code_exec_enabled:
+                from tools.python_exec import PythonExecTool
+                from tools.script_writer import ListScriptsTool, WriteScriptTool
+
+                _hub.register_python_tool(
+                    PythonExecTool(timeout_s=config.code_exec_timeout_s)
+                )
+                _hub.register_python_tool(WriteScriptTool())
+                _hub.register_python_tool(ListScriptsTool())
+        except Exception:
+            pass
+
     return _hub
 
 

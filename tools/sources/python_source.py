@@ -9,6 +9,23 @@ from tools.base import Tool, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
 
 
+def _flag_allows(tool: Tool) -> bool:
+    """检查工具声明的配置开关是否放行。
+
+    `Tool.required_flag = "code_exec_enabled"` 意思是:
+    只有 `CODE_EXEC_ENABLED=true` 时这个工具才可用。
+    """
+    flag_name = getattr(tool, "required_flag", "")
+    if not flag_name:
+        return True
+    try:
+        from infra.config import config
+
+        return bool(getattr(config, flag_name, False))
+    except Exception:
+        return False
+
+
 class PythonSource(ToolSourceBase):
     """Python 工具源
 
@@ -97,8 +114,13 @@ class PythonSource(ToolSourceBase):
                         ):
                             # 实例化并注册
                             instance = attr()
-                            if instance.name:
-                                self._tools[instance.name] = instance
+                            if not instance.name:
+                                continue
+                            # 安全开关:某些工具(如代码执行)必须由配置显式放行,
+                            # 光靠"不手动注册"是关不掉的 —— 扫描器照样会加载。
+                            if not _flag_allows(instance):
+                                continue
+                            self._tools[instance.name] = instance
             except Exception:
                 pass
 

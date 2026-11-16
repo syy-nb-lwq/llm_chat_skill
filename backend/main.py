@@ -91,6 +91,10 @@ async def _startup():
     except ValueError:
         pass
 
+    # MCP 工具源(可选):配了 MCP_SERVERS 才会启用。
+    # 每个服务器独立注册 —— 一个连不上不影响其它,也不影响启动。
+    _register_mcp_sources(hub)
+
     try:
         await hub.connect_all()
         logger.info("startup", f"tool hub initialized with {len(hub.names())} tools")
@@ -105,6 +109,46 @@ async def _startup():
             logger.warning("startup", f"self reflection loop start failed: {exc}")
 
     _init_long_term_memory()
+
+
+def _register_mcp_sources(hub) -> int:
+    """注册 MCP 工具源(可选)。返回成功注册的服务器数。
+
+    设计要点:
+    - **一个服务器挂掉不影响其它** —— 逐个 try,失败只记日志
+    - **也不影响启动** —— MCP 全部连不上,agent 照常跑(只是少了那些工具)
+    - **不静默**:连上了多少、失败多少,都进日志,`/api/health` 也能看到
+
+    安全提醒:MCP 服务器是第三方进程(`npx`/`uvx` 拉的),等于引入了
+    第三方代码执行面。**只应由管理员配置**,不要让终端用户自助添加。
+    """
+    if not config.mcp_enabled:
+        return 0
+
+    from tools.sources.mcp_source import MCPSource, parse_mcp_servers
+
+    try:
+        sources = parse_mcp_servers(config.mcp_servers)
+    except Exception as exc:
+        logger.warning("startup", f"解析 MCP_SERVERS 失败,已跳过 MCP: {exc}")
+        return 0
+
+    if not sources:
+        return 0
+
+    registered = 0
+    for src in sources:
+        try:
+            hub.register_source(MCPSource(src))
+            registered += 1
+        except ValueError:
+            # 同名已注册 —— 跳过,不报错
+            continue
+        except Exception as exc:
+            logger.warning("startup", f"注册 MCP 服务器 {src.name} 失败: {exc}")
+
+    logger.info("startup", f"已注册 {registered}/{len(sources)} 个 MCP 服务器")
+    return registered
 
 
 def _init_long_term_memory() -> None:
