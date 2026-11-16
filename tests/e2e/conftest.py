@@ -19,16 +19,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-# 测试用 .env(避免污染真实配置)
-ENV_PATH = ROOT / ".env"
-if not ENV_PATH.exists():
-    ENV_PATH.write_text(
-        "OPENAI_API_KEY=sk-test-dummy\n"
-        "OPENAI_BASE_URL=https://api.openai.com/v1\n"
-        "OPENAI_MODEL=gpt-4o-mini\n"
-        "LOG_LEVEL=WARNING\n",
-        encoding="utf-8",
-    )
+# 测试配置:根目录 conftest.py 已负责注入占位 OPENAI_API_KEY,
+# 这里不再往项目根写 .env(避免给真实运行留下测试残留文件)。
 
 
 class ScriptedLLMProvider:

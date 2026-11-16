@@ -54,6 +54,11 @@ class SkillPatch:
     confidence: float = 0.5  # 0.0 ~ 1.0
     status: str = "pending"  # pending / approved / rejected / auto_approved
     reviewed_by: Optional[str] = None
+    # M3-05:发布前校验结果与风险等级(给前端展示)
+    validation: Optional[Dict] = None
+    risk_level: str = "unknown"  # low / medium / high / unknown
+    # M3-06:自动发布被拦下的原因
+    blocked_reason: str = ""
 
 
 class MemoryStore:
@@ -80,13 +85,35 @@ class MemoryStore:
         self.failures_dir = self.base / "failures"
         self.successes_dir = self.base / "successes"
         self.patches_dir = self.base / "skill_patches" / "pending"
+        self.audit_dir = self.base / "audit"
         self.logger = get_logger()
 
         self._ensure_dirs()
 
     def _ensure_dirs(self):
-        for d in [self.failures_dir, self.successes_dir, self.patches_dir]:
+        for d in [self.failures_dir, self.successes_dir, self.patches_dir, self.audit_dir]:
             d.mkdir(parents=True, exist_ok=True)
+
+    # ---- 审计(M3-06) ----
+
+    def write_audit(self, kind: str, payload: Dict) -> str:
+        """写一条审计记录,返回文件路径。
+
+        自动发布 / 人工发布都必须留痕,便于事后追溯"谁在什么时候改了哪个技能"。
+        """
+        record = {
+            "kind": kind,
+            "timestamp": datetime.now().isoformat(),
+            **payload,
+        }
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = self.audit_dir / f"{kind}_{stamp}.json"
+        try:
+            path.write_text(json.dumps(record, ensure_ascii=False, default=str), encoding="utf-8")
+        except Exception as exc:
+            self.logger.error("MemoryStore", f"写审计失败: {exc}")
+            return ""
+        return str(path)
 
     # ---- 记录 ----
 
@@ -352,6 +379,87 @@ class MemoryStore:
 
     # ---- 统计 ----
 
+    def remove_success(self, trace_id: str) -> bool:
+        """撤销一条成功记录。
+
+        **为什么需要**:critic 先按"工具成功"记了成功,下一轮用户说不对,
+        我们会用纠正信息重评这一轮 —— 这时必须把之前那条成功记录撤掉,
+        否则同一轮既算成功又算失败,采纳率就失真了。
+
+        `success_index.jsonl` 是追加写的,所以要整体重写一遍。
+        """
+        path = self.successes_dir / "success_index.jsonl"
+        if not path.exists():
+            return False
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            kept = []
+            removed = 0
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    kept.append(line)
+                    continue
+                if row.get("trace_id") == trace_id:
+                    removed += 1
+                    continue
+                kept.append(line)
+            if not removed:
+                return False
+            path.write_text(
+                ("\n".join(kept) + "\n") if kept else "",
+                encoding="utf-8",
+            )
+            self.logger.info("MemoryStore", f"撤销成功记录: {trace_id}")
+            return True
+        except Exception as exc:
+            self.logger.warning("MemoryStore", f"撤销成功记录失败: {exc}")
+            return False
+
+    def get_adoption_rate(self) -> Dict[str, Any]:
+        """答案采纳率 —— **自演化最核心的质量指标**。
+
+        采纳率 = 1 − (被用户纠正的轮数 / 有评估记录的轮数)
+
+        旧指标(success_rate)只看工具调没调通,一个"工具全通但答案全错"
+        的系统能拿 100%。采纳率不会。
+        """
+        success_path = self.successes_dir / "success_index.jsonl"
+        successes = 0
+        if success_path.exists():
+            successes = len(
+                [l for l in success_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            )
+
+        failures = 0
+        corrected = 0
+        if self.failures_dir.exists():
+            for month in self.failures_dir.iterdir():
+                if not month.is_dir():
+                    continue
+                for f in month.glob("*.json"):
+                    try:
+                        row = json.loads(f.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    failures += 1
+                    if row.get("user_corrected"):
+                        corrected += 1
+
+        evaluated = successes + failures
+        rate = (1.0 - corrected / evaluated) if evaluated else 0.0
+        return {
+            "evaluated": evaluated,
+            "successes": successes,
+            "failures": failures,
+            "corrected": corrected,
+            "adoption_rate": round(rate, 4),
+        }
+
     def get_stats(self) -> Dict[str, Any]:
         """获取记忆统计"""
         total_failures = sum(
@@ -365,7 +473,7 @@ class MemoryStore:
 
         pending = self.get_pending_patches()
 
-        return {
+        stats = {
             "total_failures": total_failures,
             "total_successes": total_successes,
             "pending_patches": len(pending),
@@ -374,6 +482,8 @@ class MemoryStore:
                 for m in self.failures_dir.iterdir() if m.is_dir()
             },
         }
+        stats.update(self.get_adoption_rate())
+        return stats
 
 
 # ---- 全局单例 ----

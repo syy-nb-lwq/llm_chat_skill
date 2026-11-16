@@ -84,13 +84,13 @@ def test_build_execution_context_fallback_when_meta_attempts_missing():
 
 
 @pytest.mark.asyncio
-async def test_agent_handle_unique_execution_id_per_call(monkeypatch):
+async def test_agent_handle_unique_execution_id_per_call(monkeypatch, stub_intent):
     """同 session 多次 handle 必须生成不同 execution_id。"""
     from infra.llm import LLMClient
     from core.agent import Agent
     from agents import manager as mgr_mod
 
-    monkeypatch.setattr(mgr_mod.ManagerAgent, "should_answer_directly", lambda self, t: True)
+    stub_intent("chitchat")   # 意图由 L1 判;测试里要"走直答"就 stub L1
 
     class StubLLM(LLMClient):
         def __init__(self):

@@ -57,6 +57,7 @@ export default {
         message_final: '📝',
         error: '❌',
         skill_learned: '✨',
+        clarification_request: '❓',
       }
       return icons[event] || '•'
     },
@@ -85,6 +86,8 @@ export default {
           return p.message || ''
         case 'skill_learned':
           return `${p.name} v${p.version} | 步骤 ${p.step_count} | ${(p.patterns||[]).join(', ')}`
+        case 'clarification_request':
+          return `澄清: ${p.question || ''}${(p.options||[]).length ? ' | 选项: ' + p.options.join(', ') : ''}`
         default:
           return ''
       }

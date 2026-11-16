@@ -1,0 +1,15 @@
+{"input": "教我如何读懂财报", "label": "task", "layer": "L1", "note": "助手教用户 -> task"}
+{"input": "教我用这个插件", "label": "task", "layer": "L1", "note": "助手教用户 -> task"}
+{"input": "教我一套梳理竞品的方法", "label": "teach", "layer": "L1", "note": "用户教助手方法论"}
+{"input": "以后别用这种口头禅了", "label": "chitchat", "layer": "L1", "note": "语气偏好"}
+{"input": "以后答案里别加粗体", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "把技能删了", "label": "manage", "layer": "L1", "note": "专属动词"}
+{"input": "技能能停掉吗", "label": "manage", "layer": "L1", "note": "泛用动词+明说技能"}
+{"input": "看看昨天的日志", "label": "task", "layer": "L1", "note": "泛用动词+没说技能"}
+{"input": "刚才那个再来一次", "label": "retry", "layer": "L1", "note": "重做上一轮"}
+{"input": "再执行一遍刚才那条命令", "label": "retry", "layer": "L1", "note": "重做上一轮"}
+{"input": "搜下量子计算最近的进展", "label": "task", "layer": "L1", "note": "搜索"}
+{"input": "把这段话转成繁体", "label": "task", "layer": "L1", "note": "翻译"}
+{"input": "那玩意儿", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "就那样", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "以后排查先看日志再重启服务", "label": "teach", "layer": "L1", "note": "方法论+要求记住"}

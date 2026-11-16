@@ -14,6 +14,12 @@
           <span class="skill-name">{{ grp.name }}</span>
           <span class="version-badge">{{ grp.versions.length }} 版本</span>
           <span class="skill-source" :class="grp.latest.source">{{ grp.latest.source }}</span>
+          <span
+            v-if="qualityOf(grp.name)"
+            class="quality-badge"
+            :class="{ demoted: qualityOf(grp.name).demoted }"
+            :title="qualityTitle(grp.name)"
+          >{{ qualityText(grp.name) }}</span>
           <span class="caret">{{ expanded[grp.name] ? '▼' : '▶' }}</span>
         </div>
         <p v-if="grp.latest.capability" class="capability">{{ grp.latest.capability }}</p>
@@ -73,7 +79,7 @@
 </template>
 
 <script>
-import { API_BASE } from '../config'  // M0-04
+import { API_BASE, apiFetch } from '../config'  // M0-04 / C-01
 
 export default {
   name: 'SkillManager',
@@ -105,6 +111,32 @@ export default {
   methods: {
     reload() { this.$emit('reload') },
     toggleCard(name) { this.expanded[name] = !this.expanded[name] },
+    // 质量徽章(docs/14 §2.4):这个技能到底靠不靠谱
+    qualityOf(name) {
+      const latest = this.grouped.find((g) => g.name === name)
+      return latest && latest.latest ? latest.latest.quality : null
+    },
+    qualityText(name) {
+      const q = this.qualityOf(name)
+      if (!q) return ''
+      if (q.demoted) return '已降级'
+      const rate = q.overall_pass_rate
+      if (rate === null || rate === undefined) return ''
+      return `通过率 ${Math.round(rate * 100)}%`
+    },
+    qualityTitle(name) {
+      const q = this.qualityOf(name)
+      if (!q) return ''
+      const parts = []
+      if (q.sample_pass_rate !== null && q.sample_pass_rate !== undefined) {
+        parts.push(`验收样例 ${Math.round(q.sample_pass_rate * 100)}%`)
+      }
+      if (q.usage_pass_rate !== null && q.usage_pass_rate !== undefined) {
+        parts.push(`线上采纳 ${Math.round(q.usage_pass_rate * 100)}%`)
+      }
+      if (q.demote_reason) parts.push(q.demote_reason)
+      return parts.join(' · ')
+    },
     formatTime(t) {
       if (!t) return ''
       try {
@@ -120,7 +152,7 @@ export default {
         const url = version
           ? `${API_BASE}/api/skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
           : `${API_BASE}/api/skills/${encodeURIComponent(name)}`
-        const r = await fetch(url, { method: 'DELETE' })
+        const r = await apiFetch(url, { method: 'DELETE' })
         if (!r.ok) throw new Error(await r.text())
         this.reload()
       } catch (e) {
@@ -183,6 +215,19 @@ export default {
 .skill-source.builtin { background: rgba(76,175,80,0.2); color: #2e7d32; }
 .skill-source.taught { background: rgba(255,152,0,0.2); color: #ef6c00; }
 .skill-source.imported { background: rgba(33,150,243,0.2); color: #1565c0; }
+/* 质量徽章:通过率 / 已降级(docs/14 §2.4) */
+.quality-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(76,175,80,0.15);
+  color: #2e7d32;
+  cursor: help;
+}
+.quality-badge.demoted {
+  background: rgba(244,67,54,0.18);
+  color: #c62828;
+}
 .caret { margin-left: auto; color: #667eea; }
 
 .capability { margin: 6px 0 4px; font-size: 12px; color: #555; }

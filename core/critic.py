@@ -35,6 +35,9 @@ class TaskExecutionSummary:
     used_fallback: bool = False
     retry_count: int = 0
     error: str = ""
+    # M0-02:补齐执行记录字段
+    fallback_to: Optional[str] = None   # 声明的 fallback 目标任务 id
+    latency_ms: float = 0.0            # 单任务耗时
 
 
 @dataclass
@@ -47,6 +50,11 @@ class ExecutionContext:
     tasks: List[TaskExecutionSummary]
     latency_ms: float
     user_feedback: Optional[str] = None  # 下一轮用户是否有纠正
+    # M0-01:四级标识(每次 handle 唯一 execution_id,同 session 多轮不互相覆盖)
+    execution_id: str = ""
+    turn_id: str = ""
+    user_id: str = "default"
+    session_id: str = "default"
 
 
 class ExecutionCritic:
@@ -125,8 +133,11 @@ class ExecutionCritic:
         # 根据评估结果决定记录什么
         records_generated: List[str] = []
 
-        # 1. 失败情况:记录失败(success_rate < 1.0 都记录)
-        if success_rate < 1.0:
+        # 1. 失败情况:记录失败(success_rate < 1.0 **或被用户纠正**)
+        #
+        # 被纠正是比"工具失败"更强的信号:工具全调通了但答案是错的,
+        # 在旧逻辑里会被记成"成功",学习系统就永远学不到这件事。
+        if success_rate < 1.0 or user_corrected:
             failure_record = self.memory.record_failure(
                 trace_id=context.trace_id,
                 scenario=context.scenario,
@@ -138,6 +149,11 @@ class ExecutionCritic:
                 diagnosis=diagnosis,
                 suggestion=suggestion,
                 user_corrected=user_corrected,
+                # M0-01:用 execution_id 落盘,同 session 多轮失败不再互相覆盖
+                execution_id=context.execution_id or context.trace_id,
+                user_id=context.user_id,
+                session_id=context.session_id,
+                turn_id=context.turn_id,
             )
             records_generated.append("failure_record")
 
@@ -155,18 +171,32 @@ class ExecutionCritic:
                 status="pending",
             )
 
-            # 高置信度(>0.9)自动生效:持久化 patch 并尝试自动应用
+            # 高置信度(>0.9)才尝试自动发布,但必须过校验闸(M3-06)
             if confidence >= 0.9:
-                patch.status = "auto_approved"
-                self.memory.add_pending_patch(patch)
-                await self._apply_patch(patch)
-                records_generated.append("patch_auto_approved")
+                applied, report, reason = await self._try_auto_publish(patch)
+                if report is not None:
+                    patch.validation = report.to_dict()
+                    patch.risk_level = report.risk_level
+                if applied:
+                    patch.status = "auto_approved"
+                    records_generated.append("patch_auto_approved")
+                else:
+                    # 没过闸 → 降级为人工审批,并说明原因(M3-05 风险展示)
+                    patch.status = "pending"
+                    patch.blocked_reason = reason
+                    patch.risk_level = "high"
+                    records_generated.append("patch_auto_publish_blocked")
+                    self.logger.warning(
+                        "ExecutionCritic",
+                        f"自动发布被拦截({patch.id}): {reason}",
+                    )
             else:
-                self.memory.add_pending_patch(patch)
                 records_generated.append("patch_pending")
+            self.memory.add_pending_patch(patch)
 
         # 3. 成功情况:记录成功路径
-        if success_rate == 1.0 and fallback_count == 0:
+        #    被用户纠正的轮次**不算成功** —— 它已经在上面记成失败了
+        if success_rate == 1.0 and fallback_count == 0 and not user_corrected:
             self.memory.record_success(
                 trace_id=context.trace_id,
                 scenario=context.scenario,
@@ -277,6 +307,110 @@ class ExecutionCritic:
 
         return "未知情况", None, 0.0
 
+    @staticmethod
+    def _extract_updates(suggestion: Dict) -> Dict[str, object]:
+        """从 suggestion 中提取可应用的字段。"""
+        updates: Dict[str, object] = {}
+        if "method" in suggestion:
+            updates["method"] = suggestion["method"]
+        if "capability" in suggestion:
+            updates["capability"] = suggestion["capability"]
+        if "patterns" in suggestion:
+            updates["patterns"] = suggestion["patterns"]
+        return updates
+
+    async def _try_auto_publish(self, patch: "SkillPatch"):
+        """M3-06:高置信度补丁的自动发布,必须同时满足三个条件:
+
+        1. 静态校验通过(结构 / 工具引用 / DAG 无环)
+        2. 至少有一个回归样例,且**全部通过**(M3-03 结果校验)
+        3. 写审计记录
+
+        任一条不满足 → 不落盘,补丁降级为人工审批,并返回拦截原因。
+
+        Returns:
+            (applied: bool, report: Optional[ValidationReport], reason: str)
+        """
+        from core.result_validator import ResultValidator
+        from skills.manager import get_skill_store
+        from skills.validator import new_issues, split_issues, validate_skill
+        from tools.hub import get_tool_hub
+
+        updates = self._extract_updates(patch.suggestion or {})
+        if not updates:
+            return False, None, "补丁没有可应用的字段"
+
+        if not patch.target_skill:
+            return False, None, "补丁没有指定目标技能"
+
+        store = get_skill_store()
+        candidate = store.preview_update(patch.target_skill, updates)
+        if candidate is None:
+            return False, None, f"找不到技能 {patch.target_skill}"
+
+        try:
+            tool_names = list(get_tool_hub().names() or [])
+        except Exception:
+            tool_names = []
+
+        # 基线已有的问题不阻断补丁,只拦新引入的问题
+        baseline = store.get_by_name(patch.target_skill)
+        baseline_errors, _ = (
+            split_issues(validate_skill(baseline, tool_names)) if baseline else ([], [])
+        )
+        candidate_errors, warnings = split_issues(validate_skill(candidate, tool_names))
+        errors = new_issues(baseline_errors, candidate_errors)
+
+        report = await ResultValidator().validate(
+            candidate, static_issues=errors, warnings=warnings
+        )
+
+        # 记进技能质量账本:验收样例通过率是"这个技能靠不靠谱"的第一手证据
+        # (docs/14 §2.4)。记账失败不该影响发布流程。
+        try:
+            from core.skill_quality import get_skill_quality_store
+
+            get_skill_quality_store().record_sample_run(
+                patch.target_skill,
+                version=candidate.version,
+                total=report.total,
+                passed=report.passed,
+                failed_cases=[c.name for c in report.cases if not c.passed],
+            )
+        except Exception as exc:
+            self.logger.warning("Critic", f"记录样例结果失败: {exc}")
+
+        if errors:
+            return False, report, "静态校验未通过: " + "; ".join(errors)
+        if not report.has_regression:
+            return False, report, "技能缺少回归样例,自动发布前需要先补齐"
+        if not report.ok:
+            failed = [c.name for c in report.cases if not c.passed]
+            return False, report, "回归样例未通过: " + ", ".join(failed)
+
+        written = store.update_skill(patch.target_skill, updates)
+        if not written:
+            return False, report, "写入技能文件失败"
+
+        audit_path = self.memory.write_audit(
+            "auto_publish",
+            {
+                "patch_id": patch.id,
+                "target_skill": patch.target_skill,
+                "confidence": patch.confidence,
+                "diagnosis": patch.diagnosis,
+                "updates": updates,
+                "files": written,
+                "validation": report.to_dict(),
+                "reviewer": "auto",
+            },
+        )
+        self.logger.info(
+            "ExecutionCritic",
+            f"自动发布通过校验: {patch.target_skill} -> {written} (审计: {audit_path})",
+        )
+        return True, report, ""
+
     async def _apply_patch(self, patch: "SkillPatch") -> bool:
         """尝试将 auto_approved patch 直接应用到 skill YAML"""
         target_skill = patch.target_skill
@@ -377,21 +511,56 @@ def build_execution_context(
     tool_results: Dict[str, ToolResult],
     latency_ms: float,
     user_feedback: Optional[str] = None,
+    *,
+    task_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    execution_id: str = "",
+    turn_id: str = "",
+    user_id: str = "default",
+    session_id: str = "default",
 ) -> ExecutionContext:
-    """从工具执行结果构建 ExecutionContext"""
+    """从工具执行结果构建 ExecutionContext。
+
+    Args:
+        task_specs: task_id → 任务规格(type / retry / timeout_s / fallback_to)。
+            提供时用真实工具名与声明的 fallback,不再从 task_id 反推(M0-02)。
+        execution_id / turn_id / user_id / session_id: 四级标识(M0-01)。
+    """
     tasks: List[TaskExecutionSummary] = []
+    specs = task_specs or {}
 
     for task_id, result in tool_results.items():
-        # 从 task_id 推断 tool 名(格式: t1, t2...)
-        tool_name = task_id if task_id.startswith("tool:") else f"task_{task_id}"
+        spec = specs.get(task_id) or {}
         meta = getattr(result, "meta", {}) or {}
+
+        # 真实工具名:优先 task_specs,其次 meta,最后才退回旧的推断逻辑
+        tool_name = (
+            spec.get("type")
+            or meta.get("tool")
+            or (task_id if task_id.startswith("tool:") else f"task_{task_id}")
+        )
+
+        # 重试次数:meta.attempts 是实际尝试次数,减 1 即重试次数
+        attempts = meta.get("attempts")
+        if attempts is not None:
+            retry_count = max(0, int(attempts) - 1)
+        elif meta.get("retry_count") is not None:
+            retry_count = int(meta.get("retry_count") or 0)
+        else:
+            retry_count = int(spec.get("retry") or 0)
+
+        # fallback:任务声明了 fallback_to,或运行时确实走了 fallback
+        fallback_to = spec.get("fallback_to") or meta.get("fallback_to")
+        used_fallback = bool(meta.get("used_fallback", False)) or bool(fallback_to)
+
         tasks.append(TaskExecutionSummary(
             task_id=task_id,
             tool=tool_name,
             success=result.success,
-            used_fallback=bool(meta.get("used_fallback", False)),
-            retry_count=int(meta.get("retry_count", 0)),
+            used_fallback=used_fallback,
+            retry_count=retry_count,
             error=result.error or "",
+            fallback_to=fallback_to,
+            latency_ms=float(meta.get("latency_ms") or 0.0),
         ))
 
     return ExecutionContext(
@@ -402,4 +571,8 @@ def build_execution_context(
         tasks=tasks,
         latency_ms=latency_ms,
         user_feedback=user_feedback,
+        execution_id=execution_id,
+        turn_id=turn_id,
+        user_id=user_id,
+        session_id=session_id,
     )

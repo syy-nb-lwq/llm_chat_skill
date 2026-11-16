@@ -22,6 +22,34 @@ from skills.models import Skill, SkillStep
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,63}$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
+# 软性问题:只提示,不阻断发布
+_SOFT_ISSUE_MARKERS = ("缺少 examples",)
+
+
+def split_issues(issues: Iterable[str]) -> tuple[List[str], List[str]]:
+    """把校验问题分成 (errors, warnings)。
+
+    errors 会阻断发布;warnings 只提示(如缺少教学证据 examples)。
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+    for issue in issues or []:
+        if any(marker in issue for marker in _SOFT_ISSUE_MARKERS):
+            warnings.append(issue)
+        else:
+            errors.append(issue)
+    return errors, warnings
+
+
+def new_issues(baseline: Iterable[str], candidate: Iterable[str]) -> List[str]:
+    """候选版本相对基线**新增**的问题。
+
+    技能本身早就存在的问题(比如 capability 写得太短)不该阻断一次补丁发布,
+    否则老技能永远改不动。只拦补丁新引入的问题。
+    """
+    base = set(baseline or [])
+    return [issue for issue in (candidate or []) if issue not in base]
+
 
 def validate_skill(skill: Skill, tool_names: Iterable[str] = ()) -> List[str]:
     """对单一 Skill 做静态校验。
@@ -68,10 +96,47 @@ def validate_skill(skill: Skill, tool_names: Iterable[str] = ()) -> List[str]:
     if _has_cycle(skill.steps or []):
         issues.append("存在循环依赖")
 
-    # 至少 1 个 examples
-    if not (skill.examples or []):
-        # examples 可以来自教学 evidence,允许空但记 warning → 这里只返回问题
+    # 至少 1 个 examples 或回归样例
+    if not (skill.examples or []) and not (skill.regression or []):
         issues.append("缺少 examples(教学证据为空,无回归样例)")
+
+    # 回归样例结构(M3-05)
+    issues.extend(_validate_regression(skill, tool_set))
+
+    return issues
+
+
+def _validate_regression(skill: Skill, tool_set: Set[str]) -> List[str]:
+    """校验回归样例结构(M3-05)。"""
+    issues: List[str] = []
+    names: Set[str] = set()
+
+    for idx, case in enumerate(skill.regression or []):
+        if not isinstance(case, dict):
+            issues.append(f"回归样例 #{idx + 1} 不是字典")
+            continue
+
+        name = str(case.get("name") or "").strip()
+        if not name:
+            issues.append(f"回归样例 #{idx + 1} 缺少 name")
+        elif name in names:
+            issues.append(f"回归样例 name 重复: {name}")
+        else:
+            names.add(name)
+
+        if not isinstance(case.get("input") or {}, dict):
+            issues.append(f"回归样例 {name or idx + 1} 的 input 不是字典")
+
+        expect = case.get("expect") or {}
+        if not isinstance(expect, dict):
+            issues.append(f"回归样例 {name or idx + 1} 的 expect 不是字典")
+            continue
+        if not expect:
+            issues.append(f"回归样例 {name or idx + 1} 没有 expect,无法判定通过与否")
+
+        want_tool = expect.get("tool")
+        if want_tool and tool_set and want_tool not in tool_set:
+            issues.append(f"回归样例 {name or idx + 1} 期望未知工具 {want_tool}")
 
     return issues
 

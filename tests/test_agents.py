@@ -52,59 +52,63 @@ def _patch_llm(monkeypatch, scripted):
 
 # ===== Manager =====
 
+def _l1_response(label="task", confidence=0.9, reason="测试用"):
+    """L1 闭集分类器的响应(架构:plan() 会先做一次 L1 判别)。"""
+    return json.dumps(
+        {"label": label, "confidence": confidence, "reason": reason},
+        ensure_ascii=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_manager_plan_parses_valid_json(monkeypatch):
     valid = json.dumps({
-        "intent": "查天气",
         "selected_skill": "",
         "tool_tasks": [{"type": "weather_query", "params": {"city": "厦门"}}],
     }, ensure_ascii=False)
-    _patch_llm(monkeypatch, [valid])
+    # L1 判别 → L2 规划(两次 LLM 调用)
+    _patch_llm(monkeypatch, [_l1_response("task", 0.95), valid])
 
     from agents.manager import ManagerAgent, IntentType
     m = ManagerAgent()
     # 使用更长的输入避免被闲聊检测拦截
     plan = await m.plan("帮我查一下厦门今天的天气")
-    assert plan.intent == IntentType.SKILL
+    assert plan.intent == IntentType.TASK
     assert len(plan.tool_tasks) == 1
     assert plan.tool_tasks[0]["type"] == "weather_query"
+    # 意图由 L1 定案,不是 L2
+    assert plan.intent_layer == "L1"
+    assert plan.intent_confidence == pytest.approx(0.95)
 
 
 @pytest.mark.asyncio
-async def test_manager_plan_invalid_then_valid(monkeypatch):
-    """输入 "hi" 现在会被闲聊检测拦截,不调用 LLM"""
+async def test_manager_chitchat_has_no_tool_tasks(stub_intent):
+    """L1 判闲聊 → 不要工具。
+
+    (以前这里靠 L0 关键词拦截 "hi";规则已删,
+    现在意图由 L1 判——测试就 stub L1。)
+    """
     from agents.manager import ManagerAgent, IntentType
-    m = ManagerAgent()
-    plan = await m.plan("hi")
-    # "hi" 应该是闲聊,不需要调用 LLM
+
+    stub_intent("chitchat")
+    plan = await ManagerAgent().plan("hi")
     assert plan.intent == IntentType.CHITCHAT
     assert plan.tool_tasks == []
 
 
 @pytest.mark.asyncio
-async def test_manager_plan_all_fail_degrades(monkeypatch):
-    """输入 "hi" 现在会被闲聊检测拦截"""
-    from agents.manager import ManagerAgent, IntentType
-    m = ManagerAgent()
-    plan = await m.plan("hi")
-    # "hi" 应该是闲聊,不需要调用 LLM
-    assert plan.intent == IntentType.CHITCHAT
+async def test_manager_l1_unavailable_degrades_without_tools(monkeypatch):
+    """L1 叫不通 → 不能崩,也不能瞎填工具。"""
+    from agents import manager as mgr_mod
+    from agents.manager import ManagerAgent
+
+    async def _none(self, user_input, context=None):
+        return None
+
+    monkeypatch.setattr(mgr_mod.ManagerAgent, "_l1_classify", _none)
+    plan = await ManagerAgent().plan("hi")
+    # 没有任何意图证据时,不应该凭空规划出工具任务
     assert plan.tool_tasks == []
-
-
-def test_manager_should_answer_directly():
-    from agents.manager import ManagerAgent
-    m = ManagerAgent()
-    assert m.should_answer_directly("你好")
-    assert m.should_answer_directly("hello")
-    assert not m.should_answer_directly("查厦门天气")
-
-
-def test_manager_should_learn_skill():
-    from agents.manager import ManagerAgent
-    m = ManagerAgent()
-    assert m.should_learn_skill("以后应该先查天气")
-    assert not m.should_learn_skill("查厦门天气")
 
 
 # ===== Orchestrator =====
@@ -259,7 +263,7 @@ async def test_manager_plan_without_context_keeps_old_behavior(monkeypatch):
 # ===== emit 顺序(B3 修复) =====
 
 @pytest.mark.asyncio
-async def test_agent_handle_async_on_event_preserves_order(monkeypatch):
+async def test_agent_handle_async_on_event_preserves_order(monkeypatch, stub_intent):
     """异步 on_event 时,事件必须按 emit 顺序完成(不依赖 create_task 调度顺序)。"""
     import asyncio
     from core.agent import Agent
@@ -270,7 +274,7 @@ async def test_agent_handle_async_on_event_preserves_order(monkeypatch):
 
     # 让 manager.should_answer_directly 为 True,走直答分支(最快路径,无工具)
     from agents import manager as mgr_mod
-    monkeypatch.setattr(mgr_mod.ManagerAgent, "should_answer_directly", lambda self, t: True)
+    stub_intent("chitchat")   # 意图由 L1 判;走直答就 stub L1
 
     a = Agent(session_id="t")
     received: list = []
@@ -292,14 +296,14 @@ async def test_agent_handle_async_on_event_preserves_order(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_handle_drains_pending_async_on_exception(monkeypatch):
+async def test_agent_handle_drains_pending_async_on_exception(monkeypatch, stub_intent):
     """handle 异常时,pending 的异步 emit 也要被 drain(不能泄漏)"""
     from core.agent import Agent
     from agents import manager as mgr_mod
     from infra.llm import LLMClient
 
     # 走直答路径
-    monkeypatch.setattr(mgr_mod.ManagerAgent, "should_answer_directly", lambda self, t: True)
+    stub_intent("chitchat")   # 意图由 L1 判;走直答就 stub L1
 
     # 写一个会在 stream 时抛错的 LLM
     class BoomLLM(LLMClient):
@@ -345,3 +349,33 @@ def test_agent_chat_sync_wrapper(monkeypatch):
     monkeypatch.setattr(Agent, "handle", fake_handle)
     agent = Agent(session_id="sync")
     assert agent.chat("hello") == "echo:hello"
+
+
+def test_agent_chat_sync_runs_real_handle(monkeypatch):
+    """chat() 必须真正驱动异步主链路(CLI / Streamlit 入口可用)。"""
+    from core.agent import Agent
+
+    _patch_llm(monkeypatch, ["你好呀"])  # 闲聊路径:orchestrator 直接流式输出
+
+    agent = Agent(session_id="sync-real")
+    answer = agent.chat("你好")
+
+    assert isinstance(answer, str) and answer
+    # M0-01:同步入口同样要生成四级标识
+    assert agent.execution_id
+    assert agent.turn_id
+
+
+def test_agent_chat_sync_reuses_event_loop(monkeypatch):
+    """多次同步调用必须复用同一个 event loop(否则 httpx 客户端会失效)。"""
+    from core.agent import Agent
+
+    _patch_llm(monkeypatch, ["a", "b", "c"])
+
+    agent = Agent(session_id="sync-loop")
+    agent.chat("你好")
+    agent.chat("你好")
+
+    from core.agent import _get_sync_loop
+
+    assert not _get_sync_loop().is_closed()

@@ -1,0 +1,50 @@
+# 画像抽取评估集(纯规则通道,不需要 LLM)
+#
+# 每行:
+#   {"input": "...", "expect": [{"type": "preference", "contains": "回答"}], "note": "可选"}
+#
+# 标注原则(与 docs/13 §2.8「宁缺毋滥」一致):
+# - `expect` 为空 = 这句话**不该**产出任何画像条目
+# - `contains` 是**子串**,用来允许同一句话的不同措辞(只要语义锚点在里面就算命中)
+#
+# 这个集子测的是**规则抽取层**(`core.memory_writer.extract_candidates`)。
+# 敏感信息拦截、去重/冲突、置信度门槛是另外几层,各有各的测试。
+{"input": "以后回答都用中文", "expect": [{"type": "preference", "contains": "回答"}], "note": "输出语言偏好"}
+{"input": "今后输出请用要点式", "expect": [{"type": "preference", "contains": "输出"}], "note": "输出格式偏好"}
+{"input": "从现在起回答请简短一些", "expect": [{"type": "preference", "contains": "回答"}], "note": "输出长度偏好"}
+{"input": "回答请保持三段式", "expect": [{"type": "preference", "contains": "回答请保持"}], "note": "显式输出偏好"}
+{"input": "我更喜欢简洁的结论", "expect": [{"type": "preference", "contains": "我更喜欢"}], "note": "长期偏好"}
+{"input": "我倾向于用表格呈现结果", "expect": [{"type": "preference", "contains": "我倾向于"}], "note": "长期偏好"}
+{"input": "记住:每次发布前先跑一遍回归", "expect": [{"type": "preference", "contains": "记住"}, {"type": "habit", "contains": "每次"}], "note": "显式记住;同时也是重复行为"}
+{"input": "请记住,我不用emoji", "expect": [{"type": "preference", "contains": "请记住"}], "note": "显式记住"}
+{"input": "记住我不喜欢被追问", "expect": [{"type": "preference", "contains": "记住"}], "note": "显式记住"}
+{"input": "以后每次发布前都要先跑一遍回归", "expect": [{"type": "preference", "contains": "以后"}, {"type": "habit", "contains": "每次"}], "note": "既是偏好也是习惯"}
+{"input": "以后写日报都按三段式来", "expect": [{"type": "preference", "contains": "以后"}], "note": "产出约定"}
+{"input": "以后做日报就按三段式来", "expect": [{"type": "preference", "contains": "以后"}], "note": "产出约定"}
+{"input": "我习惯早上先看邮件", "expect": [{"type": "habit", "contains": "我习惯"}], "note": "习惯"}
+{"input": "我习惯每天早上先看日报", "expect": [{"type": "habit", "contains": "我习惯"}], "note": "习惯"}
+{"input": "每次上线前都要先做一次回滚演练", "expect": [{"type": "habit", "contains": "每次"}], "note": "重复行为"}
+{"input": "应该先看日志再改配置", "expect": [{"type": "method", "contains": "应该先"}], "note": "步骤顺序"}
+{"input": "做数据分析应该先看缺失值再画图", "expect": [{"type": "method", "contains": "应该先"}], "note": "步骤顺序"}
+{"input": "正确做法是先备份数据库再执行迁移", "expect": [{"type": "method", "contains": "正确做法"}], "note": "显式方法论;只应存一条,不能同时存 step_order 的短版本"}
+{"input": "流程是排查日志、定位、修复、复盘", "expect": [{"type": "method", "contains": "流程是"}], "note": "显式方法论"}
+{"input": "我是做基础架构的", "expect": [{"type": "fact", "contains": "我是"}], "note": "稳定事实"}
+{"input": "我在杭州做后端开发", "expect": [{"type": "fact", "contains": "我在"}], "note": "稳定事实"}
+{"input": "我的职业是运维工程师", "expect": [{"type": "fact", "contains": "我的职业是"}], "note": "稳定事实"}
+{"input": "不要用 emoji", "expect": [{"type": "constraint", "contains": "不要用 emoji"}], "note": "雷区"}
+{"input": "不要在回答里写日期", "expect": [{"type": "constraint", "contains": "不要"}], "note": "雷区"}
+{"input": "你好", "expect": [], "note": "寒暄"}
+{"input": "谢谢", "expect": [], "note": "寒暄"}
+{"input": "你是谁", "expect": [], "note": "询问身份"}
+{"input": "帮我查一下明天的天气", "expect": [], "note": "普通任务"}
+{"input": "算一下 128*37 等于多少", "expect": [], "note": "普通任务"}
+{"input": "把这段英文翻译成中文", "expect": [], "note": "普通任务(提到中文但不是偏好)"}
+{"input": "列出所有技能", "expect": [], "note": "管理操作"}
+{"input": "重新来一次", "expect": [], "note": "重做"}
+{"input": "这个方案要分三步", "expect": [], "note": "描述当前方案,不是在给助手定规矩"}
+{"input": "你懂我意思吧", "expect": [], "note": "反问不是陈述"}
+{"input": "教我一种排查线上问题的方法", "expect": [], "note": "teach 意图本身不等于画像"}
+{"input": "以后我们开会要提前十分钟", "expect": [], "note": "用户自己的安排,不是「希望助手怎么做」"}
+{"input": "以后我每天早起半小时", "expect": [], "note": "个人作息,不是助手偏好"}
+{"input": "我喜欢这个方案", "expect": [], "note": "对当前这一轮的反应,不是长期偏好"}
+{"input": "我的手机号是13800138000", "expect": [], "note": "敏感信息,且不是画像"}

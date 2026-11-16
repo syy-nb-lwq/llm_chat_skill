@@ -1,0 +1,38 @@
+{"input": "你好", "label": "chitchat", "layer": "L0"}
+{"input": "谢谢", "label": "chitchat", "layer": "L0"}
+{"input": "你是谁", "label": "chitchat", "layer": "L0"}
+{"input": "再见", "label": "chitchat", "layer": "L0"}
+{"input": "好的", "label": "chitchat", "layer": "L0"}
+{"input": "列出所有技能", "label": "manage", "layer": "L0"}
+{"input": "查看技能列表", "label": "manage", "layer": "L0"}
+{"input": "把版本回滚到 1.0.0", "label": "manage", "layer": "L0"}
+{"input": "技能详情给我看看", "label": "manage", "layer": "L0"}
+{"input": "show me skills", "label": "manage", "layer": "L0"}
+{"input": "教我一种排查线上问题的方法", "label": "teach", "layer": "L0"}
+{"input": "记住:以后做日报按三段式来", "label": "teach", "layer": "L0"}
+{"input": "以后每次发布前都要先跑一遍回归", "label": "teach", "layer": "L0"}
+{"input": "重新来一次", "label": "retry", "layer": "L0"}
+{"input": "再说一遍", "label": "retry", "layer": "L0"}
+{"input": "再执行一次刚才那个查询", "label": "retry", "layer": "L1"}
+{"input": "查看北京天气", "label": "task", "layer": "L1", "note": "曾被误判为 manage"}
+{"input": "遇到雨天要带伞", "label": "chitchat", "layer": "L1", "note": "陈述生活常识,不需要助手做任何事 → 不是 task(已复核:原标注 task 有误)"}
+{"input": "搜索是一个动词吗", "label": "chitchat", "layer": "L1", "note": "曾被误判为 search"}
+{"input": "什么是人工智能", "label": "task", "layer": "L1"}
+{"input": "查一下厦门今天的天气", "label": "task", "layer": "L1"}
+{"input": "帮我搜一下最新的 AI 政策", "label": "task", "layer": "L1"}
+{"input": "把这段英文翻译成中文", "label": "task", "layer": "L1"}
+{"input": "算一下 128*37 等于多少", "label": "task", "layer": "L1"}
+{"input": "以后我们开会要提前十分钟", "label": "chitchat", "layer": "L1", "note": "用户自己的安排,不是请求助手做事 → 不是 task(已复核:原标注 task 有误)"}
+{"input": "下次记得提醒我交房租", "label": "task", "layer": "L1", "note": "请求动作,不是方法论"}
+{"input": "这个方案要分三步", "label": "clarify", "layer": "L1", "note": "指代不明,说不清要助手做什么 → 不是 task(已复核:原标注 task 有误)"}
+{"input": "我要一个计算器", "label": "task", "layer": "L1", "note": "曾被误判为 teach"}
+{"input": "帮我看下今天的情况呗", "label": "task", "layer": "L1", "note": "'帮我看下'是请求动作 → 不是 chitchat(已复核:原标注 chitchat 有误)"}
+{"input": "顺便看看昨天那个版本号", "label": "task", "layer": "L1"}
+{"input": "那个事你懂的", "label": "clarify", "layer": "L1"}
+{"input": "讲个冷笑话", "label": "chitchat", "layer": "L1", "note": "曾被误判为 weather"}
+{"input": "这个方案太热了", "label": "clarify", "layer": "L1", "note": "对某物的单纯评价,没请求动作且看不出要做什么 -> clarify(已复核:原标注 task 有误)"}
+{"input": "再执行一次刚才那个查询", "label": "retry", "layer": "L1", "note": "曾被误判为 acknowledge"}
+{"input": "以后回答都用中文", "label": "chitchat", "layer": "L1", "note": "说话方式偏好:曾被 L0 误判为 teach"}
+{"input": "以后回复请用要点式", "label": "chitchat", "layer": "L1", "note": "说话方式偏好:曾被 L0 误判为 teach"}
+{"input": "不要用 emoji", "label": "chitchat", "layer": "L1", "note": "雷区偏好,不是任务"}
+{"input": "我习惯每天早上先看日报", "label": "chitchat", "layer": "L1", "note": "习惯陈述"}

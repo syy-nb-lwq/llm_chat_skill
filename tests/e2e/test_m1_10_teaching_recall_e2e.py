@@ -219,8 +219,15 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
     manager = ManagerAgent()
     manager.skill_store = new_store  # 替换默认 store
 
+    # L1 闭集判别 → 判为 task
     llm.queue({
-        "intent": "为用户整理日报",
+        "label": "task",
+        "confidence": 0.9,
+        "reason": "需要按日报方法论生成日报",
+    })
+    # L2 规划 → 选中 DailyReport
+    llm.queue({
+        "plan_detail": "按三块结构生成日报",
         "selected_skill": "DailyReport",
         "is_retry": False,
         "tool_tasks": [],  # 纯方法论技能,无工具
@@ -230,7 +237,7 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
     ctx = Context()
     plan = await manager.plan("帮我整理今天的工作日报", ctx)
 
-    assert plan.intent == "skill", f"期望 SKILL 意图,实际 {plan.intent}"
+    assert plan.intent == "task", f"期望 TASK 意图,实际 {plan.intent}"
     assert plan.selected_skill is not None, "未选中任何技能"
     assert plan.selected_skill.name == "DailyReport"
     assert plan.selected_skill.version == "1.0.0", \

@@ -1,6 +1,7 @@
 """Learning Agent - 流转中枢:执行工具、获取数据"""
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
@@ -124,8 +125,13 @@ class LearningAgent:
         task_id: Optional[str] = None,
         retry: int = 0,
         timeout_s: int = 30,
+        fallback_to: Optional[str] = None,
     ) -> ToolResult:
-        """执行单个工具(支持重试 + 超时)"""
+        """执行单个工具(支持重试 + 超时)。
+
+        结果 meta 始终携带 M0-02 要求的执行字段:
+        attempts(实际尝试次数) / retry_count / timeout_s / fallback_to / latency_ms。
+        """
         tool_info = self.hub.get_tool(tool_type)
         if not tool_info:
             return ToolResult(success=False, error=f"工具不存在: {tool_type}")
@@ -152,11 +158,20 @@ class LearningAgent:
 
         attempts = max(1, retry + 1)
         last_err = "unknown"
+        started = time.perf_counter()
         for attempt in range(1, attempts + 1):
             result = await _run_once()
             if result.success:
-                # 把重试次数写入 meta,供 ExecutionCritic 评估
-                result.meta = {**result.meta, "retry_count": attempt - 1}
+                # 把重试次数/耗时/超时等写入 meta,供 ExecutionCritic 评估
+                result.meta = self._build_meta(
+                    result,
+                    attempts=attempt,
+                    timeout_s=timeout_s,
+                    fallback_to=fallback_to,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    tool=tool_type,
+                    task_id=task_id,
+                )
                 if on_event:
                     await on_event("tool_result", {
                         "task_id": task_id or tool_type,
@@ -169,13 +184,58 @@ class LearningAgent:
             if attempt < attempts:
                 self.logger.warning("Learning", f"{tool_type} 第 {attempt} 次失败: {last_err},重试")
 
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        result = ToolResult(
+            success=False,
+            error=last_err,
+            meta=self._build_meta(
+                ToolResult(success=False),
+                attempts=attempts,
+                timeout_s=timeout_s,
+                fallback_to=fallback_to,
+                latency_ms=elapsed_ms,
+                used_fallback=bool(fallback_to),
+                tool=tool_type,
+                task_id=task_id,
+            ),
+        )
         if on_event:
             await on_event("tool_error", {
                 "task_id": task_id or tool_type,
                 "tool": tool_type,
                 "error": last_err,
             })
-        return ToolResult(success=False, error=last_err, meta={"retry_count": attempts - 1})
+        return result
+
+    @staticmethod
+    def _build_meta(
+        result: ToolResult,
+        *,
+        attempts: int,
+        timeout_s: int,
+        fallback_to: Optional[str],
+        latency_ms: float,
+        used_fallback: Optional[bool] = None,
+        tool: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict:
+        """合并出标准的执行 meta(保留工具自带的字段)。"""
+        meta: Dict = dict(result.meta or {})
+        meta.update({
+            "attempts": attempts,
+            "retry_count": max(0, attempts - 1),
+            "timeout_s": timeout_s,
+            "fallback_to": fallback_to,
+            "latency_ms": round(latency_ms, 3),
+        })
+        if used_fallback is not None:
+            meta["used_fallback"] = used_fallback
+        # 工具名/任务 id 一起带上,调用方不必再从外部映射
+        if tool:
+            meta["tool"] = tool
+        if task_id:
+            meta["task_id"] = task_id
+        return meta
 
     async def execute_dag(
         self,
@@ -261,6 +321,7 @@ class LearningAgent:
                         task_id=task.id,
                         retry=task.retry,
                         timeout_s=task.timeout_s,
+                        fallback_to=task.fallback_to,
                     )
                     running[task_id] = asyncio.create_task(coro)
 

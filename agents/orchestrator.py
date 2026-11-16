@@ -17,10 +17,30 @@ class OrchestratorAgent(BaseAgent):
 
     name = "Orchestrator"
 
-    def system_prompt(self) -> str:
-        return """你是一个专业的回答生成助手。
+    #: 基础人设
+    _BASE_PROMPT = """你是一个专业的回答生成助手。
 根据用户需求和获取的数据,生成完整、有条理的回答。
 若提供了技能方法论,请严格按方法论组织回答;若未提供,则直接基于数据生成回答。"""
+
+    def system_prompt(self, profile_block: str = "") -> str:
+        """人设 + **用户画像**(长期记忆)。
+
+        画像必须进 system prompt 而不是 user prompt:
+        它是"长期约束"(这个人是谁、怎么跟他说话),
+        不是"这一轮的输入"。放在 user 里会跟具体任务混在一起,模型容易忽略。
+
+        Args:
+            profile_block: `SemanticMemoryStore.build_profile_block()` 的产物,
+                为空表示没有画像(不影响原有行为)。
+        """
+        if not profile_block:
+            return self._BASE_PROMPT
+        return (
+            f"{self._BASE_PROMPT}\n\n"
+            f"{profile_block}\n\n"
+            "以上「用户画像」是这个用户长期稳定的偏好与习惯,"
+            "生成回答时必须遵守(与当前任务不冲突时优先满足)。"
+        )
 
     async def orchestrate(
         self,
@@ -28,6 +48,7 @@ class OrchestratorAgent(BaseAgent):
         tool_results: Dict[str, ToolResult],
         selected_skill: Optional[Skill] = None,
         context: Optional[Context] = None,
+        profile_block: str = "",
     ) -> str:
         """整合数据,生成回答(异步)"""
         tool_data = self._format_tool_results(tool_results)
@@ -35,9 +56,11 @@ class OrchestratorAgent(BaseAgent):
         if selected_skill and selected_skill.method:
             return await self._generate_with_methodology(
                 user_input, tool_data, selected_skill.method, selected_skill.steps,
-                ctx_block=ctx_block,
+                ctx_block=ctx_block, profile_block=profile_block,
             )
-        return await self._generate_direct(user_input, tool_data, ctx_block=ctx_block)
+        return await self._generate_direct(
+            user_input, tool_data, ctx_block=ctx_block, profile_block=profile_block
+        )
 
     async def stream(
         self,
@@ -45,6 +68,7 @@ class OrchestratorAgent(BaseAgent):
         tool_results: Dict[str, ToolResult],
         selected_skill: Optional[Skill] = None,
         context: Optional[Context] = None,
+        profile_block: str = "",
     ) -> AsyncIterator[str]:
         """流式输出(逐 token)"""
         tool_data = self._format_tool_results(tool_results)
@@ -57,27 +81,30 @@ class OrchestratorAgent(BaseAgent):
             prompt = self._build_direct_prompt(user_input, tool_data, ctx_block=ctx_block)
 
         async for token in self.llm.stream([
-            {"role": "system", "content": self.system_prompt()},
+            {"role": "system", "content": self.system_prompt(profile_block)},
             {"role": "user", "content": prompt},
         ]):
             yield token
 
     async def _generate_with_methodology(
         self, user_input: str, tool_data: str, method: str, steps: List,
-        ctx_block: str = "",
+        ctx_block: str = "", profile_block: str = "",
     ) -> str:
         prompt = self._build_prompt(user_input, tool_data, method, steps, ctx_block=ctx_block)
         resp = await self.llm.chat_with_retry([
-            {"role": "system", "content": self.system_prompt()},
+            {"role": "system", "content": self.system_prompt(profile_block)},
             {"role": "user", "content": prompt},
         ])
         self.logger.info("Orchestrator", "回答生成完成")
         return resp
 
-    async def _generate_direct(self, user_input: str, tool_data: str, ctx_block: str = "") -> str:
+    async def _generate_direct(
+        self, user_input: str, tool_data: str, ctx_block: str = "",
+        profile_block: str = "",
+    ) -> str:
         prompt = self._build_direct_prompt(user_input, tool_data, ctx_block=ctx_block)
         resp = await self.llm.chat_with_retry([
-            {"role": "system", "content": self.system_prompt()},
+            {"role": "system", "content": self.system_prompt(profile_block)},
             {"role": "user", "content": prompt},
         ])
         self.logger.info("Orchestrator", "回答生成完成")
@@ -130,11 +157,17 @@ class OrchestratorAgent(BaseAgent):
             m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
         ]
         if len(recent) <= 1:
-            return ""
+            # 没有近期对话,但可能有早期内容的滚动摘要
+            return context.summary_block()
         prior = recent[:-1]  # 去掉本轮 user_input
+        lines = []
+        summary_block = context.summary_block()
+        if summary_block:
+            lines.append(summary_block)
+            lines.append("")
         if not prior:
-            return ""
-        lines = ["【对话历史】"]
+            return "\n".join(lines)
+        lines.append("【对话历史】")
         for m in prior[-6:]:
             role = "用户" if m["role"] == "user" else "助手"
             content = (m["content"] or "").strip()

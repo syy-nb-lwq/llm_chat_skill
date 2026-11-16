@@ -20,9 +20,19 @@ class LLMClient:
 
     @property
     def provider(self) -> BaseProvider:
-        """获取当前 Provider"""
+        """获取当前 Provider
+
+        **懒初始化**:如果一个 Provider 都没注册,就地按配置注册一遍。
+        以前注册逻辑只写在 FastAPI 的 lifespan 里,于是独立入口
+        (nightly 评估 / CLI / Streamlit)全都在第一次 LLM 调用时炸掉。
+        放到这里之后,任何入口都不可能"忘记"注册。
+        """
         if self._provider is None:
             manager = get_provider_manager()
+            if not manager.list_providers():
+                from infra.providers.registry import init_providers_from_config
+
+                init_providers_from_config()
             name = self._provider_name or config.default_provider
             self._provider = manager.get(name)
         return self._provider

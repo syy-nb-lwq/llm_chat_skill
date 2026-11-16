@@ -3,6 +3,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backend.session import sessions
 from backend.websocket_handler import endpoint, register_handlers
+from infra.auth import require_auth
 from infra.config import ConfigError, config
 from infra.logger import get_logger
 
@@ -68,18 +70,9 @@ async def _startup():
     sessions.ttl_s = int(config.session_ttl_s)
     await register_handlers()
 
-    from infra.providers.registry import init_providers
+    from infra.providers.registry import init_providers_from_config
 
-    init_providers(
-        openai_api_key=config.openai_api_key,
-        openai_base_url=config.openai_base_url,
-        openai_model=config.openai_model,
-        anthropic_api_key=config.anthropic_api_key,
-        anthropic_model=config.anthropic_model,
-        local_base_url=config.local_base_url,
-        local_model=config.local_model,
-        default_provider=config.default_provider,
-    )
+    init_providers_from_config()
 
     app.state.gc_task = asyncio.create_task(_gc_loop())
     app.state.reflect_loop = None
@@ -110,6 +103,55 @@ async def _startup():
             logger.info("startup", "self reflection loop started")
         except Exception as exc:
             logger.warning("startup", f"self reflection loop start failed: {exc}")
+
+    _init_long_term_memory()
+
+
+def _init_long_term_memory() -> None:
+    """初始化长期记忆(用户画像)的 embedding 并绑定到存储。
+
+    不接线的话 `SemanticMemoryStore.embedding_service` 恒为 None,
+    向量检索整条路径是死的(docs/13 §1.2 R3)。
+
+    **但"接线"不等于"该用"**:`EMBEDDING_PROVIDER` 留空时只做 FTS 检索,
+    这样反而比接一个随机向量服务准确 —— 详见 `infra/embedding.py` 里
+    `is_synthetic` 的说明。失败一律降级为 FTS-only。
+    """
+    if not config.semantic_memory_enabled:
+        logger.info("startup", "semantic memory disabled, skip embedding init")
+        return
+
+    provider = (config.embedding_provider or "").strip()
+    if not provider:
+        logger.info(
+            "startup",
+            "未配置 EMBEDDING_PROVIDER:长期记忆只用 FTS + 常驻注入"
+            "(要语义检索请配 openai/local)",
+        )
+        return
+
+    try:
+        from core.semantic_memory import get_semantic_memory
+        from infra.embedding import init_embedding_service
+
+        api_key = config.embedding_api_key or config.openai_api_key
+        base_url = config.embedding_base_url or config.openai_base_url
+        service = init_embedding_service(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=config.embedding_model,
+            dimension=config.embedding_dimension,
+        )
+        store = get_semantic_memory()
+        store.min_similarity = float(config.embedding_min_similarity)
+        enabled = store.set_embedding_service(service)
+        logger.info(
+            "startup",
+            f"embedding 已初始化: provider={provider}, 语义通道={'开' if enabled else '关(降级 FTS)'}",
+        )
+    except Exception as exc:
+        logger.warning("startup", f"embedding 初始化失败(降级 FTS-only): {exc}")
 
 
 @app.on_event("shutdown")
@@ -189,7 +231,193 @@ async def get_features():
     }
 
 
+# ===== 用户(假用户服务) =====
+
+
+@app.get("/api/users")
+async def list_users():
+    """列出用户(运维/隔离测试用)。"""
+    from core.user_service import get_user_service
+
+    users = get_user_service().list_users()
+    return {
+        "users": [
+            {
+                "id": u.id,
+                "tenant_id": u.tenant_id,
+                "display_name": u.display_name,
+                "created_at": u.created_at,
+                "last_seen_at": u.last_seen_at,
+            }
+            for u in users
+        ]
+    }
+
+
+@app.post("/api/users")
+async def create_user(payload: Optional[dict] = None):
+    """新建用户并签发用户令牌。
+
+    没有登录体系时,这个接口就是"分发 userid"的入口:
+    拿到的 user_token 交给前端存在 localStorage,之后所有连接都认这个用户。
+    """
+    from core.user_service import get_user_service
+
+    payload = payload or {}
+    service = get_user_service()
+    user = service.create(
+        display_name=payload.get("display_name", ""),
+        tenant_id=payload.get("tenant_id", "default"),
+    )
+    return {
+        "user_id": user.id,
+        "tenant_id": user.tenant_id,
+        "display_name": user.display_name,
+        "user_token": service.issue_token(user.id, user.tenant_id),
+    }
+
+
+@app.delete("/api/users/{user_id}")
+@require_auth
+async def delete_user(user_id: str):
+    """删除用户档案(管理操作)。"""
+    from core.user_service import get_user_service
+
+    ok = get_user_service().delete(user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"user not found: {user_id}")
+    return {"deleted": user_id}
+
+
+# ===== 会话内容(短期记忆) =====
+
+
+@app.get("/api/sessions")
+@require_auth
+async def list_sessions(user_id: str = ""):
+    """列出会话(可选按 user_id 过滤)。"""
+    from core.session_memory import get_session_memory_store
+
+    rows = get_session_memory_store().list_sessions(user_id or None)
+    return {
+        "sessions": [
+            {
+                "session_id": r["session_id"],
+                "user_id": r["user_id"],
+                "message_count": r["message_count"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/sessions/{session_id}/messages")
+@require_auth
+async def get_session_messages(session_id: str, limit: int = 100, user_id: str = ""):
+    """取某个会话的消息(短期记忆内容,全量保留)。
+
+    ``user_id`` 可选:传了就只返回该用户的,用于隔离校验。
+    """
+    from core.session_memory import get_session_memory_store
+
+    store = get_session_memory_store()
+    if not store.session_exists(session_id):
+        raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+    msgs = store.get_messages(session_id, limit=limit or 0, user_id=user_id or None)
+    return {
+        "session_id": session_id,
+        "messages": [m.to_dict() for m in msgs],
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+@require_auth
+async def delete_session(session_id: str):
+    """删除会话及其全部内容(用户主动要求清除时使用)。"""
+    from core.session_memory import get_session_memory_store
+
+    ok = get_session_memory_store().delete_session(session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
+    return {"deleted": session_id}
+
+
+# ===== 长期记忆(用户画像) =====
+
+
+@app.get("/api/memories")
+@require_auth
+async def list_memories(user_id: str = "", limit: int = 50):
+    """「你记住了我什么」:列出某用户的画像条目。
+
+    `user_id` 必填 —— 长期记忆是用户数据,不给默认值就查全部
+    等于把别人的画像摊开(docs/13 §2.9)。
+    """
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+
+    from core.memory_db import PROFILE_MEMORY_TYPES
+    from core.semantic_memory import get_semantic_memory
+
+    entries = get_semantic_memory().get_recent(
+        user_id=user_id,
+        types=list(PROFILE_MEMORY_TYPES),
+        limit=limit,
+    )
+    return {
+        "user_id": user_id,
+        "count": len(entries),
+        "memories": [
+            {
+                "id": e.id,
+                "type": e.type,
+                "content": e.content,
+                "confidence": e.confidence,
+                "importance": e.importance,
+                "scope": e.scope,
+                "status": e.status,
+                "source_session_id": e.source_session_id,
+                "source_turn_id": e.source_turn_id,
+                "created_at": e.created_at,
+            }
+            for e in entries
+        ],
+    }
+
+
+@app.delete("/api/memories/{memory_id}")
+@require_auth
+async def forget_memory(memory_id: str):
+    """「忘掉这件事」:软删除 + 同步清索引(删完不再被召回)。"""
+    from core.semantic_memory import get_semantic_memory
+
+    store = get_semantic_memory()
+    entry = store.memory_db.get(memory_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"memory not found: {memory_id}")
+    ok = store.forget(memory_id)
+    if not ok:
+        raise HTTPException(status_code=500, detail="forget failed")
+    return {"forgotten": memory_id, "type": entry.type}
+
+
+@app.get("/api/traces")
+async def list_traces(limit: int = 50):
+    """最近几轮的分阶段耗时(产品化观测接口)。
+
+    没有它就只能靠猜"为什么慢";有了它就能定位到
+    L1 多打了一次模型 / 工具超时 / 首 token 迟迟不来。
+    """
+    from core.trace import get_trace_recorder
+
+    rows = get_trace_recorder().read(limit=max(1, min(limit, 500)))
+    return {"count": len(rows), "traces": rows}
+
+
 @app.post("/api/features/self-evolution")
+@require_auth
 async def set_self_evolution(payload: FeatureFlagUpdate):
     enabled = config.set_feature_flag(
         "self_evolution_enabled",
@@ -208,7 +436,18 @@ async def list_skills():
     from skills.manager import get_skill_store
 
     store = get_skill_store()
-    skills = store.list_all()
+    # 管理界面要能看到被降级的技能(带状态),所以这里不过滤
+    skills = store.list_all_skills(include_demoted=True)
+    qualities = {}
+    try:
+        from core.skill_quality import get_skill_quality_store
+
+        qualities = {
+            name: q.to_dict() for name, q in get_skill_quality_store().all().items()
+        }
+    except Exception as exc:
+        logger.warning("skill_quality", f"读取质量账本失败: {exc}")
+
     return {
         "skills": [
             {
@@ -224,13 +463,28 @@ async def list_skills():
                 "created_at": getattr(skill, "created_at", None),
                 "updated_at": getattr(skill, "updated_at", None),
                 "steps": [step.to_dict() for step in skill.steps],
+                "quality": qualities.get(skill.name),
             }
             for skill in skills
         ]
     }
 
 
+@app.get("/api/skills/quality")
+async def list_skill_quality():
+    """技能质量台账 —— 每个技能的通过率与降级状态(docs/14 §2.4)。"""
+    from core.skill_quality import get_skill_quality_store
+
+    store = get_skill_quality_store()
+    qualities = store.all()
+    return {
+        "skills": {name: q.to_dict() for name, q in qualities.items()},
+        "demoted": sorted(store.demoted_skills()),
+    }
+
+
 @app.delete("/api/skills/{name}")
+@require_auth
 async def delete_skill(name: str):
     from skills.manager import get_skill_store
 
@@ -242,6 +496,7 @@ async def delete_skill(name: str):
 
 
 @app.delete("/api/skills/{name}/{version}")
+@require_auth
 async def delete_skill_version(name: str, version: str):
     from skills.manager import get_skill_store
 
@@ -253,6 +508,7 @@ async def delete_skill_version(name: str, version: str):
 
 
 @app.post("/api/skills/reload")
+@require_auth
 async def reload_skills():
     from skills.manager import get_skill_store
 
@@ -285,6 +541,7 @@ async def list_teachings(user_id: str = "default", session_id: str = "default"):
 
 
 @app.post("/api/teachings/cancel")
+@require_auth
 async def cancel_teaching(user_id: str = "default", session_id: str = "default"):
     from agents.skill_trainer import SkillTrainer
     t = SkillTrainer()
@@ -293,6 +550,7 @@ async def cancel_teaching(user_id: str = "default", session_id: str = "default")
 
 
 @app.post("/api/teachings/choose")
+@require_auth
 async def choose_teaching_decision(
     choice: str,
     user_id: str = "default",
@@ -317,6 +575,7 @@ async def choose_teaching_decision(
 
 
 @app.post("/api/teachings/confirm")
+@require_auth
 async def confirm_teaching(user_id: str = "default", session_id: str = "default"):
     """用户在草稿 UI 上点确认发布时调用。"""
     from agents.skill_trainer import SkillTrainer
@@ -365,6 +624,10 @@ async def list_patches():
                 "suggestion": patch.suggestion,
                 "confidence": patch.confidence,
                 "status": patch.status,
+                # M3-05:风险等级与校验结果
+                "risk_level": patch.risk_level,
+                "validation": patch.validation,
+                "blocked_reason": patch.blocked_reason,
             }
             for patch in patches
         ]
@@ -372,20 +635,22 @@ async def list_patches():
 
 
 @app.post("/api/patches/{patch_id}/approve")
+@require_auth
 async def approve_patch(patch_id: str):
+    """人工审批补丁(M3-04:审批前跑新旧样例校验,不再盲目写盘)。"""
     from core.memory import get_memory_store
+    from core.result_validator import ResultValidator
     from skills.manager import get_skill_store
+    from skills.validator import new_issues, split_issues, validate_skill
+    from tools.hub import get_tool_hub
 
     if not config.self_evolution_enabled:
         raise HTTPException(status_code=403, detail="self evolution disabled")
 
     store = get_memory_store()
-    if not store.approve_patch(patch_id, "human"):
-        raise HTTPException(status_code=404, detail=f"patch not found: {patch_id}")
-
     patch_file = store.patches_dir / f"{patch_id}.json"
     if not patch_file.exists():
-        return {"approved": patch_id, "applied": False, "files": []}
+        raise HTTPException(status_code=404, detail=f"patch not found: {patch_id}")
 
     data = json.loads(patch_file.read_text(encoding="utf-8"))
     suggestion = data.get("suggestion", {}) or {}
@@ -396,18 +661,92 @@ async def approve_patch(patch_id: str):
         if field in suggestion:
             updates[field] = suggestion[field]
 
+    skill_store = get_skill_store()
+
+    # ---- 发布前校验(M3-03/M4)----
+    validation: Dict = {}
+    risk_level = "unknown"
+    if target_skill and updates:
+        candidate = skill_store.preview_update(target_skill, updates)
+        if candidate is None:
+            raise HTTPException(
+                status_code=400, detail=f"找不到目标技能: {target_skill}"
+            )
+        try:
+            tool_names = list(get_tool_hub().names() or [])
+        except Exception:
+            tool_names = []
+
+        # 基线(当前线上版本)已有的问题不阻断补丁,只拦新引入的问题
+        baseline = skill_store.get_by_name(target_skill)
+        baseline_errors, _ = (
+            split_issues(validate_skill(baseline, tool_names)) if baseline else ([], [])
+        )
+        candidate_errors, warnings = split_issues(validate_skill(candidate, tool_names))
+        errors = new_issues(baseline_errors, candidate_errors)
+
+        report = await ResultValidator().validate(
+            candidate, static_issues=errors, warnings=warnings
+        )
+        # 记进技能质量账本 —— 验收样例的历史通过率(docs/14 §2.4)
+        try:
+            from core.skill_quality import get_skill_quality_store
+
+            get_skill_quality_store().record_sample_run(
+                target_skill,
+                version=candidate.version,
+                total=report.total,
+                passed=report.passed,
+                failed_cases=[c.name for c in report.cases if not c.passed],
+            )
+        except Exception as exc:  # 质量记账失败不该阻断发布
+            logger.warning("skill_quality", f"记录样例结果失败: {exc}")
+        validation = report.to_dict()
+        risk_level = report.risk_level
+        # 新引入的静态错误 → 硬拦;回归样例失败 → 仅提示(人工已明确批准)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "静态校验未通过,拒绝发布",
+                    "issues": errors,
+                    "validation": validation,
+                },
+            )
+
+    # 记录审批动作(即便落盘失败也要留痕)
+    if not store.approve_patch(patch_id, "human"):
+        raise HTTPException(status_code=404, detail=f"patch not found: {patch_id}")
+
     applied_files = []
     if target_skill and updates:
-        applied_files = get_skill_store().update_skill(target_skill, updates)
+        applied_files = skill_store.update_skill(target_skill, updates)
+
+    if applied_files:
+        store.write_audit(
+            "manual_publish",
+            {
+                "patch_id": patch_id,
+                "target_skill": target_skill,
+                "diagnosis": data.get("diagnosis", ""),
+                "updates": updates,
+                "files": applied_files,
+                "validation": validation,
+                "reviewer": "human",
+            },
+        )
 
     return {
         "approved": patch_id,
         "applied": bool(applied_files),
         "files": applied_files,
+        "validation": validation,
+        "risk_level": risk_level,
     }
 
 
 @app.post("/api/patches/{patch_id}/reject")
+@require_auth
 async def reject_patch(patch_id: str):
     from core.memory import get_memory_store
 
@@ -453,6 +792,7 @@ async def list_reflections():
 
 
 @app.post("/api/reflections/request")
+@require_auth
 async def request_reflection():
     from core.reflect import SelfReflectLoop
 

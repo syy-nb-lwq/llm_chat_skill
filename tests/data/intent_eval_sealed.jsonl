@@ -1,0 +1,20 @@
+{"input": "讲个绕口令", "label": "chitchat", "layer": "L1", "note": "不需要工具的闲聊型请求"}
+{"input": "帮我查下明天上海的航班", "label": "task", "layer": "L1", "note": "查询"}
+{"input": "以后总结都按结论先行的顺序写", "label": "teach", "layer": "L1", "note": "方法论载体(结论先行)+以后按"}
+{"input": "把技能切回上个版本", "label": "manage", "layer": "L1", "note": "专属动词"}
+{"input": "再跑一遍刚才那个", "label": "retry", "layer": "L1", "note": "重做上一轮"}
+{"input": "那个字怎么写来着", "label": "clarify", "layer": "L1", "note": "完全猜不出具体对象"}
+{"input": "算下这块地多少平米", "label": "task", "layer": "L1", "note": "计算"}
+{"input": "教我怎么用 git rebase", "label": "task", "layer": "L1", "note": "助手教用户"}
+{"input": "教你一个我常用的排查套路", "label": "teach", "layer": "L1", "note": "教你=用户教助手"}
+{"input": "回复别用表格", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "看看上周的销售数据", "label": "task", "layer": "L1", "note": "泛用动词+没说技能"}
+{"input": "技能一共有几个", "label": "manage", "layer": "L1", "note": "泛用动词+明说技能"}
+{"input": "以后遇到脏数据先备份再清洗", "label": "teach", "layer": "L1", "note": "方法论+约定"}
+{"input": "谢谢你", "label": "chitchat", "layer": "L1", "note": "感谢"}
+{"input": "帮我翻译这段话成德文", "label": "task", "layer": "L1", "note": "翻译"}
+{"input": "搜一下最新的光伏补贴政策", "label": "task", "layer": "L1", "note": "搜索"}
+{"input": "这个方案再优化一版", "label": "task", "layer": "L1", "note": "请求动作"}
+{"input": "以后别用反问句结尾", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "想起个名字", "label": "clarify", "layer": "L1", "note": "缺关键信息且无方向"}
+{"input": "把那两个技能都停掉", "label": "manage", "layer": "L1", "note": "专属动词"}

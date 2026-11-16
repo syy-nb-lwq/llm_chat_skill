@@ -37,6 +37,8 @@ class Config(BaseSettings):
     vector_path: Path = Field("vector_store")
     max_iterations: int = Field(10, ge=1, le=100)
     session_ttl_s: int = Field(3600, ge=60)
+    # 每轮分阶段耗时落盘(memory/audit/traces.jsonl),用于定位"为什么慢"
+    trace_enabled: bool = Field(True, description="Record per-turn stage latency")
 
     # Logging
     log_level: str = Field("INFO")
@@ -48,15 +50,24 @@ class Config(BaseSettings):
     tool_cache_enabled: bool = Field(False)
     self_evolution_enabled: bool = Field(False)
     multi_provider_enabled: bool = Field(False, description="Enable multiple providers")
-    semantic_memory_enabled: bool = Field(False, description="Enable semantic memory")
+    # 长期记忆(用户画像):默认开启 —— 记忆分层方案的 P0 接线
+    semantic_memory_enabled: bool = Field(True, description="Enable semantic memory")
     soul_enabled: bool = Field(False, description="Enable soul system")
 
     # Embeddings
-    embedding_provider: str = Field("mock", description="Embedding provider")
+    # 留空 = **不启用向量检索**(只用 FTS + 画像常驻注入)。
+    # 只有配了真实 provider(openai / local)才打开语义通道;
+    # "mock" 是随机向量,拿它做语义检索比不检索更差,详见 infra/embedding.py。
+    embedding_provider: str = Field(
+        "", description="Embedding provider: openai|local (空=不启用向量检索)"
+    )
     embedding_api_key: str = Field("", description="Embedding API key")
     embedding_base_url: str = Field("https://api.openai.com/v1")
     embedding_model: str = Field("text-embedding-3-small")
     embedding_dimension: int = Field(1536)
+    embedding_min_similarity: float = Field(
+        0.35, description="向量通道的最小余弦相似度(低于此值不进入融合)"
+    )
 
     # Soul / MCP / intent
     soul_path: Path = Field("soul/SOUL.md")
@@ -65,6 +76,15 @@ class Config(BaseSettings):
     intent_mode: str = Field("rule_first", description="Intent detection mode")
     intent_rule_threshold: int = Field(5, description="Rule threshold")
     intent_llm_fallback: bool = Field(True, description="Fallback to LLM")
+    # L1 闭集判别层:默认复用主模型,intent_model 留空即复用
+    intent_l1_enabled: bool = Field(True, description="Enable L1 closed-set intent classifier")
+    intent_l1_threshold: float = Field(0.75, description="Confidence threshold to decide at L1")
+    intent_model: str = Field("", description="Optional model override for L1 (empty = main model)")
+
+    # 认证(C-01):留空表示不启用管理接口鉴权(单机个人环境默认行为)
+    owner_token: str = Field("", description="Owner token for admin APIs")
+    # 会话令牌签名密钥:留空则使用进程级随机密钥(重启后旧令牌失效)
+    session_secret: str = Field("", description="Session token signing secret")
 
     def validate(self) -> None:
         """Validate startup configuration."""

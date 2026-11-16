@@ -6,7 +6,18 @@ import httpx
 
 class BaseEmbeddingService(ABC):
     """嵌入服务抽象基类"""
-    
+
+    #: 提供方标识
+    provider_name: str = ""
+
+    #: **是否为合成向量**(不是语义向量)。
+    #:
+    #: `MockEmbedding` 返回的是按文本哈希播种的随机向量,任意两句的
+    #: 余弦相似度稳定在 0.81 左右 —— 比真实模型的相关句还高。
+    #: 这种向量拿去做语义检索,结果**比不检索更差**(它会盖掉全文检索的真实命中)。
+    #: 所以带这个标记的向量服务不允许自动启用语义通道。
+    is_synthetic: bool = False
+
     @property
     @abstractmethod
     def dimension(self) -> int:
@@ -26,6 +37,8 @@ class BaseEmbeddingService(ABC):
 
 class OpenAIEmbedding(BaseEmbeddingService):
     """OpenAI Embedding 服务"""
+
+    provider_name = "openai"
     
     def __init__(
         self,
@@ -77,6 +90,8 @@ class OpenAIEmbedding(BaseEmbeddingService):
 
 class LocalEmbedding(BaseEmbeddingService):
     """本地嵌入服务 (如 Ollama with nomic-embed-text)"""
+
+    provider_name = "local"
     
     def __init__(
         self,
@@ -115,8 +130,16 @@ class LocalEmbedding(BaseEmbeddingService):
 
 
 class MockEmbedding(BaseEmbeddingService):
-    """Mock 嵌入服务(用于测试)"""
-    
+    """Mock 嵌入服务(仅用于测试 / 离线兜底)
+
+    **不能用于语义检索**:它返回的是按文本哈希播种的随机向量,
+    任意两句的余弦相似度约 0.81,与语义无关。带 `is_synthetic=True`,
+    `SemanticMemoryStore` 会因此拒绝启用向量通道。
+    """
+
+    provider_name = "mock"
+    is_synthetic = True
+
     def __init__(self, dimension: int = 1536):
         self._dimension = dimension
     

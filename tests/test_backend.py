@@ -1,4 +1,5 @@
 """FastAPI integration tests."""
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -196,9 +197,18 @@ def test_approve_patch_persists_skill_method(client, tmp_path, monkeypatch):
         assert response.status_code == 200
         payload = response.json()
         assert payload["applied"] is True
+
+        # M3-04:审批后不原地改 YAML —— 生成新版本并切 active,旧版本保留
+        new_path = skills_dir / "demo@1.0.1.yaml"
+        assert new_path.exists()
+        assert "new method" in new_path.read_text(encoding="utf-8")
+
+        # 旧版本文件仍在,且内容没有被覆盖
         assert skill_path.exists()
-        text = skill_path.read_text(encoding="utf-8")
-        assert "new method" in text
+        assert "old method" in skill_path.read_text(encoding="utf-8")
+
+        # active 指针已切到新版本
+        assert mgr._store.get_by_name("demo").version == "1.0.1"
     finally:
         mgr._store = original_store
         memory_mod._memory_store = original_memory_store
@@ -225,6 +235,8 @@ def test_websocket_init_and_ping_via_client():
     会产生死锁(subscribe 需 await 服务端 ack,而 TestClient 的 ws
     是同步接口)。改为直接构造 Subscription 对象喂给 dispatcher,
     验证 init/ping/reset 路径都返回正确事件。
+
+    C-01:init 时由服务端签发身份,后续请求必须带令牌。
     """
     import asyncio
     import time
@@ -232,7 +244,7 @@ def test_websocket_init_and_ping_via_client():
     from backend.websocket_handler import dispatcher, push_event
     from backend.session import sessions
 
-    client_id = f"test-cid-{int(time.time()*1000)}"
+    conn_id = f"test-cid-{int(time.time()*1000)}"
 
     async def _drive():
         # 1) 替换 push_event 为本地 mock
@@ -245,31 +257,45 @@ def test_websocket_init_and_ping_via_client():
             captured.append({"client_id": cid, "event": event, "payload": payload})
 
         wsh.push_event = fake_push
+        issued_client_id = None
         try:
             # 2) 模拟订阅: 构造 Subscription
             sub = MagicMock()
-            sub.topic = f"init/{client_id}"
+            sub.topic = f"init/{conn_id}"
 
-            await dispatcher(sub, {"client_id": client_id})
+            await dispatcher(sub, {"client_id": conn_id})
             # init 应推送 connected
+            connected = [e for e in captured if e["event"] == "connected"]
+            assert connected, captured
+            assert connected[0]["client_id"] == conn_id
+
+            # C-01:身份由服务端签发,不是客户端自带的 conn_id
+            payload = connected[0]["payload"]
+            issued_client_id = payload["client_id"]
+            assert issued_client_id != conn_id
+            assert payload["user_id"]
+            assert payload["session_id"]
+            assert payload["token"]
+
+            # 3) ping(心跳不要求令牌)
+            sub.topic = f"ping/{conn_id}"
+            await dispatcher(sub, {})
             assert any(
-                e["event"] == "connected" and e["client_id"] == client_id
+                e["event"] == "pong" and e["client_id"] == conn_id
                 for e in captured
             ), captured
 
-            # 3) ping
-            sub.topic = f"ping/{client_id}"
+            # 4) reset —— 必须带令牌
+            sub.topic = f"reset/{conn_id}"
             await dispatcher(sub, {})
             assert any(
-                e["event"] == "pong" and e["client_id"] == client_id
+                e["event"] == "error" and "令牌无效" in e["payload"].get("message", "")
                 for e in captured
             ), captured
 
-            # 4) reset
-            sub.topic = f"reset/{client_id}"
-            await dispatcher(sub, {})
+            await dispatcher(sub, {"token": payload["token"]})
             assert any(
-                e["event"] == "reset_ack" and e["client_id"] == client_id
+                e["event"] == "reset_ack" and e["client_id"] == conn_id
                 for e in captured
             ), captured
 
@@ -297,6 +323,7 @@ def test_websocket_init_and_ping_via_client():
 
             import infra.llm as _l_mod
             _l_mod._llm_client = None
+            llm_client_orig = _l_mod.get_llm_client
             _l_mod.get_llm_client = lambda: StubLLM()
             gab_g_orig = gab_g
             import core.agent_base as cab
@@ -313,19 +340,61 @@ def test_websocket_init_and_ping_via_client():
 
             Agent.handle = stub_handle
             try:
-                sub.topic = f"chat/{client_id}"
+                # 无令牌 → 拒绝
+                captured.clear()
+                sub.topic = f"chat/{conn_id}"
                 await dispatcher(sub, {"content": "hello"})
-                # 任何 message_final 事件被推送给该 client
                 assert any(
-                    e["client_id"] == client_id
+                    e["event"] == "error" and "令牌无效" in e["payload"].get("message", "")
+                    for e in captured
+                ), captured
+
+                # 伪造令牌 → 拒绝
+                captured.clear()
+                await dispatcher(sub, {"content": "hello", "token": "forged.token"})
+                assert any(
+                    e["event"] == "error" and "令牌无效" in e["payload"].get("message", "")
+                    for e in captured
+                ), captured
+
+                # 正确令牌 → 放行
+                captured.clear()
+                await dispatcher(sub, {"content": "hello", "token": payload["token"]})
+                assert any(
+                    e["event"] == "message_final"
                     for e in captured
                 ), captured
             finally:
                 Agent.handle = original_handle
                 cab.get_llm_client = gab_g_orig
+                # 这两处必须还原 —— 否则 `infra.llm.get_llm_client` 会**永久**变成
+                # 上面那个 stub,后面所有测试拿到的都是假 LLM。
+                # 症状很隐蔽:测试全绿,但真 LLM 通道其实从没被执行过。
+                _l_mod.get_llm_client = llm_client_orig
+                _l_mod._llm_client = None
         finally:
             wsh.push_event = original_push
-            # 清理 session
-            await sessions.destroy(client_id)
+            # 清理 session(用服务端签发的 client_id)
+            if issued_client_id:
+                await sessions.destroy(issued_client_id)
 
     asyncio.run(_drive())
+
+
+@pytest.mark.asyncio
+async def test_push_event_times_out_instead_of_hanging(monkeypatch):
+    """客户端不回 ACK 时,推送要有超时上限,不能把这一轮永久卡死。
+
+    fastapi-websocket-rpc 的 publish() 会等客户端回 ACK,
+    而库默认**没有超时** —— 不兜底的话,客户端一挂,整轮事件投递就卡住。
+    """
+    from backend import websocket_handler as wsh
+
+    async def hanging_publish(*args, **kwargs):
+        await asyncio.sleep(3600)  # 永远不返回
+
+    monkeypatch.setattr(wsh.endpoint, "publish", hanging_publish)
+    monkeypatch.setattr(wsh, "PUSH_TIMEOUT", 0.05)
+
+    # 不抛异常就算过:超时后放弃这条事件,流程继续
+    await asyncio.wait_for(wsh.push_event("cid", "thinking", {"stage": "x"}), 2)

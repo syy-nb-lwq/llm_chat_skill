@@ -5,6 +5,30 @@ from infra.providers.anthropic import AnthropicProvider
 from infra.providers.local import LocalProvider
 
 
+def init_providers_from_config() -> None:
+    """按当前配置注册所有 Provider。
+
+    **为什么要有这个函数**:Provider 注册以前只写在 FastAPI 的 lifespan 里,
+    于是所有**独立入口**(nightly 评估脚本、CLI、Streamlit)都会在第一次
+    LLM 调用时炸掉:`Provider 'openai' 未注册`。
+    那条 `--live` 通道因为需要真实 key 从来没跑过,所以这个坑一直没人踩到。
+
+    统一从配置初始化后,入口只要调一次(或干脆依赖 `LLMClient` 的懒初始化)。
+    """
+    from infra.config import config
+
+    init_providers(
+        openai_api_key=config.openai_api_key,
+        openai_base_url=config.openai_base_url,
+        openai_model=config.openai_model,
+        anthropic_api_key=config.anthropic_api_key,
+        anthropic_model=config.anthropic_model,
+        local_base_url=config.local_base_url,
+        local_model=config.local_model,
+        default_provider=config.default_provider,
+    )
+
+
 def init_providers(
     openai_api_key: str = "",
     openai_base_url: str = "https://api.openai.com/v1",

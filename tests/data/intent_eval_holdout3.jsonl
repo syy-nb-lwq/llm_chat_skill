@@ -1,0 +1,15 @@
+{"input": "以后说话别那么官方", "label": "chitchat", "layer": "L1", "note": "语气偏好"}
+{"input": "回复里不用加问候语", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "以后别再给我讲段子了", "label": "chitchat", "layer": "L1", "note": "闲聊偏好"}
+{"input": "教我怎么排查这个报错", "label": "task", "layer": "L1", "note": "助手教用户(没有方法论载体) -> task(已复核:原标注 teach 有误)"}
+{"input": "教我看懂这段正则", "label": "task", "layer": "L1", "note": "助手教用户 -> task"}
+{"input": "把技能版本切到 2.0.0", "label": "manage", "layer": "L1", "note": "专属动词+技能"}
+{"input": "删掉那个技能", "label": "manage", "layer": "L1", "note": "专属动词"}
+{"input": "技能列表给我看看", "label": "manage", "layer": "L1", "note": "泛用动词+明说技能"}
+{"input": "看看昨天的发布记录", "label": "task", "layer": "L1", "note": "泛用动词+没说技能"}
+{"input": "算一下 128 乘以 37", "label": "task", "layer": "L1", "note": "计算"}
+{"input": "翻译成日语", "label": "task", "layer": "L1", "note": "翻译"}
+{"input": "那玩意儿", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "上次那个东西吧", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "搜一下最新的芯片新闻", "label": "task", "layer": "L1", "note": "搜索"}
+{"input": "记住:以后排查先看日志再重启", "label": "teach", "layer": "L1", "note": "方法论+记住"}

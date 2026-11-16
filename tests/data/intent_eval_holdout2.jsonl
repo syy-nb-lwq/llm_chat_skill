@@ -1,0 +1,15 @@
+{"input": "以后写周报都按四段式", "label": "teach", "layer": "L1", "note": "方法论载体+要求记住"}
+{"input": "记下来,以后排查先看日志", "label": "teach", "layer": "L1", "note": "方法论载体+要求记住"}
+{"input": "教我怎么看 K线图", "label": "task", "layer": "L1", "note": "助手教用户 -> task"}
+{"input": "教我一套排查内存泄漏的方法", "label": "teach", "layer": "L1", "note": "用户教助手方法论"}
+{"input": "回答里别写那么多敬语", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "以后别再给我推荐付费课程了", "label": "chitchat", "layer": "L1", "note": "雷区偏好"}
+{"input": "帮我翻一下上周的工单", "label": "task", "layer": "L1", "note": "'帮我+动词',对象含糊仍 task"}
+{"input": "顺道看看这个月的账单", "label": "task", "layer": "L1", "note": "对象含糊仍 task"}
+{"input": "把技能停用一下", "label": "manage", "layer": "L1", "note": "管理动词+技能对象"}
+{"input": "技能有没有最新的版本", "label": "manage", "layer": "L1", "note": "管理动词+技能对象"}
+{"input": "就那样吧", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "嗯就那样", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "算一下 365 除以 7", "label": "task", "layer": "L1", "note": "计算"}
+{"input": "搜下最新的 Rust 版本", "label": "task", "layer": "L1", "note": "搜索"}
+{"input": "把这段 Java 翻译成 Go", "label": "task", "layer": "L1", "note": "翻译"}

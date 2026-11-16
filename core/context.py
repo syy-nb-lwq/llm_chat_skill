@@ -1,7 +1,7 @@
 """上下文管理"""
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -12,30 +12,47 @@ class Message:
     tool_call: Optional[Dict] = None
     tool_tasks: Optional[List[Dict]] = None  # 存储本次执行的 tool_tasks
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    seq: int = 0  # 会话内绝对序号(落库后由 sink 回填);0 = 未落库
 
 
 @dataclass
 class Context:
-    """对话上下文(多轮对话记忆)"""
+    """对话上下文(多轮对话记忆)
+
+    - ``sink``: 持久化回调。设置后,``add_message`` 会把每条消息交给它落库
+      (短期记忆)。恢复历史时**不会**走 sink,避免重复写入。
+    - ``summary``: 会话早期内容的滚动摘要(由 SessionMemoryStore 维护)。
+      原文仍在库里,这里只是给 LLM 用的压缩视图。
+    """
 
     messages: List[Message] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    sink: Optional[Callable[[Message], None]] = None
+    summary: str = ""
 
     # ----- 写入 -----
     def add_message(self, role: str, content: str, tool_call: Optional[Dict] = None):
-        self.messages.append(Message(role=role, content=content, tool_call=tool_call))
+        msg = Message(role=role, content=content, tool_call=tool_call)
+        self.messages.append(msg)
+        if self.sink is not None:
+            try:
+                self.sink(msg)
+            except Exception:
+                # 持久化失败绝不能影响对话本身
+                pass
+        return msg
 
     def add_user_message(self, content: str):
-        self.add_message("user", content)
+        return self.add_message("user", content)
 
     def add_assistant_message(self, content: str, tool_call: Optional[Dict] = None):
-        self.add_message("assistant", content, tool_call)
+        return self.add_message("assistant", content, tool_call)
 
     def add_system_message(self, content: str):
-        self.add_message("system", content)
+        return self.add_message("system", content)
 
     def add_tool_message(self, content: str):
-        self.add_message("tool", content)
+        return self.add_message("tool", content)
 
     # ----- tool_tasks 存储 -----
     def set_last_tool_tasks(self, tasks: List[Dict]):
@@ -61,6 +78,19 @@ class Context:
         return self.messages[-n:]
 
     # ----- LLM 格式 -----
+    def set_summary(self, text: str):
+        """设置会话早期内容的滚动摘要。"""
+        self.summary = text or ""
+
+    def get_summary(self) -> str:
+        return self.summary
+
+    def summary_block(self) -> str:
+        """给 LLM 看的摘要块(为空则返回空串)。"""
+        if not self.summary:
+            return ""
+        return f"【本次会话早期内容摘要】\n{self.summary}"
+
     def to_llm_format(self) -> List[Dict]:
         result = []
         for msg in self.messages:
@@ -102,6 +132,7 @@ class Context:
     def clear(self):
         self.messages.clear()
         self.metadata.clear()
+        self.summary = ""
 
     def __len__(self):
         return len(self.messages)

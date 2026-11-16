@@ -1,0 +1,15 @@
+{"input": "教我如何用这个查询工具", "label": "task", "layer": "L1", "note": "助手教用户 -> task"}
+{"input": "教我怎么看懂财务报表", "label": "task", "layer": "L1", "note": "助手教用户 -> task"}
+{"input": "教我一套梳理需求的方法", "label": "teach", "layer": "L1", "note": "用户教助手方法论"}
+{"input": "以后写代码别用拼音命名", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "以后回答别加免责声明了", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "停用那个技能", "label": "manage", "layer": "L1", "note": "专属动词"}
+{"input": "技能都装了哪些", "label": "manage", "layer": "L1", "note": "专属动词"}
+{"input": "看看昨天的故障单", "label": "task", "layer": "L1", "note": "泛用动词+没说技能"}
+{"input": "把刚才那个方案再算一遍", "label": "retry", "layer": "L1", "note": "重做上一轮"}
+{"input": "重新说一次", "label": "retry", "layer": "L1", "note": "重做上一轮"}
+{"input": "搜下最近的自动驾驶新闻", "label": "task", "layer": "L1", "note": "搜索"}
+{"input": "帮我算下 45 乘 12", "label": "task", "layer": "L1", "note": "计算"}
+{"input": "那个玩意儿", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "嗯就那样", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "以后排障先看日志再重启", "label": "teach", "layer": "L1", "note": "方法论+要求记住"}

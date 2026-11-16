@@ -33,12 +33,39 @@
         <span class="patch-confidence" :class="confidenceClass(patch.confidence)">
           {{ Math.round(patch.confidence * 100) }}%
         </span>
+        <!-- M3-05:风险等级 -->
+        <span class="patch-risk" :class="riskClass(patch.risk_level)">
+          风险:{{ riskLabel(patch.risk_level) }}
+        </span>
         <span class="patch-time">{{ formatTime(patch.timestamp) }}</span>
       </div>
 
       <div class="patch-diagnosis">
         <div class="label">诊断</div>
         <p>{{ patch.diagnosis }}</p>
+      </div>
+
+      <!-- M3-05:自动发布被拦下的原因 -->
+      <div v-if="patch.blocked_reason" class="patch-blocked">
+        <div class="label">自动发布已拦截</div>
+        <p>{{ patch.blocked_reason }}</p>
+      </div>
+
+      <!-- M3-05:回归样例校验结果 -->
+      <div v-if="patch.validation" class="patch-validation">
+        <div class="label">
+          回归校验 {{ patch.validation.passed }}/{{ patch.validation.total }}
+          <span v-if="patch.validation.has_regression === false" class="no-regression">无回归样例</span>
+        </div>
+        <ul v-if="patch.validation.cases && patch.validation.cases.length">
+          <li v-for="c in patch.validation.cases" :key="c.name" :class="c.passed ? 'ok' : 'fail'">
+            {{ c.passed ? '✓' : '✕' }} {{ c.name }}
+            <span v-if="!c.passed" class="reason">{{ c.reason }}</span>
+          </li>
+        </ul>
+        <ul v-if="patch.validation.static_issues && patch.validation.static_issues.length" class="issues">
+          <li v-for="(issue, i) in patch.validation.static_issues" :key="i">⚠ {{ issue }}</li>
+        </ul>
       </div>
 
       <div v-if="patch.suggestion" class="patch-suggestion">
@@ -55,7 +82,7 @@
 </template>
 
 <script>
-import { API_BASE } from '../config'  // M0-04
+import { API_BASE, apiFetch } from '../config'  // M0-04 / C-01
 
 export default {
   name: 'PatchReview',
@@ -96,12 +123,32 @@ export default {
 
     async approve(patchId) {
       try {
-        const res = await fetch(`${API_BASE}/api/patches/${patchId}/approve`, {
+        const res = await apiFetch(`${API_BASE}/api/patches/${patchId}/approve`, {
           method: 'POST',
         })
-        if (!res.ok) throw new Error(await res.text())
+        if (!res.ok) {
+          // 后端会返回结构化的校验失败原因
+          const body = await res.text()
+          let msg = body
+          try {
+            const parsed = JSON.parse(body)
+            const detail = parsed.detail || {}
+            msg = detail.message || (typeof detail === 'string' ? detail : body)
+            if (detail.issues) msg += '\n' + detail.issues.join('\n')
+          } catch (e) { /* 不是 JSON,原样展示 */ }
+          throw new Error(msg)
+        }
+        const data = await res.json()
         this.loadPatches()
         this.loadStats()
+        // 回归样例没过时给出提示(发布已执行,但风险偏高)
+        const failed = (data.validation?.cases || []).filter(c => !c.passed)
+        if (failed.length) {
+          alert(
+            '已发布,但有回归样例未通过:\n' +
+            failed.map(c => `${c.name}: ${c.reason}`).join('\n')
+          )
+        }
       } catch (e) {
         alert('批准失败: ' + e.message)
       }
@@ -109,7 +156,7 @@ export default {
 
     async reject(patchId) {
       try {
-        const res = await fetch(`${API_BASE}/api/patches/${patchId}/reject`, {
+        const res = await apiFetch(`${API_BASE}/api/patches/${patchId}/reject`, {
           method: 'POST',
         })
         if (!res.ok) throw new Error(await res.text())
@@ -143,6 +190,21 @@ export default {
       if (confidence >= 0.9) return 'high'
       if (confidence >= 0.7) return 'medium'
       return 'low'
+    },
+
+    // M3-05:风险等级
+    riskLabel(risk) {
+      if (risk === 'low') return '低'
+      if (risk === 'medium') return '中'
+      if (risk === 'high') return '高'
+      return '未知'
+    },
+
+    riskClass(risk) {
+      if (risk === 'low') return 'low'
+      if (risk === 'medium') return 'medium'
+      if (risk === 'high') return 'high'
+      return 'unknown'
     },
   },
 }
@@ -271,6 +333,90 @@ export default {
   font-size: 10px;
   color: #888;
   margin-left: auto;
+}
+
+/* M3-05:风险等级 */
+.patch-risk {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.patch-risk.low {
+  background: rgba(76, 175, 80, 0.2);
+  color: #2e7d32;
+}
+
+.patch-risk.medium {
+  background: rgba(245, 158, 11, 0.2);
+  color: #b45309;
+}
+
+.patch-risk.high {
+  background: rgba(244, 67, 54, 0.2);
+  color: #c62828;
+}
+
+.patch-risk.unknown {
+  background: rgba(0, 0, 0, 0.08);
+  color: #888;
+}
+
+/* M3-05:拦截原因与回归校验 */
+.patch-blocked {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(244, 67, 54, 0.08);
+  border-radius: 6px;
+}
+
+.patch-blocked p {
+  margin: 0;
+  font-size: 11px;
+  color: #c62828;
+  line-height: 1.5;
+}
+
+.patch-validation {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+}
+
+.patch-validation ul {
+  margin: 0;
+  padding-left: 16px;
+  list-style: none;
+}
+
+.patch-validation li {
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.patch-validation li.ok {
+  color: #2e7d32;
+}
+
+.patch-validation li.fail {
+  color: #c62828;
+}
+
+.patch-validation li.issues li,
+.patch-validation ul.issues li {
+  color: #b45309;
+}
+
+.patch-validation .reason {
+  color: #888;
+  margin-left: 4px;
+}
+
+.no-regression {
+  margin-left: 6px;
+  color: #c62828;
 }
 
 .label {

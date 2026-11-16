@@ -46,6 +46,7 @@
         :messages="messages"
         @send="onSend"
         @reset="onReset"
+        @feedback="sendFeedback"
       />
     </main>
   </div>
@@ -125,6 +126,9 @@ export default {
       // 技能学习事件
       wsService.on('skill_learned', (payload) => this.handleSkillLearned(payload))
 
+      // 意图不明时的澄清请求(带候选项)
+      wsService.on('clarification_request', (payload) => this.handleClarification(payload))
+
       // 错误
       wsService.on('error', (payload) => this.handleError(payload))
 
@@ -196,15 +200,46 @@ export default {
     handleMessageFinal(payload) {
       if (this.pendingIndex >= 0 && payload.content) {
         this.messages[this.pendingIndex].content = payload.content
+        // 带上 execution_id —— 前端靠它把 👍/👎 关联到具体那条回答
+        this.messages[this.pendingIndex].execution_id = payload.execution_id || ''
       }
       this.pendingIndex = -1
       this.endTurn()
+    },
+
+    // 回答反馈(👍/👎):自演化最可靠的质量信号
+    sendFeedback({ execution_id, accepted, comment }) {
+      if (!execution_id) return
+      wsService.feedback(execution_id, accepted, comment || '')
+      // 本地回显:标上用户的选择
+      const msg = this.messages.find(m => m.execution_id === execution_id)
+      if (msg) {
+        msg.feedback = accepted
+        // Vue3 响应式:直接赋值即可(数组项是响应式的)
+      }
     },
 
     handleError(payload) {
       this.messages.push({ role: 'system', content: '错误: ' + (payload.message || '') })
       this.pendingIndex = -1
       this.endTurn()
+    },
+
+    // 澄清请求:把候选项挂到当前助手气泡上(前端渲染成可点选的按钮)
+    handleClarification(payload) {
+      const options = (payload && payload.options) || []
+      if (this.pendingIndex >= 0 && this.messages[this.pendingIndex]?.role === 'assistant') {
+        this.messages[this.pendingIndex].clarification = {
+          question: payload.question || '',
+          options,
+        }
+      } else {
+        this.messages.push({
+          role: 'assistant',
+          content: (payload && payload.question) || '',
+          clarification: { question: (payload && payload.question) || '', options },
+        })
+      }
     },
 
     // 技能学习完成:展示 toast + 自动刷新技能列表 + 切到 skills 标签

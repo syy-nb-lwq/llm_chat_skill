@@ -57,22 +57,24 @@ class TestMemoryDB:
         assert len(retrieved.embedding) == 1536
     
     def test_search_fts(self):
-        """测试全文搜索"""
+        """测试全文搜索(返回 (条目, BM25 分))"""
         self.db.add(type="context", content="Python 是一种编程语言")
         self.db.add(type="context", content="JavaScript 用于 Web 开发")
         self.db.add(type="context", content="Go 语言适合服务器编程")
-        
+
         results = self.db.search_fts("Python", limit=10)
         assert len(results) >= 1
-        assert any("Python" in r.content for r in results)
-    
+        assert any("Python" in entry.content for entry, _score in results)
+        # R4:BM25 分必须真传回来,而不是被拍平成一个常数
+        assert all(isinstance(score, float) for _entry, score in results)
+
     def test_search_fts_with_type_filter(self):
         """测试带类型过滤的搜索"""
         self.db.add(type="success", content="成功完成 Python 任务")
         self.db.add(type="failure", content="Python 导入失败")
-        
+
         results = self.db.search_fts("Python", type="success", limit=10)
-        assert all(r.type == "success" for r in results)
+        assert all(entry.type == "success" for entry, _score in results)
     
     def test_get_recent(self):
         """测试获取最近记忆"""
@@ -179,13 +181,15 @@ class TestSemanticMemoryStore:
         await self.store.add_memory(
             content="Python 适合初学者入门编程",
             type="context",
+            user_id="u1",
         )
         await self.store.add_memory(
             content="JavaScript 是 Web 开发的主要语言",
             type="context",
+            user_id="u1",
         )
         
-        results = await self.store.search("Python 编程", limit=10)
+        results = await self.store.search("Python 编程", user_id="u1", limit=10)
         assert len(results) >= 1
     
     @pytest.mark.asyncio
@@ -194,13 +198,17 @@ class TestSemanticMemoryStore:
         await self.store.add_memory(
             content="用户正在做一个数据分析项目",
             type="context",
+            user_id="u1",
         )
         await self.store.add_memory(
             content="用户想要学习机器学习",
             type="context",
+            user_id="u1",
         )
         
-        contexts = await self.store.search_context("用户项目", limit=3)
+        contexts = await self.store.search_context(
+            "用户项目", user_id="u1", limit=3
+        )
         assert len(contexts) >= 1
     
     @pytest.mark.asyncio
@@ -209,9 +217,10 @@ class TestSemanticMemoryStore:
         await self.store.add_memory(
             content="上次那个项目需要用到 pandas",
             type="context",
+            user_id="u1",
         )
         
-        recall = await self.store.recall_recent_context("上次那个项目")
+        recall = await self.store.recall_recent_context("上次那个项目", user_id="u1")
         assert "pandas" in recall or len(recall) > 0
     
     def test_add_sync(self):
@@ -263,14 +272,16 @@ class TestIntegration:
             content="用户上次问我关于 Python 的问题",
             type="context",
             metadata={"topic": "python"},
+            user_id="u1",
         )
         await store.add_memory(
             content="用户对数据分析很感兴趣",
             type="preference",
+            user_id="u1",
         )
         
         # 5. 搜索
-        results = await store.search("Python", limit=5)
+        results = await store.search("Python", user_id="u1", limit=5)
         assert len(results) >= 1
         
         # 6. 获取统计

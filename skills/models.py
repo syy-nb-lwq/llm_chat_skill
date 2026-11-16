@@ -48,6 +48,9 @@ class Skill:
     tags: List[str] = field(default_factory=list)
     steps: List[SkillStep] = field(default_factory=list)
     examples: List[str] = field(default_factory=list)
+    # 回归样例(M3-05):结构化的可复现用例,发布前用来验证新版本没有退化
+    # 形如: {"name": str, "input": {...}, "expect": {...}}
+    regression: List[Dict] = field(default_factory=list)
 
     # 元数据
     id: str = field(default_factory=lambda: f"skill_{uuid.uuid4().hex[:8]}")
@@ -74,6 +77,7 @@ class Skill:
             "tags": self.tags,
             "steps": [s.to_dict() for s in self.steps],
             "examples": self.examples,
+            "regression": self.regression,
             "source": self.source,
             "author": self.author,
             "created_at": self.created_at,

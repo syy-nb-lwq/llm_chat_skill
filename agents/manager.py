@@ -1,20 +1,28 @@
 """Manager Agent - 流转中枢:意图识别、技能选择、任务规划
 
-使用分层意图识别架构:
-  Layer 0: 快速规则过滤 (无 LLM 调用)
-  Layer 1: 关键词扩展分析 (无 LLM 调用)
-  Layer 2: LLM 深度理解 (最后手段)
+分层意图识别(四层,见 `docs/12-意图分层识别方案.md`):
+
+    L0 守卫层   纯规则,0 次 LLM。命中强结构信号就定案。
+    L1 判别层   一次 LLM 调用,闭集分类(6 标签),带置信度。
+    L2 规划层   LLM 规划工具/技能。**不再输出意图** —— 意图由 L1 给。
+    L3 澄清层   低置信 / 缺关键信息时提出澄清问题(尚未落地)
+
+关键点:意图与规划**解耦**。意图错了不再污染规划,规划错了也不再回写意图,
+两者可以分别评估、分别优化。
 """
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+import re
 
 from core.agent_base import BaseAgent
 from core.context import Context
 from core.memory import get_memory_store
 from core.semantic_memory import get_semantic_memory, SemanticMemoryStore
+from core.intent_labels import IntentLabel
+from core.llm_judge import IntentDecision, L1Classifier, get_l1_classifier
 from core.intent_detector import (
-    IntentCategory, IntentResult, IntentDetector, 
-    get_intent_detector, is_chitchat, is_task
+    IntentCategory, IntentResult, IntentDetector,
+    get_intent_detector, is_chitchat,
 )
 from skills.manager import Skill, get_skill_store
 
@@ -27,45 +35,80 @@ def _semantic_memory_enabled() -> bool:
         return False
 
 
+def _l1_enabled() -> bool:
+    """L1 判别层是否启用(默认启用)。"""
+    try:
+        from infra.config import config
+        return bool(getattr(config, "intent_l1_enabled", True))
+    except Exception:
+        return True
+
+
+def _l1_threshold() -> float:
+    """L1 定案所需的最低置信度(默认 0.75)。"""
+    try:
+        from infra.config import config
+        return float(getattr(config, "intent_l1_threshold", 0.75))
+    except Exception:
+        return 0.75
+
+
 @dataclass
 class PlanResult:
     """规划结果"""
-    intent: str                    # 意图类型: chitchat / skill / teach / retry / unknown
+    intent: str                    # 意图标签(6 闭集之一,见 IntentLabel)
     intent_detail: str = ""        # 意图详情描述
     selected_skill: Optional["Skill"] = None
     is_retry: bool = False        # 是否是重试意图
     tool_tasks: List[Dict] = field(default_factory=list)
     need_llm: bool = False        # 是否需要 LLM 处理
+    # 意图判别过程的可观测信息
+    intent_layer: str = ""         # 产出该意图的层: L0 / L1 / L2
+    intent_confidence: float = 0.0  # 置信度
+    intent_uncertain: bool = False  # 置信度不足,已升级到 L2 兜底
+    intent_slots: Dict[str, Any] = field(default_factory=dict)
 
 
-# ===== 意图类型常量 =====
+# ===== 意图标签(6 闭集,与 core/intent_labels.py::IntentLabel 一一对应) =====
 class IntentType:
     CHITCHAT = "chitchat"     # 闲聊:问候、感谢、道别等
-    SKILL = "skill"           # 技能需求:需要执行工具完成任务
+    TASK = "task"             # 任务:需要执行工具/技能完成
     TEACH = "teach"           # 教导:用户教 Agent 新技能
-    RETRY = "retry"          # 重试:重新执行上次的任务
+    RETRY = "retry"           # 重试:重新执行上次的任务
     MANAGER = "manager"       # 技能管理:列出/查看/版本/回滚(M1-09)
-    UNKNOWN = "unknown"        # 未知:需要进一步分析
+    CLARIFY = "clarify"       # 意图不明:需要澄清
+
+    # 兼容别名:旧代码里的 SKILL / UNKNOWN
+    SKILL = "task"
+    UNKNOWN = "clarify"
 
 
-# ===== 教导意图关键词(补充 IntentDetector) =====
-_TEACHING_KEYWORDS = [
-    "以后", "记住", "下次", "按这个", "按我的", "原则", "方法论",
-    "教你", "应该", "步骤是", "正确做法", "这么做",
-    "遇到", "情况", "要", "才能",
+# ===== 意图判定规则 =====
+# **这里不再有规则。**
+# 意图的唯一裁决者是 L1(`core/llm_judge.py`,一次 LLM 调用,6 标签闭集)。
+# 历史:`_TEACH_PATTERNS` / `_MANAGEMENT_PATTERNS` 曾在这里做正则判定,
+# 和 L0 共用同一份;真机基线证明它把准确率从 97.7% 拖到 94.7%,已删除。
+
+
+def decision_is_clarify(decision: Optional[IntentDecision]) -> bool:
+    """L1 是否判为"意图不明"。
+
+    只有 L1 明确说了 clarify,规划层又拿不出任何动作时,才值得追问一句 ——
+    别的标签(比如低置信的 chitchat)直接答更合适,不该把用户问懵。
+    """
+    return decision is not None and decision.label is IntentLabel.CLARIFY
+
+
+# ===== 指代型提问标记 =====
+# 出现这些词时,才去检索本会话历史 —— 避免每次都注入噪声
+_REFERENTIAL_MARKERS = [
+    "上次", "上次那个", "之前", "先前", "刚才", "刚刚", "刚说",
+    "那个", "这个", "前面", "方才", "以往", "之前提到",
 ]
 
-# ===== 技能管理意图关键词(M1-09) =====
-_MANAGEMENT_KEYWORDS = [
-    "列出", "查看", "有哪些技能", "技能列表", "版本", "回滚",
-    "禁用", "启用", "切换版本", "技能详情", "skill list", "skill version",
-    "skills", "show me skills", "what skills",
-]
 
-
-def _is_management_intent(text: str) -> bool:
-    t = text.strip().lower()
-    return any(kw in t for kw in _MANAGEMENT_KEYWORDS)
+def _has_referential_marker(text: str) -> bool:
+    return any(marker in text for marker in _REFERENTIAL_MARKERS)
 
 
 class ManagerAgent(BaseAgent):
@@ -79,50 +122,76 @@ class ManagerAgent(BaseAgent):
 
     name = "Manager"
 
-    PLAN_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "intent":         {"type": "string"},
-            "selected_skill": {"type": "string"},
-            "is_retry":       {"type": "boolean"},
-            "tool_tasks": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id":     {"type": "string"},
-                        "type":   {"type": "string", "enum": ["weather_query", "web_search"]},
-                        "params": {"type": "object"},
-                        "depends_on": {"type": "array", "items": {"type": "string"}},
-                        "parallel_group": {"type": "string"},
+    # ToolHub 不可用时的兜底工具列表
+    FALLBACK_TOOLS = ["weather_query", "web_search"]
+
+    def _available_tool_names(self) -> List[str]:
+        """当前可用工具名(来自 ToolHub,含 MCP / 用户注册的工具)。"""
+        try:
+            from tools.hub import get_tool_hub
+
+            names = list(get_tool_hub().names() or [])
+        except Exception:
+            names = []
+        return names or list(self.FALLBACK_TOOLS)
+
+    @property
+    def plan_schema(self) -> Dict:
+        """规划 schema —— 工具枚举从 ToolHub 动态生成。
+
+        硬编码枚举会导致 MCP / 用户注册的工具永远无法被规划器选中。
+
+        **没有 `intent` 字段**:意图由 L0/L1 判别层给出,规划层只负责"怎么做"。
+        (原先这里是自由文本,再由 `_is_simple_intent()` 对 LLM 自己写的散文做关键词
+        二次分类 —— 意图和规划耦合,改一边就废另一边。)
+        """
+        tools = self._available_tool_names()
+        return {
+            "type": "object",
+            "properties": {
+                "plan_detail":    {"type": "string"},
+                "selected_skill": {"type": "string"},
+                "is_retry":       {"type": "boolean"},
+                "tool_tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id":     {"type": "string"},
+                            "type":   {"type": "string", "enum": tools},
+                            "params": {"type": "object"},
+                            "depends_on": {"type": "array", "items": {"type": "string"}},
+                            "parallel_group": {"type": "string"},
+                        },
+                        "required": ["type", "params"],
                     },
-                    "required": ["type", "params"],
                 },
             },
-        },
-        "required": ["intent", "tool_tasks"],
-    }
+            "required": ["tool_tasks"],
+        }
 
     def system_prompt(self) -> str:
         skills = self.skill_store.list_all()
         skills_list = self._format_skills(skills)
+        tools = ", ".join(self._available_tool_names())
         return f"""你是一个任务规划助手。作为流转中枢,你需要:
 
-1. 识别用户意图(包括重试、上下文关联等)
-2. 选择合适的技能(方法论)来完成任务
-3. 规划需要的工具来获取数据
+1. 选择合适的技能(方法论)来完成任务
+2. 规划需要的工具来获取数据
 
 重要规则:
-- 工具只能从以下列表选择:weather_query, web_search
+- **意图已经由上游判别层判定**,你不需要(也不应该)重新判断意图,只管规划怎么做
+- 工具只能从以下列表选择:{tools}
 - 如果用户说"重新回答"、"再说一遍"、"上次"、"之前"等,说明要重试上一次的执行,tool_tasks 要与上次保持一致
 - 技能是完成任务的方法论,工具是获取数据的手段
+- 没有合适的工具时,tool_tasks 返回空数组,不要硬凑
 
 已有技能列表:
 {skills_list}
 
 严格按以下 JSON 格式输出:
 {{
-  "intent": "用户意图简短描述",
+  "plan_detail": "这次要做什么的简短说明",
   "selected_skill": "选择的技能名称(没有则填空字符串)",
   "is_retry": true/false,  // 用户是否要求重试上一次的执行
   "tool_tasks": [
@@ -136,6 +205,10 @@ class ManagerAgent(BaseAgent):
         self.skill_store = get_skill_store()
         self.memory_store = get_memory_store()
         self.intent_detector = get_intent_detector()
+        # L1 闭集分类器
+        self.l1_classifier = get_l1_classifier()
+        self._l1_enabled = _l1_enabled()
+        self._l1_threshold = _l1_threshold()
         # 语义记忆(延迟初始化)
         self._semantic_memory: Optional[SemanticMemoryStore] = None
 
@@ -149,17 +222,25 @@ class ManagerAgent(BaseAgent):
                 pass
         return self._semantic_memory
 
-    async def plan(self, user_input: str, context: Optional[Context] = None) -> PlanResult:
-        """分析用户输入,产出 PlanResult。
+    async def plan(
+        self,
+        user_input: str,
+        context: Optional[Context] = None,
+        session_id: str = "",
+        user_id: str = "",
+        profile_block: str = "",
+    ) -> PlanResult:
+        """分析用户输入,产出 PlanResult(三层编排)。
 
-        意图识别流程(分层架构):
-        1. Layer 0/1: 快速规则匹配(无 LLM)
-           - 闲聊类(GREETING/FAREWELL/THANKS 等) → 直接返回
-           - 教导类(TEACH) → 直接返回
-           - 重试类(RETRY) → 标记 is_retry,继续执行
-        2. Layer 2: 需要 LLM 深度理解
-           - 任务类(WEATHER/SEARCH 等) → 调用 LLM 规划工具
-           - 未知类 → 调用 LLM 分析
+        - **结构守卫**:只判断"不需理解语义就能确定"的事(空输入 → 澄清)。
+          **没有任何"猜用户怎么说"的规则** —— 那种规则会静默地判错,
+          而且会抢在 L1 前面把话拿走(真机基线:94.7% vs 97.7%)。
+        - **L1 判别层**:**意图的唯一裁决者**。一次 LLM 调用做闭集分类
+          (6 标签),带置信度。置信度 ≥ 阈值(默认 0.75)才可定案。
+        - **L2 规划层**:规划工具/技能。**不再输出意图** —— 意图由 L1 给。
+
+        低置信时**不放弃**,而是带着 L1 的判断升级到 L2 兜底
+        (宁可多调一次工具,也不要漏答)。
 
         Args:
             user_input: 本轮用户输入
@@ -167,106 +248,242 @@ class ManagerAgent(BaseAgent):
         """
         self.logger.info("Manager", "开始意图识别和任务规划")
 
-        # ===== Layer 0/1: 快速规则匹配(无 LLM) =====
+        # ===== 结构守卫(0 次 LLM,只处理空输入这类结构事实) =====
         intent_result = self.intent_detector.detect(user_input)
-        
-        # 闲聊类 → 直接返回
-        if is_chitchat(intent_result.category):
-            self.logger.info("Manager", f"闲聊检测: {intent_result.category.value}")
+        label = intent_result.label
+
+        if label is not None:
+            self.logger.info(
+                "Manager", f"结构守卫定案: {label.value} ({intent_result.detail})"
+            )
+            decided = self._plan_from_label(
+                label,
+                detail=intent_result.detail,
+                context=context,
+                layer="guard",
+                confidence=intent_result.confidence,
+                slots=intent_result.entities,
+            )
+            if decided is not None:
+                return decided
+
+        # ===== L1 判别层(一次 LLM 调用,闭集分类) =====
+        decision = await self._l1_classify(user_input, context)
+        if decision is not None:
+            if decision.confidence < self._l1_threshold:
+                # 低置信:不放弃,带 L1 结果升级 L2 兜底
+                # 宁可多调一次工具,也不要漏答(D4)
+                self.logger.info(
+                    "Manager",
+                    f"L1 置信不足({decision.confidence:.2f},"
+                    f"判为 {decision.label.value}),升级 L2 兜底",
+                )
+            elif decision.label is not IntentLabel.TASK:
+                # 非任务类意图:高置信可直接定案
+                self.logger.info(
+                    "Manager",
+                    f"L1 定案: {decision.label.value} (置信度 {decision.confidence})",
+                )
+                decided = self._plan_from_label(
+                    decision.label,
+                    detail=decision.reason or f"L1 判别为 {decision.label.value}",
+                    context=context,
+                    layer="L1",
+                    confidence=decision.confidence,
+                    slots=decision.slots,
+                )
+                if decided is not None:
+                    return decided
+            else:
+                self.logger.info(
+                    "Manager",
+                    f"L1 判为 task (置信度 {decision.confidence}),进入 L2 规划",
+                )
+
+        # ===== L2 规划层 =====
+        plan = await self._llm_plan(
+            user_input,
+            context,
+            session_id=session_id,
+            user_id=user_id,
+            intent_hint=decision,
+            profile_block=profile_block,
+        )
+        if plan is not None:
+            return plan
+
+        # 规划也没产出 → 兜底
+        return PlanResult(
+            intent=IntentType.TASK,
+            intent_detail="无法规划出具体动作,直接回答",
+            selected_skill=None,
+            tool_tasks=[],
+            intent_layer="L2",
+            intent_confidence=decision.confidence if decision else 0.0,
+            intent_uncertain=decision is not None,
+        )
+
+    def _plan_from_label(
+        self,
+        label: IntentLabel,
+        *,
+        detail: str = "",
+        context: Optional[Context] = None,
+        layer: str = "L1",
+        confidence: float = 0.0,
+        slots: Optional[Dict[str, Any]] = None,
+    ) -> Optional[PlanResult]:
+        """把一个意图标签翻成 PlanResult。
+
+        返回 None 表示"这个标签不能直接定案,需要继续往下走"。
+        """
+        if label is IntentLabel.CHITCHAT:
             return PlanResult(
                 intent=IntentType.CHITCHAT,
-                intent_detail=intent_result.detail,
+                intent_detail=detail,
                 selected_skill=None,
                 tool_tasks=[],
-            )
-        
-        # 教导类 → 直接返回
-        if intent_result.category == IntentCategory.TEACH:
-            self.logger.info("Manager", "教导检测: 检测到教导意图")
-            return PlanResult(
-                intent=IntentType.TEACH,
-                intent_detail=intent_result.detail,
-                selected_skill=None,
-                tool_tasks=[],
-            )
-        
-        # 教导关键词补充检测
-        if self.should_learn_skill(user_input):
-            self.logger.info("Manager", "教导检测(补充): 检测到教导意图")
-            return PlanResult(
-                intent=IntentType.TEACH,
-                intent_detail="用户教导新技能",
-                selected_skill=None,
-                tool_tasks=[],
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_slots=dict(slots or {}),
             )
 
-        # 技能管理意图检测(M1-09)
-        if _is_management_intent(user_input):
-            self.logger.info("Manager", "技能管理意图检测")
+        if label is IntentLabel.TEACH:
+            return PlanResult(
+                intent=IntentType.TEACH,
+                intent_detail=detail,
+                selected_skill=None,
+                tool_tasks=[],
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_slots=dict(slots or {}),
+            )
+
+        if label is IntentLabel.MANAGE:
             return PlanResult(
                 intent=IntentType.MANAGER,
-                intent_detail="技能管理操作",
+                intent_detail=detail or "技能管理操作",
                 selected_skill=None,
                 tool_tasks=[],
                 need_llm=False,
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_slots=dict(slots or {}),
             )
 
-        # 重试类 → 标记并继续
-        if intent_result.category == IntentCategory.RETRY:
-            self.logger.info("Manager", "重试检测: 检测到重试意图")
-            # 重试意图需要上下文来确定上次的任务
-            # 如果没有上下文,返回 unknown
+        if label is IntentLabel.RETRY:
+            # 重试需要上一轮的执行记录;没有上下文就不能重试
             if not context or len(context) == 0:
                 return PlanResult(
-                    intent=IntentType.UNKNOWN,
+                    intent=IntentType.TASK,
                     intent_detail="重试需要上下文,但没有历史记录",
                     selected_skill=None,
                     is_retry=True,
                     tool_tasks=[],
                     need_llm=False,
+                    intent_layer=layer,
+                    intent_confidence=confidence,
                 )
-            # 有上下文,标记 is_retry 继续执行
-            plan = PlanResult(
+            return PlanResult(
                 intent=IntentType.RETRY,
-                intent_detail=intent_result.detail,
+                intent_detail=detail,
                 selected_skill=None,
                 is_retry=True,
-                need_llm=True,  # 需要 LLM 获取上次的 tool_tasks
+                need_llm=True,  # 需要 LLM 取上次的 tool_tasks
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_slots=dict(slots or {}),
             )
-        else:
-            plan = PlanResult(
-                intent=IntentType.UNKNOWN,
-                intent_detail="需要 LLM 深度理解",
-                need_llm=True,
-            )
-        
-        # ===== Layer 2: LLM 深度理解 =====
-        if plan.need_llm:
-            llm_result = await self._llm_plan(user_input, context)
-            if llm_result:
-                return llm_result
-        
-        return plan
 
-    async def _llm_plan(self, user_input: str, context: Optional[Context]) -> Optional[PlanResult]:
-        """调用 LLM 进行深度规划"""
+        if label is IntentLabel.CLARIFY:
+            # L1 判为"意图不明"且置信度够高 → 直接进 L3 澄清。
+            # 置信度不够时由调用方降级到 L2 兜底(见 plan()).
+            return PlanResult(
+                intent=IntentType.CLARIFY,
+                intent_detail=detail or "意图不明,需要澄清",
+                selected_skill=None,
+                tool_tasks=[],
+                need_llm=False,
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_slots=dict(slots or {}),
+            )
+
+        # TASK:交给 L2 规划层
+        return None
+
+    async def _l1_classify(
+        self, user_input: str, context: Optional[Context]
+    ) -> Optional[IntentDecision]:
+        """调用 L1 闭集分类器。失败返回 None(由调用方降级)。"""
+        if not self._l1_enabled:
+            return None
+        try:
+            recent = self._recent_turns(context, limit=2)
+            return await self.l1_classifier.classify(
+                user_input, recent_turns=recent
+            )
+        except Exception as exc:
+            self.logger.warning("Manager", f"L1 分类失败: {exc}")
+            return None
+
+    @staticmethod
+    def _recent_turns(context: Optional[Context], limit: int = 2) -> List[Dict[str, str]]:
+        """取最近几轮对话(给 L1 做上下文参考)。"""
+        if context is None or len(context) == 0:
+            return []
+        msgs = [
+            m for m in context.messages
+            if m.role in ("user", "assistant") and (m.content or "").strip()
+        ]
+        out = []
+        for m in msgs[-limit * 2:]:
+            out.append({"role": m.role, "content": (m.content or "").strip()[:500]})
+        return out
+
+
+    async def _llm_plan(
+        self,
+        user_input: str,
+        context: Optional[Context],
+        session_id: str = "",
+        user_id: str = "",
+        intent_hint: Optional[IntentDecision] = None,
+        profile_block: str = "",
+    ) -> Optional[PlanResult]:
+        """L2 规划层:规划要调哪些工具、用哪个技能。
+
+        **不再输出意图** —— 意图由 L0/L1 判定,这里只负责"怎么做"。
+        `intent_hint` 是 L1 的判别结果,作为强约束注入提示词。
+        `profile_block` 是调用方(Agent)本轮已取好的画像,空则自己取。
+        """
         skills = self.skill_store.list_all()
 
         # 读取历史教训 hints,拼到 user_input 前面
-        enriched_input = await self._enrich_with_hints(user_input)
+        enriched_input = await self._enrich_with_hints(
+            user_input, session_id=session_id, user_id=user_id
+        )
+
+        # 用户画像(长期记忆):**常驻注入**,不依赖 query 命中
+        if not profile_block:
+            profile_block = self.profile_block(user_id)
 
         try:
             llm_plan = await self.think_json(
-                self._build_user_prompt(enriched_input, context),
-                self.PLAN_SCHEMA,
+                self._build_user_prompt(
+                    enriched_input, context, intent_hint, profile_block
+                ),
+                self.plan_schema,
             )
         except Exception as e:
             self.logger.error("Manager", f"LLM 规划失败: {e}")
             return PlanResult(
-                intent=IntentType.UNKNOWN,
+                intent=IntentType.TASK,
                 intent_detail=f"LLM 调用失败: {str(e)[:50]}",
                 selected_skill=None,
                 tool_tasks=[],
+                intent_layer="L2",
+                intent_uncertain=True,
             )
 
         selected_skill = None
@@ -277,85 +494,145 @@ class ManagerAgent(BaseAgent):
                     selected_skill = s
                     break
 
-        intent_detail = llm_plan.get("intent", "")
-        self.logger.info("Manager", f"LLM 识别意图: {intent_detail}")
+        plan_detail = llm_plan.get("plan_detail", "") or ""
         if selected_skill:
             self.logger.info("Manager", f"选择技能: {selected_skill.name}")
 
         tool_tasks = self._auto_id_tool_tasks(llm_plan.get("tool_tasks", []) or [])
+        tool_tasks, dropped = self._filter_unknown_tools(tool_tasks)
+        if dropped:
+            self.logger.warning(
+                "Manager",
+                f"丢弃未知工具的任务: {dropped}(当前可用: {self._available_tool_names()})",
+            )
         self.logger.info("Manager", f"规划工具: {len(tool_tasks)} 个")
 
-        # 获取 LLM 判断的重试意图
+        # LLM 判断的重试意图
         is_retry = llm_plan.get("is_retry", False)
         if is_retry:
-            self.logger.info("Manager", "LLM 判断: 重试意图")
+            self.logger.info("Manager", "L2 判断: 重试意图")
 
-        # 根据结果判断意图类型
+        # 意图层:有 L1 判别结果 → 意图来自 L1;没有 → L1 失败,退到 L2 兜底
+        layer = "L1" if intent_hint is not None else "L2"
+        confidence = intent_hint.confidence if intent_hint else 0.0
+        uncertain = intent_hint is None or intent_hint.confidence < self._l1_threshold
+        slots = dict(intent_hint.slots) if intent_hint else {}
+
+        # 重试优先
         if is_retry:
             return PlanResult(
                 intent=IntentType.RETRY,
-                intent_detail=f"{intent_detail} (重试)",
+                intent_detail=plan_detail or "重试上一轮",
                 selected_skill=None,
                 is_retry=True,
                 tool_tasks=tool_tasks,
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_uncertain=uncertain,
+                intent_slots=slots,
             )
 
         if tool_tasks:
             return PlanResult(
-                intent=IntentType.SKILL,
-                intent_detail=intent_detail,
+                intent=IntentType.TASK,
+                intent_detail=plan_detail or f"规划了 {len(tool_tasks)} 个工具任务",
                 selected_skill=selected_skill,
                 tool_tasks=tool_tasks,
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_uncertain=uncertain,
+                intent_slots=slots,
             )
 
         # M1-02: 即使没有 tool_tasks,只要选中了 selected_skill
-        # (纯方法论技能)就允许以 SKILL 计划返回。
+        # (纯方法论技能)就允许以 TASK 计划返回。
         if selected_skill is not None:
             return PlanResult(
-                intent=IntentType.SKILL,
-                intent_detail=intent_detail,
+                intent=IntentType.TASK,
+                intent_detail=plan_detail or f"使用技能 {selected_skill.name}",
                 selected_skill=selected_skill,
                 tool_tasks=[],
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_uncertain=uncertain,
+                intent_slots=slots,
             )
 
-        # 没有工具,也没有技能,但意图明确 → 闲聊
-        if self._is_simple_intent(intent_detail):
+        # 没有工具也没有技能:意图已由 L0/L1 判定,这里不重新分类,
+        # 直接以当前意图返回(由上层走直答流程)。
+        #
+        # 但有一种情况要进 L3 澄清:**L1 判别时就不确定**(conf < τ₁),
+        # 规划层也没找出任何可执行的动作 —— 这时"硬答"就是猜,
+        # 不如问一句(docs/12 §2.5)。
+        if uncertain and decision_is_clarify(intent_hint):
             return PlanResult(
-                intent=IntentType.CHITCHAT,
-                intent_detail=intent_detail,
+                intent=IntentType.CLARIFY,
+                intent_detail=plan_detail or "意图不明且规划不出动作,需要澄清",
                 selected_skill=None,
                 tool_tasks=[],
+                intent_layer=layer,
+                intent_confidence=confidence,
+                intent_uncertain=True,
+                intent_slots=slots,
             )
 
         return PlanResult(
-            intent=IntentType.UNKNOWN,
-            intent_detail=intent_detail or "无法理解用户意图",
+            intent=(
+                intent_hint.label.value
+                if intent_hint and intent_hint.label is not IntentLabel.TASK
+                else IntentType.TASK
+            ),
+            intent_detail=plan_detail or "无需调用工具,直接回答",
             selected_skill=None,
             tool_tasks=[],
+            intent_layer=layer,
+            intent_confidence=confidence,
+            intent_uncertain=uncertain,
+            intent_slots=slots,
         )
 
-    def _build_user_prompt(self, user_input: str, context: Optional[Context]) -> str:
-        """把上下文历史对话拼到当前 user_input。
+
+    def _build_user_prompt(
+        self,
+        user_input: str,
+        context: Optional[Context],
+        intent_hint: Optional[IntentDecision] = None,
+        profile_block: str = "",
+    ) -> str:
+        """把上下文历史对话 + L1 判别结果 + 用户画像拼到当前 user_input。
 
         不会破坏现有调用——若 context 为空/None,直接返回原 user_input。
         """
+        summary_block = context.summary_block() if context is not None else ""
+        hint_block = self._build_intent_hint_block(intent_hint)
+        prefix = "\n\n".join(
+            x for x in (hint_block, summary_block, profile_block) if x
+        )
+
         if context is None or len(context) == 0:
-            return user_input
+            return f"{prefix}\n\n{user_input}".strip() if prefix else user_input
         history = context.to_llm_messages(max_tokens=2000)
         if not history:
-            return user_input
+            return f"{prefix}\n\n{user_input}".strip() if prefix else user_input
         # 跳过 system 和 tool 类型,只保留可见的对话
         recent = [
             m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
         ]
         if len(recent) <= 1:
+            if prefix:
+                return f"{prefix}\n\n{user_input}"
             return user_input
         # 最后一条是当前 user_input 的内容(Agent.handle 已 add_user_message);
         # 把它剔除,只拼历史。
         prior = recent[:-1]
+        lines = []
+        if prefix:
+            lines.append(prefix)
+            lines.append("")
         if not prior:
-            return user_input
-        lines = ["以下是此前的对话历史(用户/助手),可能与本次任务相关:"]
+            lines.append(f"本次用户输入: {user_input}")
+            return "\n".join(lines)
+        lines.append("以下是此前的对话历史(用户/助手),可能与本次任务相关:")
         for m in prior[-6:]:
             role = "用户" if m["role"] == "user" else "助手"
             content = (m["content"] or "").strip()
@@ -364,7 +641,31 @@ class ManagerAgent(BaseAgent):
             lines.append(f"- {role}: {content}")
         lines.append("")
         lines.append(f"本次用户输入: {user_input}")
-        lines.append("请结合对话历史,识别本轮真实意图。")
+        lines.append("请结合对话历史与已判定的意图,规划需要调用的工具。")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_intent_hint_block(intent_hint: Optional[IntentDecision]) -> str:
+        """把 L1 的判别结果渲染成给 L2 的强约束块。"""
+        if intent_hint is None:
+            return ""
+        lines = [
+            "【已判定的意图】(上游判别层给出,请直接据此规划,不要重新判断意图)",
+            f"- 标签: {intent_hint.label.value}",
+            f"- 置信度: {intent_hint.confidence:.2f}",
+        ]
+        if intent_hint.reason:
+            lines.append(f"- 依据: {intent_hint.reason}")
+        if intent_hint.slots:
+            slot_text = ", ".join(
+                f"{k}={v}" for k, v in intent_hint.slots.items() if v
+            )
+            if slot_text:
+                lines.append(f"- 已提取的信息: {slot_text}")
+        if intent_hint.confidence < 0.75:
+            lines.append(
+                "- 注意: 置信度偏低,如果拿不准,宁可多调一次工具,也不要漏答"
+            )
         return "\n".join(lines)
 
     def _auto_id_tool_tasks(self, tasks: List[Dict]) -> List[Dict]:
@@ -376,23 +677,36 @@ class ManagerAgent(BaseAgent):
             result.append(task)
         return result
 
-    def should_learn_skill(self, user_input: str) -> bool:
-        return any(kw in user_input for kw in _TEACHING_KEYWORDS)
+    def _filter_unknown_tools(self, tasks: List[Dict]) -> tuple:
+        """过滤掉引用了不存在工具的任务。
 
-    def should_answer_directly(self, user_input: str) -> bool:
-        """判断是否直接回答(闲聊) - 兼容旧 API"""
-        from core.intent_detector import get_intent_detector, is_chitchat
-        detector = get_intent_detector()
-        result = detector.detect(user_input)
-        return is_chitchat(result.category)
+        schema 里的 enum 只是给 LLM 的提示,实际执行前仍需校验,
+        否则 LLM 幻觉出的工具名会在执行期才报错。
+        """
+        available = set(self._available_tool_names())
+        kept: List[Dict] = []
+        dropped: List[str] = []
+        for t in tasks:
+            tool_type = (t.get("type") or "").strip()
+            if tool_type in available:
+                kept.append(t)
+            else:
+                dropped.append(tool_type or "<empty>")
+        return kept, dropped
 
-    def _is_simple_intent(self, intent_detail: str) -> bool:
-        """判断意图详情是否足够简单(无需工具)"""
-        simple_keywords = [
-            "问候", "打招呼", "hi", "hello", "你好",
-            "感谢", "谢谢", "道别", "再见", "确认", "好的",
-        ]
-        return any(kw in intent_detail.lower() for kw in simple_keywords)
+    # 注:`should_learn_skill()` / `should_answer_directly()` 已删除。
+    #
+    # 它们是**纯规则**的意图判断(?是不是 teach / 是不是闲聊),而
+    # 1) 生产流程里从来没人调用 —— `analyze()` 走的是 L0/L1 的标签,不是这两个方法
+    # 2) 真机基线证明这套规则把准确率从 97.7% 拖到 94.7%
+    #
+    # 意图现在只有一处判定:`analyze()` 里的 L1,返回 `IntentLabel`。
+    # 需要判断"要不要学技能"请看 `plan.intent == IntentType.TEACH`,
+    # 需要判断"要不要直接答"请看 `plan.intent == IntentType.CHITCHAT`。
+
+    # 注:原 `_is_simple_intent()` 已删除。
+    # 它对 LLM 自己写的自由文本做关键词二次分类 —— 意图已由 L0/L1 闭集判定,
+    # 再用关键词解析一遍等于把两套枚举又混到一起(见 docs/12 §3)。
 
     def _format_skills(self, skills: List[Skill]) -> str:
         if not skills:
@@ -405,17 +719,23 @@ class ManagerAgent(BaseAgent):
             lines.append("")
         return "\n".join(lines)
 
-    async def _enrich_with_hints(self, user_input: str) -> str:
+    async def _enrich_with_hints(
+        self, user_input: str, session_id: str = "", user_id: str = ""
+    ) -> str:
         """读取历史教训 hints,拼到 user_input 前面
 
-        优先使用语义记忆,回退到普通记忆
+        优先使用语义记忆,回退到普通记忆。
+        另外:指代型提问("上次那个方案…")会检索**本会话历史**,
+        让"回来继续问答"真正可用。
         """
         hints: List[str] = []
 
-        # 尝试语义记忆
-        if self.semantic_memory:
+        # 尝试语义记忆(执行经验类);画像走常驻注入,不在这里按需召回
+        if self.semantic_memory and user_id:
             try:
-                results = await self.semantic_memory.search_context(user_input, limit=3)
+                results = await self.semantic_memory.search_context(
+                    user_input, user_id=user_id, limit=3
+                )
                 hints.extend(results)
             except Exception:
                 pass
@@ -424,8 +744,60 @@ class ManagerAgent(BaseAgent):
         if not hints:
             hints = self.memory_store.get_skill_hints(user_input)
 
+        # 会话内检索(短期记忆):只对指代型提问触发,避免噪声
+        session_hints = self._search_session_history(user_input, session_id, user_id)
+        hints.extend(session_hints)
+
         if not hints:
             return user_input
 
         hints_text = "\n".join(f"- {h}" for h in hints)
         return f"{user_input}\n\n[历史经验提示]:\n{hints_text}"
+
+    def profile_block(self, user_id: str) -> str:
+        """取用户画像文本块(长期记忆常驻注入)。
+
+        公开方法 —— `Agent` 用它每轮取一次,同时喂给规划器和回答生成器,
+        避免两处各读一次库、拿到不一致的内容。
+
+        失败一律返回空串 —— 画像读不到不能影响正常回答。
+        """
+        if not user_id or not self.semantic_memory:
+            return ""
+        try:
+            return self.semantic_memory.build_profile_block(user_id)
+        except Exception as exc:
+            self.logger.warning("Manager", f"读取用户画像失败: {exc}")
+            return ""
+
+    #: 兼容旧调用名
+    def _build_profile_block(self, user_id: str) -> str:
+        return self.profile_block(user_id)
+
+    @staticmethod
+    def _search_session_history(
+        user_input: str, session_id: str, user_id: str
+    ) -> List[str]:
+        """在当前会话历史里检索与本轮相关的片段。
+
+        触发条件:输入含指代词(上次/之前/刚才/那个…)。命中才返回,否则不打扰。
+        """
+        if not session_id or not _has_referential_marker(user_input):
+            return []
+        try:
+            from core.session_memory import get_session_memory_store
+
+            store = get_session_memory_store()
+            hits = store.search(session_id, user_input, limit=3, user_id=user_id or None)
+        except Exception:
+            return []
+        out: List[str] = []
+        for msg in hits:
+            content = (msg.content or "").strip()
+            if not content:
+                continue
+            if len(content) > 300:
+                content = content[:300] + "..."
+            who = "用户" if msg.role == "user" else "助手"
+            out.append(f"[本次会话历史] {who}: {content}")
+        return out

@@ -1,0 +1,15 @@
+{"input": "以后别再用那种语气跟我说话了", "label": "chitchat", "layer": "L1", "note": "说话方式偏好"}
+{"input": "回答里别加免责声明", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "请用英文回复我", "label": "chitchat", "layer": "L1", "note": "输出偏好"}
+{"input": "给我讲个段子吧", "label": "chitchat", "layer": "L1", "note": "不需要工具的闲聊型请求"}
+{"input": "随便聊两句", "label": "chitchat", "layer": "L1", "note": "闲聊"}
+{"input": "帮我瞅瞅今天的新闻", "label": "task", "layer": "L1", "note": "'帮我+动词'但对象含糊 -> 仍是 task"}
+{"input": "顺便瞄一眼股价", "label": "task", "layer": "L1", "note": "对象含糊但方向明确 -> task"}
+{"input": "教我怎么用这个工具", "label": "task", "layer": "L1", "note": "助手教用户(用户是学生) -> task,不是 teach(已复核:原标注 teach 有误)"}
+{"input": "记住以后周报分四段写", "label": "teach", "layer": "L1", "note": "方法论载体"}
+{"input": "以后每次上线前先做一次压测", "label": "teach", "layer": "L1", "note": "方法论载体"}
+{"input": "把技能列表列一下", "label": "manage", "layer": "L1", "note": "管理动词+技能对象"}
+{"input": "回滚到上一个版本", "label": "manage", "layer": "L1", "note": "管理动词"}
+{"input": "那个东西你懂的", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "上次那个", "label": "clarify", "layer": "L1", "note": "完全猜不出方向"}
+{"input": "把这段话翻译成英文", "label": "task", "layer": "L1", "note": "翻译"}

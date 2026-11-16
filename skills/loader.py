@@ -1,7 +1,7 @@
 """Skill 加载器 - 从 YAML/MD 文件加载技能"""
 import re
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import yaml
 
@@ -121,6 +121,7 @@ class SkillLoader:
             tags=data.get("tags", []),
             steps=steps,
             examples=data.get("examples", []),
+            regression=_parse_regression(data.get("regression", [])),
             source=data.get("source", "builtin"),
             author=data.get("author"),
             created_at=data.get("created_at"),
@@ -129,3 +130,26 @@ class SkillLoader:
         # M1-04: 把 YAML 的 active 标记挂到 skill 上,Registry 加载时识别
         setattr(skill, "active", bool(data.get("active", False)))
         return skill
+
+
+def _parse_regression(raw) -> List[Dict]:
+    """解析回归样例(M3-05)。
+
+    允许写成紧凑的一行字符串,也可以写成完整的 dict:
+        regression:
+          - name: 北京明天天气
+            input: {user_input: "北京明天天气"}
+            expect: {tool: weather_query, success: true}
+          - "只看 method 变更"
+    """
+    cases: List[Dict] = []
+    for item in raw or []:
+        if isinstance(item, str):
+            cases.append({"name": item, "input": {}, "expect": {}})
+        elif isinstance(item, dict):
+            cases.append({
+                "name": str(item.get("name") or item.get("id") or "case"),
+                "input": item.get("input") or {},
+                "expect": item.get("expect") or {},
+            })
+    return cases

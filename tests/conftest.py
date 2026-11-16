@@ -10,16 +10,26 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# 测试用 .env(避免污染真实配置)
-ENV_PATH = ROOT / ".env"
-if not ENV_PATH.exists():
-    ENV_PATH.write_text(
-        "LLM_API_KEY=sk-test-dummy\n"
-        "LLM_BASE_URL=https://api.openai.com/v1\n"
-        "LLM_MODEL=gpt-4o-mini\n"
-        "LOG_LEVEL=WARNING\n",
-        encoding="utf-8",
-    )
+# 让 pytest 可以离线跑通:
+# backend 启动时会做 fail-fast 配置校验(infra/config.py::validate),
+# 没有 OPENAI_API_KEY 时整个后端测试会直接报错。
+# 这里只在"环境变量和 .env 都没有提供 key"时注入一个占位 key,
+# 不覆盖真实配置,也不往项目根写测试残留文件。
+_ENV_PATH = ROOT / ".env"
+_env_text = ""
+if _ENV_PATH.exists():
+    try:
+        _env_text = _ENV_PATH.read_text(encoding="utf-8")
+    except OSError:
+        _env_text = ""
+
+if not os.environ.get("OPENAI_API_KEY") and "OPENAI_API_KEY" not in _env_text:
+    os.environ["OPENAI_API_KEY"] = "sk-test-dummy"
+
+if not _ENV_PATH.exists():
+    os.environ.setdefault("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    os.environ.setdefault("OPENAI_MODEL", "gpt-4o-mini")
+    os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 
 @pytest.fixture(scope="session")
@@ -29,8 +39,129 @@ def event_loop():
     loop.close()
 
 
+def pytest_addoption(parser):
+    """`--live` 开关:跑需要真实 API 的评估集(L1 通道)。"""
+    parser.addoption(
+        "--live",
+        action="store_true",
+        default=False,
+        help="运行需要真实 LLM API 的测试(如意图评估集的 L1 通道)",
+    )
+
+
+@pytest.fixture
+def live_enabled(request):
+    """需要真实 API 的测试用这个 fixture 跳过。"""
+    if not request.config.getoption("--live", default=False):
+        pytest.skip("需要 --live 与真实 API key")
+
+
+@pytest.fixture(scope="session")
+def session_db_store(tmp_path_factory):
+    """整个测试会话共用一个临时会话库(避免每个测试都建一次 SQLite 文件)。"""
+    from core.session_memory import SessionMemoryStore
+
+    return SessionMemoryStore(
+        db_path=tmp_path_factory.mktemp("sessions") / "sessions.db"
+    )
+
+
+@pytest.fixture(scope="session")
+def long_term_db(tmp_path_factory):
+    """长期记忆库(用户画像)也指向临时目录。
+
+    不隔离的话,跑测试会往真实的 `memory/semantic_memory.db` 里写画像数据 ——
+    这跟生产库混在一起,而且会让"用户记住了什么"变得不可解释。
+    """
+    from core.memory_db import MemoryDB
+
+    return MemoryDB(db_path=tmp_path_factory.mktemp("long_term") / "semantic_memory.db")
+
+
+@pytest.fixture(scope="session")
+def mem_store_base(tmp_path_factory):
+    """MemoryStore(自演化的成功/失败记录)的隔离根目录。"""
+    return tmp_path_factory.mktemp("memory_store")
+
+
+#: 这些全局函数是"真 LLM 通道"的入口。
+#:
+#: 踩过的坑:某个测试用 `_l_mod.get_llm_client = lambda: StubLLM()` 直接赋值
+#: (不是 monkeypatch)却没有还原,于是**后面所有测试拿到的都是假 LLM**。
+#: 症状极其隐蔽:测试全绿,但"真 LLM 通道"其实从来没被执行过 ——
+#: 改坏了解析逻辑也发现不了,直到线上炸。
+#:
+#: 这里在会话开始时留一份原函数,每个测试之后强制还原,
+#: 让"永久改写全局"这类污染不再可能藏得住。
+def _capture_global_getters():
+    import core.agent_base as cab
+    import infra.llm as llm_mod
+
+    return {
+        (llm_mod, "get_llm_client"): llm_mod.get_llm_client,
+        (cab, "get_llm_client"): cab.get_llm_client,
+    }
+
+
+_ORIGINAL_GLOBAL_GETTERS = _capture_global_getters()
+
+
+def _restore_global_getters():
+    for (module, name), original in _ORIGINAL_GLOBAL_GETTERS.items():
+        if getattr(module, name, None) is not original:
+            setattr(module, name, original)
+
+
+@pytest.fixture
+def mem_store(tmp_path):
+    """一个干净的 MemoryStore(每个测试独立)。
+
+    不隔离的话,critic 的成功/失败记录会写进真实的 `memory/failures`、
+    `memory/successes` —— 那些是生产数据,被测试污染就没法看了。
+    用 `tmp_path`(函数级)而不是 session 级目录,否则测试之间会互相累积。
+    """
+    from core.memory import MemoryStore
+
+    return MemoryStore(base_path=tmp_path / "mem")
+
+
+@pytest.fixture
+def stub_intent(monkeypatch):
+    """把 ManagerAgent 的 L1 判定替换成固定结果。
+
+    **意图的唯一裁决者是 L1**,所以测试里"让这句话被判成 X"唯一正确的做法
+    就是 stub L1 —— 而不是去喂关键词、也不是去改规则
+    (真机基线证明规则判意图会把准确率从 97.7% 拖到 94.7%)。
+
+    用法:
+        stub_intent("chitchat")
+        stub_intent("task", confidence=0.4)
+    """
+    from agents import manager as mgr_mod
+    from core.intent_labels import IntentLabel
+    from core.llm_judge import IntentDecision
+
+    def _apply(label: str, confidence: float = 0.95, reason: str = "stub",
+               slots=None, needs_clarify=False):
+        decision = IntentDecision(
+            label=IntentLabel(label),
+            confidence=confidence,
+            reason=reason,
+            slots=slots or {},
+            needs_clarify=needs_clarify,
+        )
+
+        async def _fake(self, user_input, context=None):
+            return decision
+
+        monkeypatch.setattr(mgr_mod.ManagerAgent, "_l1_classify", _fake)
+        return decision
+
+    return _apply
+
+
 @pytest.fixture(autouse=True)
-def reset_singletons():
+def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base):
     """每个测试前重置全局单例,避免污染"""
     from infra import llm as llm_mod
     from infra import logger as logger_mod
@@ -38,6 +169,61 @@ def reset_singletons():
     from tools.hub import reset_tool_hub
     from tools.base import reset_tool_registry
     from agents import teaching_session as ts_mod
+    from core import session_memory as sm_mod
+    from core import user_service as us_mod
+    from core import memory_db as mdb_mod
+    from core import semantic_memory as sem_mod
+    from core import memory_writer as mw_mod
+    from core import memory as mem_mod
+    from core import skill_quality as sq_mod
+    from core.llm_judge import reset_l1_classifier
+    from core.clarifier import reset_clarifier
+    from infra.config import config as config_mod
+
+    # 会话库指向临时目录 —— 后端测试会创建带持久化的 Agent,
+    # 不能让它们写进真实的 memory/sessions.db
+    session_db_store.clear_all()
+    monkeypatch.setattr(sm_mod, "get_session_memory_store", lambda: session_db_store)
+
+    # 长期记忆库同理(画像写入走主链,不隔离会污染生产库)
+    monkeypatch.setattr(mdb_mod, "get_memory_db", lambda: long_term_db)
+    monkeypatch.setattr(sem_mod, "get_memory_db", lambda: long_term_db)
+    sem_mod.reset_semantic_memory()
+    mw_mod.reset_memory_writer()
+
+    # MemoryStore(自演化的成功/失败记录)也要隔离:
+    # 不隔离的话,critic 会把测试产生的记录写进真实的 memory/failures、memory/successes。
+    #
+    # 注意:这里改的是**全局实例**而不是 `get_memory_store` 函数本身 ——
+    # 有些测试会自己替换 `core.memory._memory_store` 来指向临时目录,
+    # 替换函数的话那些测试就找不到自己的 store 了。
+    _store = mem_mod.MemoryStore(base_path=mem_store_base / "shared")
+    monkeypatch.setattr(mem_mod, "_memory_store", _store)
+    # `from core.memory import get_memory_store` 是直接导入,引用点要单独指回来
+    monkeypatch.setattr("core.critic.get_memory_store", lambda: mem_mod.get_memory_store())
+    monkeypatch.setattr("core.agent.get_memory_store", lambda: mem_mod.get_memory_store())
+
+    # 技能质量账本(docs/14 A-07)也要隔离:
+    # 不隔离的话,测试产生的"技能通过率"会写进真实的 memory/skills/quality.jsonl,
+    # 生产的质量数据就不可信了。
+    sq_mod.reset_skill_quality_store()
+    quality_store = sq_mod.SkillQualityStore(base_path=mem_store_base / "skill_quality")
+    monkeypatch.setattr(sq_mod, "get_skill_quality_store", lambda: quality_store)
+
+    # TraceRecorder 也指向临时目录 ——
+    # 否则测试会往真实的 memory/audit/traces.jsonl 里灌垃圾,
+    # 生产的观测数据就不可信了。
+    from core import trace as trace_mod
+
+    trace_mod.reset_trace_recorder()
+    monkeypatch.setattr(
+        trace_mod,
+        "get_trace_recorder",
+        lambda: trace_mod.TraceRecorder(
+            path=mem_store_base / "traces.jsonl",
+            enabled=bool(getattr(config_mod, "trace_enabled", True)),
+        ),
+    )
 
     # 清理 backend/skills 残留文件
     import shutil
@@ -50,6 +236,10 @@ def reset_singletons():
     logger_mod.get_logger().__init__()
     skill_mod.reset_skill_store()
     ts_mod.reset_teaching_store()
+    sm_mod.reset_session_memory_store()
+    us_mod.reset_user_service()
+    reset_l1_classifier()
+    reset_clarifier()
     # 清理 teaching 持久化目录
     teach_dir = Path(__file__).parent.parent / "memory" / "teachings"
     if teach_dir.exists():
@@ -58,7 +248,17 @@ def reset_singletons():
                 f.unlink()
             except Exception:
                 pass
+    # 清理用户档案目录(假用户服务)
+    users_dir = Path(__file__).parent.parent / "memory" / "users"
+    if users_dir.exists():
+        for f in users_dir.glob("*.json"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
     # 重置两个工具系统
     reset_tool_registry()
     reset_tool_hub()
     yield
+    # 强制还原被永久改写的全局入口(见 _capture_global_getters 的说明)
+    _restore_global_getters()
