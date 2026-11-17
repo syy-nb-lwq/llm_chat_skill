@@ -71,9 +71,9 @@ BLOCKED_MODULES: Set[str] = {
     "ctypes", "fcntl", "multiprocessing", "pty", "signal",
     "socket", "socketserver", "subprocess", "sys", "webbrowser",
 }
-#: 这些模块允许,但要用受限形式(只允许读文件/写当前目录)
+#: 这些模块允许,但要提醒一句 —— 它们能访问系统资源
 RESTRICTED_MODULES: Set[str] = {
-    "os", "shutil", "pathlib", "tempfile", "glob",
+    "os", "shutil", "tempfile", "glob",
 }
 
 
@@ -115,8 +115,9 @@ def static_check(code: str) -> List[str]:
                     problems.append(f"禁止 import {root}(第 {node.lineno} 行)")
                 elif root in RESTRICTED_MODULES:
                     problems.append(
-                        f"不建议 import {root}(第 {node.lineno} 行):"
-                        f"它能访问系统资源,优先用 pathlib/open"
+                        f"注意 import {root}(第 {node.lineno} 行):"
+                        f"它能访问系统资源 —— "
+                        f"只需要读写文件的话用 open() 就行"
                     )
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
@@ -124,8 +125,9 @@ def static_check(code: str) -> List[str]:
                 problems.append(f"禁止 from {root} import ...(第 {node.lineno} 行)")
             elif root in RESTRICTED_MODULES:
                 problems.append(
-                    f"不建议 from {root} import ...(第 {node.lineno} 行):"
-                    f"它能访问系统资源,优先用 pathlib/open"
+                    f"注意 from {root} import ...(第 {node.lineno} 行):"
+                    f"它能访问系统资源 —— "
+                    f"只需要读写文件的话用 open() 就行"
                 )
 
         # --- 危险调用 ---
@@ -188,8 +190,11 @@ class PythonExecTool(Tool):
     description = (
         "执行一段 Python 代码并返回 stdout/stderr。"
         "可以先写文件(files 参数)再在代码里读它。"
-        "适合:数据计算、格式转换、批量处理、生成产物文件。"
-        "不能做:联网、访问系统资源、装包(用 sys.executable 启动子进程也被禁)。"
+        "适合:数据计算、格式转换、批量处理、生成产物文件、"
+        "**调用外部 HTTP API**(requests / httpx / urllib 都可用)。"
+        "不可以:启动子进程、动态执行(eval/exec/__import__)、装包、"
+        "读进程环境变量里的密钥(密钥不在环境里,要用请显式传入)。"
+        "生成的文件会作为产物返回,路径在 artifacts 里。"
     )
 
     def __init__(
@@ -286,13 +291,22 @@ class PythonExecTool(Tool):
         except Exception:
             timeout_s = self.timeout_s
 
-        # --- 静态检查(只查内联代码;已保存的脚本当初就查过) ---
+        # --- 静态检查 ---
         problems = static_check(code) if code else []
         hard = [p for p in problems if p.startswith(("禁止", "语法错误"))]
         if hard:
             return ToolResult(
                 success=False,
-                error="代码被安全检查拦截:\n" + "\n".join(hard),
+                error=(
+                    "代码被安全检查拦截:\n"
+                    + "\n".join(hard)
+                    + "\n\n**这不是「什么都做不了」** —— 请改写成下面这些等价做法:\n"
+                    "- 需要 HTTP 请求 → 用 `import requests` 或 `import httpx`(允许)\n"
+                    "- 需要读写文件 → 用 `open()` / `pathlib`(允许)\n"
+                    "- 需要算数据 → 直接写 Python(允许)\n"
+                    "- 需要装包/起子进程 → 做不到,改用已有工具或请用户提供\n"
+                    "- 需要读密钥 → 密钥不在子进程环境里,请显式作为参数传入\n"
+                ),
                 meta={"blocked": True, "problems": problems},
             )
         if problems:

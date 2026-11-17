@@ -339,7 +339,7 @@ async def delete_user(user_id: str):
 @app.get("/api/sessions")
 @require_auth
 async def list_sessions(user_id: str = ""):
-    """列出会话(可选按 user_id 过滤)。"""
+    """列出会话(管理员视角,可按 user_id 过滤)。"""
     from core.session_memory import get_session_memory_store
 
     rows = get_session_memory_store().list_sessions(user_id or None)
@@ -357,10 +357,45 @@ async def list_sessions(user_id: str = ""):
     }
 
 
+@app.get("/api/session/messages")
+async def get_my_session_messages(request: Request, limit: int = 200):
+    """取**当前用户当前会话**的消息 —— 前端刷新后恢复对话用。
+
+    **为什么不用 `/api/sessions/{sid}/messages`**:那条是管理员接口
+    (`require_auth` 验的是 owner token)。普通前端只有会话令牌,没有 owner token,
+    一旦配了 `OWNER_TOKEN`,前端就取不到自己的历史了。
+
+    这里和记忆面板用同一套鉴权:`user_id` 和 `session_id` **只从令牌里取**,
+    不接受 query 参数 —— 否则传个别人的 session_id 就能读别人的对话。
+    """
+    from core.session_memory import get_session_memory_store
+
+    identity = _resolve_user_and_session(request)
+    user_id = identity["user_id"]
+    session_id = identity["session_id"]
+    if not session_id:
+        raise HTTPException(status_code=400, detail="令牌里没有 session_id")
+
+    store = get_session_memory_store()
+    if not store.session_exists(session_id):
+        # 会话还没落盘(全新会话)—— 空历史比 404 更合适,前端不用特殊处理
+        return {"session_id": session_id, "messages": [], "count": 0}
+
+    msgs = store.get_messages(session_id, limit=max(0, min(limit, 1000)), user_id=user_id)
+    return {
+        "session_id": session_id,
+        "count": len(msgs),
+        "messages": [
+            {"role": m.role, "content": m.content, "created_at": m.created_at}
+            for m in msgs
+        ],
+    }
+
+
 @app.get("/api/sessions/{session_id}/messages")
 @require_auth
 async def get_session_messages(session_id: str, limit: int = 100, user_id: str = ""):
-    """取某个会话的消息(短期记忆内容,全量保留)。
+    """取某个会话的消息(管理员接口,短期记忆内容全量保留)。
 
     ``user_id`` 可选:传了就只返回该用户的,用于隔离校验。
     """
@@ -839,6 +874,15 @@ def _resolve_user_id(request: Request) -> str:
     - **会话令牌**(WS 连接期间签发):payload 带 user_id/session_id/client_id
     - **用户令牌**(长期凭证):payload 带 user_id/tenant_id
     """
+    return _resolve_user_and_session(request)["user_id"]
+
+
+def _resolve_user_and_session(request: Request) -> dict:
+    """从令牌里取身份(user_id + session_id)。**只信任令牌,不信任 query 参数。**
+
+    Returns:
+        {"user_id": str, "session_id": str, "client_id": str}
+    """
     from infra.auth import verify_session_token, verify_user_token
 
     auth = ""
@@ -852,7 +896,11 @@ def _resolve_user_id(request: Request) -> str:
             status_code=401,
             detail="需要 Authorization: Bearer <会话令牌>",
         )
-    return str(payload["user_id"])
+    return {
+        "user_id": str(payload["user_id"]),
+        "session_id": str(payload.get("session_id") or ""),
+        "client_id": str(payload.get("client_id") or ""),
+    }
 
 
 @app.get("/api/memory/profile")

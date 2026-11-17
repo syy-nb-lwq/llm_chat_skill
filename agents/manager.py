@@ -186,6 +186,21 @@ class ManagerAgent(BaseAgent):
 - 技能是完成任务的方法论,工具是获取数据的手段
 - 没有合适的工具时,tool_tasks 返回空数组,不要硬凑
 
+**多个工具前后衔接(必须用占位符,不要写文字描述)**
+- 后一个任务依赖前一个的结果时:`depends_on` 填前一个任务的 `id`
+- 参数里引用上游结果用 `${{任务id.data.字段}}`;**数组用下标,如 `${{t1.data.results[0].url}}`**
+- 也支持 `${{任务id.success}}`、`${{任务id.error}}`、`${{user_input}}`、`${{user_input.字段}}`
+- **绝对不要写"从结果里选一个链接"这种文字占位** —— 占位符会被替换成真实值,文字描述不会,执行期必失败
+
+正确示例(先搜索再读最相关的那篇):
+```json
+"tool_tasks": [
+  {{"id": "t1", "type": "web_search", "params": {{"query": "关键词"}}}},
+  {{"id": "t2", "type": "web_fetch", "depends_on": ["t1"],
+   "params": {{"url": "${{t1.data.results[0].url}}"}}}}
+]
+```
+
 已有技能列表:
 {skills_list}
 
@@ -195,8 +210,8 @@ class ManagerAgent(BaseAgent):
   "selected_skill": "选择的技能名称(没有则填空字符串)",
   "is_retry": true/false,  // 用户是否要求重试上一次的执行
   "tool_tasks": [
-    {{"type": "weather_query", "params": {{"city": "城市名", "date": "日期"}}}},
-    {{"type": "web_search", "params": {{"query": "搜索关键词"}}}}
+    {{"id": "t1", "type": "weather_query", "params": {{"city": "城市名", "date": "日期"}}}},
+    {{"id": "t2", "type": "web_search", "params": {{"query": "搜索关键词"}}}}
   ]
 }}"""
 

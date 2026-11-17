@@ -322,9 +322,11 @@ def get_tool_hub() -> ToolHub:
         try:
             from tools.search import SearchTool
             from tools.weather import WeatherTool
+            from tools.web_fetch import WebFetchTool
 
             _hub.register_python_tool(WeatherTool())
             _hub.register_python_tool(SearchTool())
+            _hub.register_python_tool(WebFetchTool())
             _builtin_tools_added = True
         except Exception:
             pass

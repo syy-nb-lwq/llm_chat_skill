@@ -28,6 +28,40 @@ class ToolTask:
 
 
 _VAR_RE = re.compile(r"\$\{([^}]+)\}")
+#: 单段路径里的数组下标:`results[0]` / `items[1]`
+_INDEX_RE = re.compile(r"^([^\[]*)((?:\[\d+\])*)$")
+
+
+def _step(cur: Any, part: str) -> Any:
+    """走一段路径。支持 `key`、`key[0]`、`[0]` 三种形态。
+
+    取不到返回 None(调用方据此判空),不抛异常 ——
+    上游少一个字段不该让整轮崩掉。
+    """
+    if cur is None:
+        return None
+    m = _INDEX_RE.match(part)
+    if not m:
+        return cur.get(part) if isinstance(cur, dict) else getattr(cur, part, None)
+
+    key, idx_part = m.group(1), m.group(2)
+    if key:
+        cur = cur.get(key) if isinstance(cur, dict) else getattr(cur, key, None)
+    for raw in re.findall(r"\[(\d+)\]", idx_part or ""):
+        if cur is None:
+            return None
+        try:
+            idx = int(raw)
+        except ValueError:
+            return None
+        if isinstance(cur, (list, tuple)):
+            cur = cur[idx] if 0 <= idx < len(cur) else None
+        elif isinstance(cur, dict):
+            # 少数工具把数组包在 {"0": ...} 里
+            cur = cur.get(raw)
+        else:
+            return None
+    return cur
 
 
 def _resolve_value(value: Any, results: Dict[str, ToolResult],
@@ -36,9 +70,15 @@ def _resolve_value(value: Any, results: Dict[str, ToolResult],
 
     支持:
     - ${task.data.foo} / ${task.error} / ${task.success}
+    - **${task.data.results[0].url}** —— 数组下标
     - ${user_input} / ${user_input.city} ...
 
     失败或缺值的上游会解析为空字符串(整体字符串场景)。
+
+    **为什么要支持数组下标**:搜索类工具返回的是
+    `{"results": [{title, url, content}, ...]}` —— 要链式调用
+    (搜出链接 → 抓正文)就必须能取 `results[0].url`。
+    没有下标语法时,规划器只能写个占位符文字,执行期直接失败。
     """
     if isinstance(value, str):
         def repl(m):
@@ -53,10 +93,7 @@ def _resolve_value(value: Any, results: Dict[str, ToolResult],
                     return ""
                 cur: Any = user_input
                 for p in parts[1:]:
-                    if isinstance(cur, dict):
-                        cur = cur.get(p)
-                    else:
-                        cur = getattr(cur, p, None)
+                    cur = _step(cur, p)
                     if cur is None:
                         return ""
                 return "" if cur is None else str(cur)
@@ -77,10 +114,7 @@ def _resolve_value(value: Any, results: Dict[str, ToolResult],
                 if p == "success":
                     cur = getattr(r, "success", False)
                     continue
-                if isinstance(cur, dict):
-                    cur = cur.get(p)
-                else:
-                    cur = getattr(cur, p, None)
+                cur = _step(cur, p)
                 if cur is None:
                     return ""
             return "" if cur is None else str(cur)

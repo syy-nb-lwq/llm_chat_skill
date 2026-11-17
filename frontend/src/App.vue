@@ -113,8 +113,44 @@ export default {
       }
     },
 
+    // 恢复本会话的历史消息（刷新页面后不丢对话）
+    //
+    // 会话内容是全量保留在后端的（docs/13：短期记忆 = 会话内容，不按 TTL 清理），
+    // 所以这里只是“把已有的读回来”，不是重新生成。
+    async loadHistory() {
+      const session = wsService.session
+      if (!session || !session.token) return
+      try {
+        const res = await fetch(`${API_BASE}/api/session/messages`, {
+          headers: { Authorization: `Bearer ${session.token}` },
+        })
+        if (!res.ok) {
+          // 404/400 都只是“还没历史”，不打扰用户
+          return
+        }
+        const data = await res.json()
+        const restored = (data.messages || [])
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role, content: m.content || '' }))
+        // 只有当当前没有正在进行的对话时才覆盖 ——
+        // 否则可能在“刚发出一条消息”和“历史返回”之间打架
+        if (restored.length > 0 && this.messages.length === 0) {
+          this.messages = restored
+          this.pendingIndex = -1
+        }
+      } catch (e) {
+        console.warn('[History] 恢复失败:', e)
+      }
+    },
+
     initWebSocket() {
-      wsService.on('connected', () => { this.isConnected = true })
+      wsService.on('connected', () => {
+        this.isConnected = true
+        // 身份签发后立刻恢复历史 —— 否则一刷新页面，之前的对话就“消失”了。
+        // 会话内容本来就是全量保留在 memory/sessions.db 里的，
+        // 只是前端从来没去取过。
+        this.loadHistory()
+      })
       wsService.on('disconnected', () => { this.isConnected = false })
 
       // 流转事件

@@ -138,6 +138,12 @@ async def test_search_tool_uses_async_client(monkeypatch):
         def __init__(self, payload, status_code=200):
             self._payload = payload
             self.status_code = status_code
+            # HTML 后端会读 resp.text；这里给一份能被解析出结果的页面
+            self.text = (
+                '<a class="result__a" href="https://example.com">Example</a>'
+                '<a class="result__snippet">summary</a>'
+            )
+            self.headers = {"content-type": "application/json"}
 
         def json(self):
             return self._payload
@@ -148,6 +154,21 @@ async def test_search_tool_uses_async_client(monkeypatch):
 
         async def get(self, url, params=None):
             self.calls.append((url, params))
+            return FakeResponse(
+                {
+                    "results": [
+                        {
+                            "title": "Example",
+                            "url": "https://example.com",
+                            "content": "summary",
+                        }
+                    ]
+                }
+            )
+
+        async def post(self, url, headers=None, json=None):
+            # DeepSeek Search / Fetch 走 POST
+            self.calls.append((url, json))
             return FakeResponse(
                 {
                     "results": [

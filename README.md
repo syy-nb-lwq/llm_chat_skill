@@ -65,6 +65,12 @@
   - **扫描件 PDF 明确报错**（没有文本层）,不会返回空内容让模型瞎猜
 - **MCP 工具源**——并发调用也不会冲突(JOSN-RPC over 单管道的
   专职读协程 + 按 id 分发响应);实机并发 15 个调用全成功
+- **联网搜索 + 网页抓取**（`web_search` / `web_fetch`）：
+  - 优先用 **DeepSeek 自研搜索**（`/v1/tools/search` + `/v1/tools/fetch`），
+    公开引擎（duckduckgo/mojeek/bing）兜底
+  - 工具可链式调用：`${t1.data.results[0].url}` 占位符 + `depends_on`
+- **刷新页面不丢对话**：前端重连后自动拉回本会话历史
+  —— 会话内容本来就是全量保留的，只是之前没取
 - **能接 MCP 工具源**（现成的文件/网页/浏览器/Git/数据库工具）：
   - 配置 `MCP_SERVERS` 即可用;单个服务器连不上不影响其它也不影响启动
   - MCP 服务器是第三方进程 → **只应由管理员配置**
@@ -79,7 +85,7 @@
 
 测试状态：
 
-- `658 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `676 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 
