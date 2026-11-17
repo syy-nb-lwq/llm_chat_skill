@@ -94,6 +94,32 @@ class Config(BaseSettings):
     tool_creation_enabled: bool = Field(
         True, description="Allow the agent to create new tools"
     )
+    # 子智能体:允许主智能体把互不依赖的子任务派出去并行做
+    subagents_enabled: bool = Field(
+        True, description="Allow the agent to spawn subagents"
+    )
+    subagent_max_concurrent: int = Field(
+        3, description="同一时刻最多几个子智能体"
+    )
+    subagent_timeout_s: int = Field(
+        90, description="单个子智能体的超时秒数"
+    )
+    subagent_max_depth: int = Field(
+        1, description="子智能体嵌套深度上限(1 = 子智能体不能再派)"
+    )
+    # 目标循环:一轮没做完就继续做下一轮
+    #
+    # **默认开启,但循环由规划层驱动** —— 规划层每次输出 `goal_done`,
+    # 只有它明确说"还没完"才会进入下一轮。所以简单问答的行为和以前完全一样。
+    goal_loop_enabled: bool = Field(
+        True, description="Enable multi-round goal loop"
+    )
+    goal_max_rounds: int = Field(
+        6, description="目标循环最多几轮(防烧钱)"
+    )
+    goal_time_budget_s: int = Field(
+        180, description="目标循环总时长预算(秒),超了就收尾"
+    )
     intent_mode: str = Field("rule_first", description="Intent detection mode")
     intent_rule_threshold: int = Field(5, description="Rule threshold")
     intent_llm_fallback: bool = Field(True, description="Fallback to LLM")

@@ -58,19 +58,25 @@ class OrchestratorAgent(BaseAgent):
         context: Optional[Context] = None,
         profile_block: str = "",
         capability_block: str = "",
+        goal_note: str = "",
     ) -> str:
-        """整合数据,生成回答(异步)"""
+        """整合数据,生成回答(异步)。
+
+        `goal_note` 非空时表示「这一轮没完全做完」,要把原因交代给模型,
+        避免它把未完成说成已完成。
+        """
         tool_data = self._format_tool_results(tool_results)
         ctx_block = self._build_context_block(context)
         if selected_skill and selected_skill.method:
             return await self._generate_with_methodology(
                 user_input, tool_data, selected_skill.method, selected_skill.steps,
                 ctx_block=ctx_block, profile_block=profile_block,
-                capability_block=capability_block,
+                capability_block=capability_block, goal_note=goal_note,
             )
         return await self._generate_direct(
             user_input, tool_data, ctx_block=ctx_block,
             profile_block=profile_block, capability_block=capability_block,
+            goal_note=goal_note,
         )
 
     async def stream(
@@ -81,6 +87,7 @@ class OrchestratorAgent(BaseAgent):
         context: Optional[Context] = None,
         profile_block: str = "",
         capability_block: str = "",
+        goal_note: str = "",
     ) -> AsyncIterator[str]:
         """流式输出(逐 token)"""
         tool_data = self._format_tool_results(tool_results)
@@ -91,6 +98,8 @@ class OrchestratorAgent(BaseAgent):
                                         ctx_block=ctx_block)
         else:
             prompt = self._build_direct_prompt(user_input, tool_data, ctx_block=ctx_block)
+        if goal_note:
+            prompt = f"{prompt}\n\n{goal_note}"
 
         async for token in self.llm.stream([
             {"role": "system", "content": self.system_prompt(profile_block, capability_block)},
@@ -101,8 +110,11 @@ class OrchestratorAgent(BaseAgent):
     async def _generate_with_methodology(
         self, user_input: str, tool_data: str, method: str, steps: List,
         ctx_block: str = "", profile_block: str = "", capability_block: str = "",
+        goal_note: str = "",
     ) -> str:
         prompt = self._build_prompt(user_input, tool_data, method, steps, ctx_block=ctx_block)
+        if goal_note:
+            prompt = f"{prompt}\n\n{goal_note}"
         resp = await self.llm.chat_with_retry([
             {"role": "system", "content": self.system_prompt(profile_block, capability_block)},
             {"role": "user", "content": prompt},
@@ -113,8 +125,11 @@ class OrchestratorAgent(BaseAgent):
     async def _generate_direct(
         self, user_input: str, tool_data: str, ctx_block: str = "",
         profile_block: str = "", capability_block: str = "",
+        goal_note: str = "",
     ) -> str:
         prompt = self._build_direct_prompt(user_input, tool_data, ctx_block=ctx_block)
+        if goal_note:
+            prompt = f"{prompt}\n\n{goal_note}"
         resp = await self.llm.chat_with_retry([
             {"role": "system", "content": self.system_prompt(profile_block, capability_block)},
             {"role": "user", "content": prompt},

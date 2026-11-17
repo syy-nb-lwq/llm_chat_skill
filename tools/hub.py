@@ -393,6 +393,20 @@ def get_tool_hub() -> ToolHub:
 
                 _hub.register_python_tool(CreateToolTool())
                 _hub.register_python_tool(ListCreatedToolsTool())
+
+            # 子智能体:把互不依赖的子任务派出去并行做
+            if config.subagents_enabled:
+                from core.subagents import get_subagent_pool
+                from tools.subagent_tool import RunSubAgentsTool, SubAgentStatusTool
+
+                # 池子的限制来自配置,而不是写死在代码里
+                pool = get_subagent_pool()
+                pool.max_concurrent = max(1, int(config.subagent_max_concurrent))
+                pool.max_depth = max(0, int(config.subagent_max_depth))
+                pool.timeout_s = float(config.subagent_timeout_s)
+
+                _hub.register_python_tool(RunSubAgentsTool())
+                _hub.register_python_tool(SubAgentStatusTool())
         except Exception:
             pass
 

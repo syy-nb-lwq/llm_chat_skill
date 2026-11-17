@@ -69,6 +69,11 @@
   - 优先用 **DeepSeek 自研搜索**（`/v1/tools/search` + `/v1/tools/fetch`），
     公开引擎（duckduckgo/mojeek/bing）兜底
   - 工具可链式调用：`${t1.data.results[0].url}` 占位符 + `depends_on`
+- **目标循环（不是一问一答）**：一轮没做完就带着已知结果再规划一轮，
+  直到规划层明确说「达成」；`docs/15` 有设计，四道闸防死循环/烧钱/打转/失败被吞
+- **子智能体并行**（`run_subagents`）：把互不依赖的子目标派出去并行做，
+  独立上下文、只回结论；主智能体可查状态（`subagent_status`），
+  前置防护：深度 1 / 并发 3 / 单个超时 90s
 - **agent 能自己造工具**（`create_tool`）：
   - 声明式 HTTP 工具（给 URL 模板 + 参数）或代码工具（直接写 Python）
   - 静态校验 → 风险分级 → **真跑测试用例** → 发布，本轮/下一轮就能用
@@ -93,7 +98,7 @@
 
 测试状态：
 
-- `751 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `801 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 

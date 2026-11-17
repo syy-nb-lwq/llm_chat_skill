@@ -336,6 +336,35 @@ class Agent:
         self._capability_cache = block
         return block
 
+    # ===== 目标循环配置 =====
+
+    def _goal_loop_enabled(self) -> bool:
+        """要不要跑多轮（关掉就退化成"只跑一轮"，和旧行为一致）。"""
+        try:
+            from infra.config import config
+
+            return bool(getattr(config, "goal_loop_enabled", True))
+        except Exception:
+            return True
+
+    def _goal_max_rounds(self) -> int:
+        """轮次上限 —— 防烧钱的第一道闸。"""
+        try:
+            from infra.config import config
+
+            return max(1, int(getattr(config, "goal_max_rounds", 6)))
+        except Exception:
+            return 6
+
+    def _goal_budget_s(self) -> float:
+        """总时长预算 —— 第二道闸。"""
+        try:
+            from infra.config import config
+
+            return max(10.0, float(getattr(config, "goal_time_budget_s", 180)))
+        except Exception:
+            return 180.0
+
     # ===== 分阶段耗时记录 =====
 
     def _new_trace(self):
@@ -519,6 +548,13 @@ class Agent:
         # (避免两处读不一致)
         self._profile_cache = None
         self._capability_cache = None
+        # 上一轮的 emitter 可能还挂着（那一轮已经结束），先清掉
+        try:
+            from core.event_bus import clear_emitter
+
+            clear_emitter()
+        except Exception:
+            pass
         profile_block = self._get_profile_block()
         capability_block = self._get_capability_block()
 
@@ -583,6 +619,21 @@ class Agent:
             except Exception:
                 pass
 
+        # 把 emitter 放进上下文 —— 工具（如 run_subagents）和子智能体
+        # 深处没有 on_event 参数可传，靠这个把进度事件推出来。
+        #
+        # 注意 `emit` 是**同步**函数（它把协程塞进 pending_async 再统一 await），
+        # 而 event_bus 需要 async 接口，所以这里包一层。
+        try:
+            from core.event_bus import set_emitter
+
+            async def _async_emit(event: str, payload: dict):
+                emit(event, payload)
+
+            set_emitter(_async_emit)
+        except Exception:
+            pass
+
         async def _drain_pending():
             """按 emit 顺序串行 await 所有 pending 任务。"""
             while pending_async:
@@ -605,6 +656,7 @@ class Agent:
                 user_input, tool_results, skill, self.context,
                 profile_block=profile_block,
                 capability_block=capability_block,
+                goal_note=goal_note,
             ):
                 if trace is not None and not first_seen:
                     trace.since(STAGE_FIRST_TOKEN, turn_start)
@@ -616,6 +668,9 @@ class Agent:
             return self._ensure_answer("".join(buf))
 
         ans = ""       # 本轮最终回答(finally 里用来记长度)
+        # 目标循环"没做完"的说明（空 = 已完成或还没跑到循环）。
+        # 必须在 _answer_stream 定义/调用之前初始化 —— 闲聊路径也会用到它。
+        goal_note = ""
         trace_error = ""
         try:
             # ===== 意图规划(统一入口) =====
@@ -719,33 +774,47 @@ class Agent:
             # 提取实体,供 Skill DAG 的 params 用 (${user_input.city})
             entities = self._extract_entities(user_input)
 
-            # 执行工具
-            tool_results: Dict = {}
-            tasks: List[ToolTask] = []
-            tools_start = time.perf_counter()
-            if plan.tool_tasks:
-                emit("thinking", {"stage": "tools_running", "count": len(plan.tool_tasks)})
+            # ===== 目标循环 =====
+            #
+            # 一轮规划常常做不完:要造工具、要先查再算、要失败重来。
+            # 循环由规划层的 `goal_done` 驱动 —— 它说"够了"就停,
+            # 所以「你好」「算 1+1」这类请求行为和以前完全一样(只跑一轮)。
+            from core.goal_runner import run_goal_loop
+
+            # 最后一轮实际执行的 ToolTask 列表（critic 需要它拿真实工具名）
+            planned_holder: Dict[str, List[ToolTask]] = {"tasks": []}
+
+            async def _run_plan_tasks(p) -> Dict:
+                """执行一份计划里的工具任务。"""
+                results: Dict = {}
+                if not p.tool_tasks:
+                    return results
+                emit("thinking", {"stage": "tools_running", "count": len(p.tool_tasks)})
 
                 async def on_tool_event(event: str, payload: dict):
                     emit(event, payload)
 
                 # 如果启用了 Skill DAG 且 plan 关联到了带结构化 steps 的 skill,
-                # 优先用 DAGExecutor 把 skill.steps 翻成 ToolTask(忽略 Manager 输出的 task 列表)。
+                # 优先用 DAGExecutor 把 skill.steps 翻成 ToolTask。
+                planned_tasks: List[ToolTask] = []
                 used_dag = False
-                if self.dag_enabled and plan.selected_skill and plan.selected_skill.has_structured_steps():
-                    skill_tasks, issues = self.dag.skill_to_tasks(plan.selected_skill)
+                if self.dag_enabled and p.selected_skill and p.selected_skill.has_structured_steps():
+                    skill_tasks, issues = self.dag.skill_to_tasks(p.selected_skill)
                     for i in issues:
                         emit("thinking", {"stage": "dag_skip", "issue": i})
                     if skill_tasks:
-                        tasks = skill_tasks
+                        planned_tasks = skill_tasks
                         used_dag = True
-                        emit("thinking", {"stage": "skill_dag_used", "skill": plan.selected_skill.name, "count": len(tasks)})
+                        emit("thinking", {
+                            "stage": "skill_dag_used",
+                            "skill": p.selected_skill.name,
+                            "count": len(planned_tasks),
+                        })
 
                 if not used_dag:
-                    tasks = []
-                    for i, t in enumerate(plan.tool_tasks):
+                    for i, t in enumerate(p.tool_tasks):
                         task_id = t.get("id") or f"t{i+1}"
-                        tasks.append(ToolTask(
+                        planned_tasks.append(ToolTask(
                             id=task_id,
                             type=t.get("type", ""),
                             params=t.get("params", {}),
@@ -754,10 +823,41 @@ class Agent:
                             timeout_s=int(t.get("timeout_s", 30) or 30),
                             fallback_to=t.get("fallback_to"),
                         ))
-                tool_results = await self.learning.execute_dag(
-                    tasks, on_tool_event,
+                planned_holder["tasks"] = planned_tasks
+                return await self.learning.execute_dag(
+                    planned_tasks, on_tool_event,
                     user_input={"text": user_input, **entities}
                 )
+
+            # 记录"最近一次的 plan" —— 重规划后回答要用最新的技能
+            active = {"plan": plan}
+
+            async def _replan(prior_findings: str):
+                new_plan = await self.manager.plan(
+                    user_input,
+                    self.context,
+                    session_id=self.session_id,
+                    user_id=self.user_id,
+                    profile_block=profile_block,
+                    prior_findings=prior_findings,
+                )
+                active["plan"] = new_plan
+                return new_plan
+
+            tools_start = time.perf_counter()
+            goal = await run_goal_loop(
+                first_plan=plan,
+                plan_fn=_replan,
+                execute_fn=_run_plan_tasks,
+                emit=emit,
+                enabled=self._goal_loop_enabled(),
+                max_rounds=self._goal_max_rounds(),
+                budget_s=self._goal_budget_s(),
+                is_clarify=lambda p: getattr(p, "intent", None) == IntentType.CLARIFY,
+            )
+            tool_results = goal.tool_results
+            plan = active["plan"]
+            emit("thinking", {"stage": "goal_loop_done", **goal.to_dict()})
 
             # 存储本次 tool_tasks 用于重试
             self.context.set_last_tool_tasks(plan.tool_tasks)
@@ -772,6 +872,16 @@ class Agent:
                 )
 
             # 生成回答
+            # 没真的做完时,要把原因交给回答层 —— 不能说得像全成了
+            if not goal.completed:
+                goal_note = (
+                    f"注意：这一轮没有完全完成目标（{goal.explanation}，"
+                    f"共跑了 {goal.rounds} 轮）。回答时必须如实说明"
+                    f"哪些部分没做成、卡在哪,不要把未完成说成已完成。"
+                )
+                emit("thinking", {"stage": "goal_incomplete", "detail": goal_note})
+            else:
+                goal_note = ""
             emit("thinking", {"stage": "synthesizing"})
             try:
                 ans = await _answer_stream(tool_results, plan.selected_skill)
@@ -780,6 +890,7 @@ class Agent:
                     user_input, tool_results, plan.selected_skill, self.context,
                     profile_block=profile_block,
                     capability_block=capability_block,
+                    goal_note=goal_note,
                 )
                 emit("message_delta", {"delta": ans})
 
@@ -810,7 +921,7 @@ class Agent:
                         "timeout_s": t.timeout_s,
                         "fallback_to": t.fallback_to,
                     }
-                    for t in tasks
+                    for t in planned_holder["tasks"]
                 },
                 # M0-01:四级标识
                 execution_id=self.execution_id,

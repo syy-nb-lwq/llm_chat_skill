@@ -67,6 +67,14 @@ class PlanResult:
     intent_confidence: float = 0.0  # 置信度
     intent_uncertain: bool = False  # 置信度不足,已升级到 L2 兜底
     intent_slots: Dict[str, Any] = field(default_factory=dict)
+    #: 规划层认为「目标已经达成」了吗？
+    #:
+    #: **这是目标循环的开关**：True（默认）表示这一轮规划就够了，
+    #: 走完工具直接生成回答；False 表示还有没做完的事，需要再规划一轮。
+    #: 默认 True 保证简单问答的行为和以前完全一样（永远只跑一轮）。
+    goal_done: bool = True
+    #: 还没做完什么（goal_done=False 时给下一轮看的提示）
+    remaining_note: str = ""
 
 
 # ===== 意图标签(6 闭集,与 core/intent_labels.py::IntentLabel 一一对应) =====
@@ -186,6 +194,9 @@ class ManagerAgent(BaseAgent):
                 "plan_detail":    {"type": "string"},
                 "selected_skill": {"type": "string"},
                 "is_retry":       {"type": "boolean"},
+                # 目标循环:这一轮规划之后目标达成了吗
+                "goal_done":      {"type": "boolean"},
+                "remaining_note": {"type": "string"},
                 "tool_tasks": {
                     "type": "array",
                     "items": {
@@ -228,6 +239,25 @@ class ManagerAgent(BaseAgent):
 - 参数里引用上游结果用 `${{任务id.data.字段}}`;**数组用下标,如 `${{t1.data.results[0].url}}`**
 - 也支持 `${{任务id.success}}`、`${{任务id.error}}`、`${{user_input}}`、`${{user_input.字段}}`
 - **绝对不要写"从结果里选一个链接"这种文字占位** —— 占位符会被替换成真实值,文字描述不会,执行期必失败
+
+**关于 goal_done(很重要)**
+- 每次规划都要判断:**执行完你规划的这些工具之后,用户的目标就达成了吗?**
+- 达成了 → `goal_done: true`,并让 tool_tasks 覆盖完成任务所需的全部步骤
+- 没达成 → `goal_done: false`,并在 `remaining_note` 里写清"还差什么",
+  系统会带着已知结果再规划一轮(最多几轮)
+- **不要为了"显得在干活"而给 false**;也不要明明还差关键一步就给 true
+- 一次能规划全就给 true(把多步拆成多个 tool_task 按顺序执行更高效)
+
+**「准备」不等于「完成」（最容易判错的一条）**
+- `create_tool` / `write_script` 只是**把手艺准备好**，任务还没做完
+- 用户如果说「先…然后…」「造好之后…」「再用它…」「再帮我…」，
+  这是**分步要求**：把用户的话拆成动作清单，**逐项打勾，全打完才能 true**
+- 例：用户说「先造一个算 BMI 的工具，然后用它算 1.75/70」
+  - 只调了 create_tool → `goal_done: false`，
+    `remaining_note: "工具已建好，还没用它计算 1.75m/70kg 的 BMI"`
+  - 如果一轮里既造了工具又用了它 → 才能 true
+- **判断方法**：问自己「用户拿到我的回答时，他要求的事情**全部做完了**吗？」
+  只是"我准备好了"是不够的
 
 **要造新工具时(create_tool)** —— 两个关键字段别弄错:
 - 没有现成接口、要自己算 → `"kind": "code"` + `"implementation"`(Python 代码,
@@ -299,8 +329,11 @@ class ManagerAgent(BaseAgent):
         session_id: str = "",
         user_id: str = "",
         profile_block: str = "",
+        prior_findings: str = "",
     ) -> PlanResult:
         """分析用户输入,产出 PlanResult(三层编排)。
+
+        `prior_findings` 是**目标循环**里前几轮已经拿到的结果（空 = 第一轮）。
 
         - **结构守卫**:只判断"不需理解语义就能确定"的事(空输入 → 澄清)。
           **没有任何"猜用户怎么说"的规则** —— 那种规则会静默地判错,
@@ -378,6 +411,7 @@ class ManagerAgent(BaseAgent):
             user_id=user_id,
             intent_hint=decision,
             profile_block=profile_block,
+            prior_findings=prior_findings,
         )
         if plan is not None:
             return plan
@@ -520,6 +554,7 @@ class ManagerAgent(BaseAgent):
         user_id: str = "",
         intent_hint: Optional[IntentDecision] = None,
         profile_block: str = "",
+        prior_findings: str = "",
     ) -> Optional[PlanResult]:
         """L2 规划层:规划要调哪些工具、用哪个技能。
 
@@ -541,7 +576,8 @@ class ManagerAgent(BaseAgent):
         try:
             llm_plan = await self.think_json(
                 self._build_user_prompt(
-                    enriched_input, context, intent_hint, profile_block
+                    enriched_input, context, intent_hint, profile_block,
+                    prior_findings=prior_findings,
                 ),
                 self.plan_schema,
             )
@@ -567,6 +603,13 @@ class ManagerAgent(BaseAgent):
         plan_detail = llm_plan.get("plan_detail", "") or ""
         if selected_skill:
             self.logger.info("Manager", f"选择技能: {selected_skill.name}")
+
+        goal_done = llm_plan.get("goal_done", True)
+        if not isinstance(goal_done, bool):
+            goal_done = True
+        remaining_note = str(llm_plan.get("remaining_note") or "")
+        if goal_done:
+            remaining_note = ""
 
         tool_tasks = self._auto_id_tool_tasks(llm_plan.get("tool_tasks", []) or [])
         tool_tasks, dropped = self._filter_unknown_tools(tool_tasks)
@@ -612,6 +655,8 @@ class ManagerAgent(BaseAgent):
                 intent_confidence=confidence,
                 intent_uncertain=uncertain,
                 intent_slots=slots,
+                goal_done=goal_done,
+                remaining_note=remaining_note,
             )
 
         # M1-02: 即使没有 tool_tasks,只要选中了 selected_skill
@@ -668,15 +713,22 @@ class ManagerAgent(BaseAgent):
         context: Optional[Context],
         intent_hint: Optional[IntentDecision] = None,
         profile_block: str = "",
+        prior_findings: str = "",
     ) -> str:
-        """把上下文历史对话 + L1 判别结果 + 用户画像拼到当前 user_input。
+        """把上下文历史对话 + L1 判别结果 + 用户画像 + 前几轮结果拼到 user_input。
 
         不会破坏现有调用——若 context 为空/None,直接返回原 user_input。
         """
         summary_block = context.summary_block() if context is not None else ""
         hint_block = self._build_intent_hint_block(intent_hint)
+        findings_block = ""
+        if (prior_findings or "").strip():
+            findings_block = (
+                "## 前几轮已经拿到的结果(不要重复查这些,继续往下做)\n"
+                + prior_findings.strip()
+            )
         prefix = "\n\n".join(
-            x for x in (hint_block, summary_block, profile_block) if x
+            x for x in (hint_block, summary_block, profile_block, findings_block) if x
         )
 
         if context is None or len(context) == 0:
