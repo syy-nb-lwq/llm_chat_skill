@@ -347,6 +347,15 @@ def get_tool_hub() -> ToolHub:
         except Exception:
             pass
 
+        # 文档工具 —— 读文档 + 定位锚点
+        try:
+            from tools.document import LocateDocumentTool, ReadDocumentTool
+
+            _hub.register_python_tool(ReadDocumentTool())
+            _hub.register_python_tool(LocateDocumentTool())
+        except Exception:
+            pass
+
     return _hub
 
 

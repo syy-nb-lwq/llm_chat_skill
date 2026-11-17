@@ -53,6 +53,10 @@
 - **能写脚本、能跑脚本**（`python_exec` / `write_script`）：
   - 子进程隔离执行：独立 cwd、`-I` 隔离模式、**env 白名单(子进程拿不到 API key)**、超时、AST 静态黑名单
   - **子进程隔离 = 崩溃隔离,不是安全边界**——多租户对外开放前必须关掉 `CODE_EXEC_ENABLED` 或换容器隔离
+- **能读文档，能引用原文**（`read_document` / `locate_document`）：
+  - docx / xlsx / pptx / pdf / md / csv / html → 带锚点的 markdown
+  - **锚点带位置**（如 `[B7 p.3]` / `[B2 数据|A1:C3]`）——LLM 引用后用户可核对
+  - **扫描件 PDF 明确报错**（没有文本层）,不会返回空内容让模型瞎猜
 - **能接 MCP 工具源**（现成的文件/网页/浏览器/Git/数据库工具）：
   - 配置 `MCP_SERVERS` 即可用;单个服务器连不上不影响其它也不影响启动
   - MCP 服务器是第三方进程 → **只应由管理员配置**
@@ -67,7 +71,7 @@
 
 测试状态：
 
-- `597 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `620 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 

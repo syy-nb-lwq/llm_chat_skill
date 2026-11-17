@@ -23,3 +23,18 @@ numpy>=1.24.0
 anthropic>=0.25.0
 # 自我进化/SOUL/MCP 测试与依赖
 python-multipart>=0.0.7
+
+# 文档处理(read_document / locate_document)
+#
+# 分两类:
+#   必装 —— 本项目自己解析器要用的,缺了就读不了对应格式
+#   可选 —— markitdown,只用于冷门格式兜底和 HTML
+#
+# 扫描件 PDF(整页图片、没有文本层)需要 OCR,本项目**不做** OCR ——
+# 遇到会明确报错,不会返回空内容让模型瞎猜。
+openpyxl>=3.1.0
+python-docx>=1.1.0
+python-pptx>=1.0.0
+pdfplumber>=0.11.0
+# 可选:markitdown>=0.1.0(装了就多支持一批格式,没装也能读上面四种)
+# 可选:reportlab>=4.0.0(仅测试用,生成带文本层的 PDF 固件)

@@ -375,6 +375,9 @@ Frontend / CLI / Streamlit
 - **能执行代码**：`python_exec` 子进程隔离（独立 cwd / `-I` / env 白名单 / 超时 / AST 黑名单）；
   `write_script` 持久化脚本。**子进程隔离是崩溃隔离不是安全边界**，
   多租户对外开放前必须关掉 `CODE_EXEC_ENABLED` 或换容器隔离
+- **能读文档并引用原文**：`read_document` 返回带锚点的 markdown
+  (锚点带页码/表名/单元格),再用 `locate_document` 反查原文;
+  扫描件 PDF 明确报错而不是返回空
 - **MCP 工具源**：配 `MCP_SERVERS` 即可接入现成工具器；单服务器失败不影响启动
 - **意图只由 LLM 判**：规则退到「结构守卫」（只判空输入）。
   实测 130 条：规则+LLM 94.7% vs 只有 LLM 97.7% —— 用规则猜说法是在拖低准确率
