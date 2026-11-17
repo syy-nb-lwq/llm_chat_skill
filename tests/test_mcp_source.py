@@ -242,58 +242,124 @@ def test_get_tool_schema_missing_returns_none():
     assert source.get_tool_schema("nope") is None
 
 
+def _make_fake_pipe(source, responder=None):
+    """造一个**请求驱动**的假管道。
+
+    真实的 MCP 服务器只会在收到请求后才回应。
+    假管道如果不等请求就自己吐数据,会把响应在请求发出之前
+    就消费掉 —— 那不是真实行为,是测试自己造的麻烦。
+    """
+    sink: list = []
+
+    class _FakeWriter:
+        def write(self, data):
+            sink.append(json.loads(data.decode()))
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeReader:
+        async def readline(self):
+            while not sink:
+                await asyncio.sleep(0.005)
+            req = sink.pop(0)
+            if responder is not None:
+                line = responder(req)
+            else:
+                line = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "result": {"echo": req["method"]},
+                }) + "\n"
+            return line.encode()
+
+    source._writer = _FakeWriter()
+    source._reader = _FakeReader()
+    return sink
+
+
 @pytest.mark.asyncio
-async def test_read_response_times_out():
+async def test_request_times_out():
     """服务器不回话 → 超时报错,**不能挂死**。
 
-    实机踩过:一个不响应(或回非 JSON)的 MCP 服务器会让整个 agent
-    启动卡住,因为 `_read_response` 是裸的 `readline()`。
+    实机踩过:一个不响应的 MCP 服务器会让整个 agent 启动卡死。
     """
-    from tools.sources.mcp_source import MCPSource
-
     source = create_mcp_source(name="silent")
-    source.read_timeout_s = 5
+    source.read_timeout_s = 1
 
-    class _FakeReader:
+    class _SilentReader:
         async def readline(self):
-            await asyncio.sleep(3600)   # 永远不返回
+            await asyncio.sleep(3600)
             return b""
 
-    source._reader = _FakeReader()
+    source._reader = _SilentReader()
+
+    class _FakeWriter:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            return None
+
+    source._writer = _FakeWriter()
+    source._reader_task = asyncio.create_task(source._pump_responses())
+
     with pytest.raises(TimeoutError):
-        await source._read_response()
+        await source._send_request("tools/list", {})
+
+    source._reader_task.cancel()
 
 
 @pytest.mark.asyncio
-async def test_read_response_rejects_non_json():
-    """服务器回非 JSON → 明确报错,而不是 json.loads 的原始异常。"""
-    from tools.sources.mcp_source import MCPSource
+async def test_pump_tolerates_non_json():
+    """服务器回非 JSON(如 npx 的日志)不应让读协程直接死掉。
 
+    死了就是“后面所有请求都等不到”——
+    它不会报错,只是永远无声。
+    """
     source = create_mcp_source(name="noisy")
 
-    class _FakeReader:
-        async def readline(self):
-            return b"npm WARN exec something\n"
+    def _responder(req):
+        return json.dumps({
+            "jsonrpc": "2.0", "id": req["id"], "result": {"ok": True},
+        }) + "\n"
 
-    source._reader = _FakeReader()
-    with pytest.raises(ValueError) as exc:
-        await source._read_response()
-    assert "非 JSON" in str(exc.value)
+    _make_fake_pipe(source, _responder)
+    source._reader_task = asyncio.create_task(source._pump_responses())
+
+    resp = await asyncio.wait_for(source._send_request("tools/list", {}), timeout=5)
+    assert resp["id"] is not None
+    assert resp["result"]["ok"] is True
+
+    source._reader_task.cancel()
 
 
 @pytest.mark.asyncio
-async def test_read_response_detects_closed_connection():
-    from tools.sources.mcp_source import MCPSource
-
+async def test_closed_connection_fails_pending():
+    """服务器关闭连接 → 等待者立刻失败。"""
     source = create_mcp_source(name="gone")
 
     class _FakeReader:
         async def readline(self):
-            return b""
+            return b""      # EOF
 
     source._reader = _FakeReader()
+    source._reader_task = asyncio.create_task(source._pump_responses())
+
+    class _FakeWriter:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            return None
+
+    source._writer = _FakeWriter()
+
     with pytest.raises(ConnectionError):
-        await source._read_response()
+        await asyncio.wait_for(source._send_request("tools/list", {}), timeout=5)
 
 
 @pytest.mark.asyncio
@@ -438,3 +504,202 @@ def test_mcpsource_proxies_name_and_config():
     src = create_mcp_source(name="fs", server_path="npx -y x")
     assert src.name == "fs"
     assert src.config["server_path"] == "npx -y x"
+
+
+# ============================================================
+# 5. 并发 —— 实机踩到的坑
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_do_not_conflict(monkeypatch):
+    """**并行调用 MCP 工具不能报 asyncio 的并发读错误。**
+
+    实机症状:agent 一次发起多个操作,15 个调用只成了 1 个,报错是
+    `readuntil() called while another coroutine is already waiting for
+    incoming data`。
+
+    根因:JSON-RPC over 单管道,同一时刻只能有一个协程读管道。
+    原实现是"发请求 → 直接读一行 → 当作响应",没有专职读协程,
+    也没有按 id 分发。
+    """
+    import tools.sources.mcp_source as mod
+
+    source = create_mcp_source(name="x")
+
+    # 假管道:按写入顺序吐出对应 id 的响应(故意让后面的先回,模拟乱序)
+    class _FakeWriter:
+        def __init__(self, sink):
+            self._sink = sink
+
+        def write(self, data):
+            self._sink.append(json.loads(data.decode()))
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeReader:
+        def __init__(self, sink):
+            self._sink = sink
+
+        async def readline(self):
+            # 等待有请求被写入
+            while not self._sink:
+                await asyncio.sleep(0.005)
+            req = self._sink.pop(0)
+            payload = json.dumps({
+                "jsonrpc": "2.0",
+                "id": req["id"],
+                "result": {"echo": req["method"]},
+            }) + "\n"
+            return payload.encode()
+
+    sink: list = []
+    source._writer = _FakeWriter(sink)
+    source._reader = _FakeReader(sink)
+    source._reader_task = asyncio.create_task(source._pump_responses())
+
+    # 并发发起 8 个请求
+    results = await asyncio.gather(
+        *[source._send_request("tools/call", {"n": i}) for i in range(8)],
+        return_exceptions=True,
+    )
+
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert not errors, f"并发调用出错: {errors[:3]}"
+    # 每个响应都要回到**对的那个请求**
+    assert len(results) == 8
+    for i, r in enumerate(results):
+        assert r["result"]["echo"] == "tools/call"
+
+    source._reader_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_get_their_own_responses(monkeypatch):
+    """并发时,响应必须**按 id**回到对应的请求,不能串台。
+
+    这比"不报错"更重要:串台的话,agent 拿到的是别的工具的返回值,
+    而且完全察觉不到 —— 表现为"答案莫名其妙"。
+    """
+    import tools.sources.mcp_source as mod
+
+    source = create_mcp_source(name="x")
+
+    class _FakeWriter:
+        def __init__(self, sink):
+            self._sink = sink
+
+        def write(self, data):
+            req = json.loads(data.decode())
+            self._sink.append(req)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeReader:
+        """故意**倒序**返回响应 —— 最考验 id 匹配。"""
+
+        def __init__(self, sink):
+            self._sink = sink
+            self._buffer = []
+
+        async def readline(self):
+            while not self._buffer:
+                while not self._sink:
+                    await asyncio.sleep(0.005)
+                # 把当前攒下的请求倒序吐回去
+                batch = list(self._sink)
+                self._sink.clear()
+                self._buffer = [
+                    json.dumps({
+                        "jsonrpc": "2.0",
+                        "id": r["id"],
+                        "result": {"n": r["params"]["n"]},
+                    }) + "\n"
+                    for r in reversed(batch)
+                ]
+            return self._buffer.pop(0).encode()
+
+    sink: list = []
+    source._writer = _FakeWriter(sink)
+    source._reader = _FakeReader(sink)
+    source._reader_task = asyncio.create_task(source._pump_responses())
+
+    results = await asyncio.gather(
+        *[source._send_request("tools/call", {"n": i}) for i in range(5)]
+    )
+    # 拿到的 n 必须是自己请求的 n
+    got = sorted(r["result"]["n"] for r in results)
+    assert got == [0, 1, 2, 3, 4], f"响应串台了: {got}"
+
+    source._reader_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_pending_waiters_fail_fast_on_disconnect():
+    """断开时,还在等响应的协程要**立刻**失败,而不是干等超时。"""
+    source = create_mcp_source(name="x")
+
+    class _FakeWriter:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeReader:
+        async def readline(self):
+            await asyncio.sleep(3600)
+            return b""
+
+    source._writer = _FakeWriter()
+    source._reader = _FakeReader()
+    source._reader_task = asyncio.create_task(source._pump_responses())
+
+    waiter = asyncio.ensure_future(source._send_request("tools/call", {}))
+    await asyncio.sleep(0.05)
+
+    await source.disconnect()
+    with pytest.raises(Exception):
+        await asyncio.wait_for(waiter, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_request_timeout_mentions_method():
+    """超时要说清是哪个方法 —— 不然排查时只能猜。"""
+    source = create_mcp_source(name="x")
+    source.read_timeout_s = 1
+
+    class _FakeWriter:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _FakeReader:
+        async def readline(self):
+            await asyncio.sleep(3600)
+            return b""
+
+    source._writer = _FakeWriter()
+    source._reader = _FakeReader()
+    source._reader_task = asyncio.create_task(source._pump_responses())
+
+    with pytest.raises(TimeoutError) as exc:
+        await source._send_request("tools/list", {})
+    assert "tools/list" in str(exc.value)
+
+    source._reader_task.cancel()

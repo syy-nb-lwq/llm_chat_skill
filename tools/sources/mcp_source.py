@@ -111,10 +111,34 @@ class MCPSource(ToolSourceBase):
         self._request_id = 0
         #: 读取响应的超时(秒)。**必须有** —— 否则一个不回话的服务器
         #: 能让整个 agent 启动卡死(实测踩过)。
-        self.read_timeout_s = max(5, int(read_timeout_s))
+        # 下限 1 秒:超时设计本身就不应该长超过几秒——
+        # 下限 5 秒时测试要等 5 秒,整套慢一百多秒。
+        self.read_timeout_s = max(1, int(read_timeout_s))
         #: stderr 尾部(诊断用),由后台任务持续收集
         self._stderr_tail: List[str] = []
         self._stderr_task: Optional[asyncio.Task] = None
+        # ===== 并发支持 =====
+        #
+        # **JSON-RPC over 单管道有两个硬性要求,少一个就会炸:**
+        #
+        # 1. **同一时刻只能有一个协程在读管道。**
+        #    两个协程同时 `readline()` 同一个 StreamReader,asyncio 会直接抛
+        #    `readuntil() called while another coroutine is already waiting for
+        #    incoming data`。
+        #    → 解法:一个**专职读协程**独占管道,其他协程通过 Future 拿结果。
+        #
+        # 2. **响应必须按 id 分发给对应的请求。**
+        #    允许多个请求同时在途时,响应回来的顺序不保证和请求一致。
+        #    → 解法:`_pending` 表:id → Future。
+        #
+        # **踩过的坑**:最早的实现是"发请求 → 直接读一行 → 当作响应",
+        # 没有锁、没有 id 匹配。并行调两个 MCP 工具时 15 个调用只成了 1 个,
+        # 报的错就是上面那句 asyncio 内部错误。
+        # 这不只是 MCP 的问题 —— `agents/learning.py` 会用 `asyncio.create_task`
+        # 并行执行工具任务,所以并行是常态,不是边缘情况。
+        self._write_lock = asyncio.Lock()
+        self._pending: Dict[int, asyncio.Future] = {}
+        self._reader_task: Optional[asyncio.Task] = None
 
     # ===== 代理到 ToolSource =====
     #
@@ -166,6 +190,16 @@ class MCPSource(ToolSourceBase):
         if self._stderr_task is not None:
             self._stderr_task.cancel()
             self._stderr_task = None
+
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            self._reader_task = None
+
+        # 让还在等响应的协程立刻知道,而不是干等到超时
+        for fut in list(self._pending.values()):
+            if not fut.done():
+                fut.set_exception(ConnectionError("MCP 连接已断开"))
+        self._pending.clear()
 
         if self._process:
             self._process.terminate()
@@ -258,6 +292,10 @@ class MCPSource(ToolSourceBase):
         self._reader = self._process.stdout
         self._writer = self._process.stdin
 
+        # **专职读协程**:独占管道,按 id 把响应分发给等待者。
+        # 其他协程一律不碰 `self._reader` —— 那是并发读的根源。
+        self._reader_task = asyncio.create_task(self._pump_responses())
+
         # **必须持续抽干 stderr。**
         # stderr 是管道,缓冲区满了服务器就会阻塞在写 stderr 上,
         # 于是它不再读 stdin → 双方死锁。
@@ -298,6 +336,60 @@ class MCPSource(ToolSourceBase):
                     del self._stderr_tail[:-20]
         except Exception:
             pass
+
+    async def _pump_responses(self) -> None:
+        """专职读协程:独占 stdout,按 id 把响应分发给等待者。
+
+        **为什么必须有它**:asyncio 的 StreamReader 不允许多个协程同时读。
+        并行调工具时,两个 `_send_request` 各自去读同一个 reader →
+        `readuntil() called while another coroutine is already waiting`。
+        实测:15 个并行调用只成了 1 个。
+
+        这里只有**一个**协程读管道,读到的消息按 `id` 交给对应的 Future。
+        没有 id 的是服务器发来的通知,忽略(目前用不上)。
+        """
+        try:
+            while True:
+                line = await self._reader.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").strip()
+                if not text:
+                    continue
+                try:
+                    msg = json.loads(text)
+                except Exception:
+                    self.logger.warning(
+                        "MCP", f"{self.source.name} 返回非 JSON: {text[:120]!r}"
+                    )
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                msg_id = msg.get("id")
+                if msg_id is None:
+                    # 通知/服务器主动消息 —— 目前没有用途,丢掉
+                    continue
+                fut = self._pending.get(msg_id)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.warning("MCP", f"{self.source.name} 读取协程结束: {exc}")
+        finally:
+            # 服务器断开:让所有等待者立刻知道,而不是干等到超时
+            for fut in list(self._pending.values()):
+                if not fut.done():
+                    fut.set_exception(
+                        ConnectionError(
+                            f"MCP 服务器 {self.source.name} 关闭了连接"
+                            + (
+                                f"; stderr: {' | '.join(self._stderr_tail[-3:])}"
+                                if self._stderr_tail
+                                else ""
+                            )
+                        )
+                    )
 
     async def _connect_http(self, server_url: str) -> bool:
         """通过 HTTP 连接 MCP 服务器"""
@@ -360,20 +452,39 @@ class MCPSource(ToolSourceBase):
             return {"error": f"HTTP {resp.status}"}
 
     async def _send_request(self, method: str, params: Dict) -> Dict:
-        """发送 JSON-RPC 请求"""
-        self._request_id += 1
-        request = {
-            "jsonrpc": "2.0",
-            "id": self._request_id,
-            "method": method,
-            "params": params,
-        }
-        
-        request_str = json.dumps(request) + "\n"
-        self._writer.write(request_str.encode())
-        await self._writer.drain()
-        
-        return await self._read_response()
+        """发送 JSON-RPC 请求并等待**属于自己的**响应。
+
+        **可以并发调用**:多个请求可以同时在途,响应由专职读协程按 id 分发。
+        写操作用锁串行化(`write` + `drain` 必须是原子的,否则两个协程的
+        JSON 会拼在一起,服务器直接解析失败)。
+        """
+        loop = asyncio.get_running_loop()
+        async with self._write_lock:
+            self._request_id += 1
+            request_id = self._request_id
+            fut: asyncio.Future = loop.create_future()
+            self._pending[request_id] = fut
+
+            request = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+            request_str = json.dumps(request) + "\n"
+            self._writer.write(request_str.encode())
+            await self._writer.drain()
+
+        try:
+            return await asyncio.wait_for(fut, timeout=self.read_timeout_s)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"MCP 服务器 {self.source.name} 对 {method} 在 "
+                f"{self.read_timeout_s}s 内没有响应"
+                + (f"; stderr: {' | '.join(self._stderr_tail[-3:])}" if self._stderr_tail else "")
+            )
+        finally:
+            self._pending.pop(request_id, None)
 
     async def _send_notification(self, method: str, params: Dict):
         """发送 JSON-RPC 通知(无响应)"""
@@ -382,39 +493,16 @@ class MCPSource(ToolSourceBase):
             "method": method,
             "params": params,
         }
-        notification_str = json.dumps(notification) + "\n"
-        self._writer.write(notification_str.encode())
-        await self._writer.drain()
+        request_str = json.dumps(notification) + "\n"
+        async with self._write_lock:
+            self._writer.write(request_str.encode())
+            await self._writer.drain()
 
-    async def _read_response(self) -> Dict:
-        """读取一条 JSON-RPC 响应。
-
-        **必须有超时**:服务器不回、或回的不是 JSON,
-        都不该让整个 agent 启动卡在这里。
-        """
-        try:
-            line = await asyncio.wait_for(
-                self._reader.readline(), timeout=self.read_timeout_s
-            )
-        except asyncio.TimeoutError:
-            raise TimeoutError(
-                f"MCP 服务器 {self.source.name} 在 {self.read_timeout_s}s 内没有响应"
-                + (f"; stderr: {' | '.join(self._stderr_tail[-3:])}" if self._stderr_tail else "")
-            )
-        if not line:
-            raise ConnectionError(
-                f"MCP 服务器 {self.source.name} 关闭了连接"
-                + (f"; stderr: {' | '.join(self._stderr_tail[-3:])}" if self._stderr_tail else "")
-            )
-        text = line.decode("utf-8", "replace").strip()
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except Exception as exc:
-            raise ValueError(
-                f"MCP 服务器 {self.source.name} 返回了非 JSON 内容: {text[:200]!r}"
-            ) from exc
+    # 旧的 `_read_response()` 已删:读取现在由专职读协程 `_pump_responses()` 负责,
+    # 请求方通过 `_pending` 表拿结果。
+    # 保留一个"直接读一行"的方法很危险 ——
+    # 它会和专职读协程抢同一个 StreamReader,并发时就会报
+    # `readuntil() called while another coroutine is already waiting`.
 
 
 def create_mcp_source(

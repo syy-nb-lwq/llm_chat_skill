@@ -180,6 +180,19 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     from core.clarifier import reset_clarifier
     from infra.config import config as config_mod
 
+    # ===== 测试不该受开发者本地 `.env` 影响 =====
+    #
+    # `infra/config.py` 硬编码读项目根的 `.env`。开发者为了本地体验
+    # 打开 MCP/代码执行,整套单测就会跟着变 —— 实测:
+    # `MCP_ENABLED=true` 时,每个 TestClient 的 lifespan 都会去 spawn
+    # 一个 npx MCP 服务器,单测从 100 秒变成 250 秒,
+    # 而且**换台没装 npx / 没网的机器就直接失败**。
+    #
+    # 这类"环境依赖"必须挡在测试外,而不是指望每个开发者都记得改 .env。
+    monkeypatch.setattr(config_mod, "mcp_enabled", False, raising=False)
+    monkeypatch.setattr(config_mod, "code_exec_enabled", True, raising=False)
+    monkeypatch.setattr(config_mod, "owner_token", "", raising=False)
+
     # 会话库指向临时目录 —— 后端测试会创建带持久化的 Agent,
     # 不能让它们写进真实的 memory/sessions.db
     session_db_store.clear_all()

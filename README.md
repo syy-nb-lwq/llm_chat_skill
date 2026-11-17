@@ -61,6 +61,8 @@
   - docx / xlsx / pptx / pdf / md / csv / html → 带锚点的 markdown
   - **锚点带位置**（如 `[B7 p.3]` / `[B2 数据|A1:C3]`）——LLM 引用后用户可核对
   - **扫描件 PDF 明确报错**（没有文本层）,不会返回空内容让模型瞎猜
+- **MCP 工具源**——并发调用也不会冲突(JOSN-RPC over 单管道的
+  专职读协程 + 按 id 分发响应);实机并发 15 个调用全成功
 - **能接 MCP 工具源**（现成的文件/网页/浏览器/Git/数据库工具）：
   - 配置 `MCP_SERVERS` 即可用;单个服务器连不上不影响其它也不影响启动
   - MCP 服务器是第三方进程 → **只应由管理员配置**
@@ -75,7 +77,7 @@
 
 测试状态：
 
-- `635 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `639 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 
