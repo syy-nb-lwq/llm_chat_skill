@@ -84,6 +84,16 @@ class Config(BaseSettings):
     code_exec_timeout_s: int = Field(
         30, description="代码执行超时秒数(上限 300)"
     )
+    # 工具自增长:允许 agent 自己提出并注册新工具
+    #
+    # **这是能力开关,也是权限开关。** 打开后 agent 可以:
+    #   - 用 create_tool 造声明式 HTTP 工具(只读的会立即生效)
+    #   - 造脚本类工具(需人工批准)
+    # 关闭后 create_tool / list_created_tools 不会被注册,
+    # 已发布的工具仍然可用(它们已经存在了)。
+    tool_creation_enabled: bool = Field(
+        True, description="Allow the agent to create new tools"
+    )
     intent_mode: str = Field("rule_first", description="Intent detection mode")
     intent_rule_threshold: int = Field(5, description="Rule threshold")
     intent_llm_fallback: bool = Field(True, description="Fallback to LLM")

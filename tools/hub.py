@@ -194,8 +194,34 @@ class ToolHub:
             return ToolResult(success=False, error=f"Unknown tool: {tool_name}")
 
         source = self._sources.get(tool_info.source_name)
-        if not source:
-            return await self._call_instance(tool_info.instance, params)
+
+        # **Python 工具直接执行实例，不要委托给 source。**
+        #
+        # 踩过的坑（实机）：`register_python_tool()` 只把工具放进 `hub._tools`，
+        # 而 `PythonSource._tools` 是它**自己扫描目录**得到的另一份。
+        # 内置工具两边都有（扫描时就加载了），所以没问题；
+        # 但 **agent 动态创建的工具**不在目录里 → `source.call_tool()` 找不到 →
+        # 报"工具不存在"，可 hub 里明明有它。
+        #
+        # 语义上也该直接调实例：实例就是工具本身，绕一层源没有意义。
+        if source is None or tool_info.source_type == SourceType.PYTHON:
+            if on_event:
+                await on_event(
+                    "tool_call",
+                    {"tool": tool_name, "params": params, "source": tool_info.source_name},
+                )
+            result = await self._call_instance(tool_info.instance, params)
+            if on_event:
+                await on_event(
+                    "tool_result",
+                    {
+                        "tool": tool_name,
+                        "result": result.data if result.success else None,
+                        "error": result.error if not result.success else None,
+                        "meta": result.meta,
+                    },
+                )
+            return result
 
         if on_event:
             await on_event(
@@ -355,6 +381,18 @@ def get_tool_hub() -> ToolHub:
 
             _hub.register_python_tool(ReadDocumentTool())
             _hub.register_python_tool(LocateDocumentTool())
+        except Exception:
+            pass
+
+        # 元工具:让 agent 自己造工具(受 TOOL_CREATION_ENABLED 控制)
+        try:
+            from infra.config import config
+
+            if config.tool_creation_enabled:
+                from tools.meta_tools import CreateToolTool, ListCreatedToolsTool
+
+                _hub.register_python_tool(CreateToolTool())
+                _hub.register_python_tool(ListCreatedToolsTool())
         except Exception:
             pass
 

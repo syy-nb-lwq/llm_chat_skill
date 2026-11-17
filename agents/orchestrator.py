@@ -22,25 +22,33 @@ class OrchestratorAgent(BaseAgent):
 根据用户需求和获取的数据,生成完整、有条理的回答。
 若提供了技能方法论,请严格按方法论组织回答;若未提供,则直接基于数据生成回答。"""
 
-    def system_prompt(self, profile_block: str = "") -> str:
-        """人设 + **用户画像**(长期记忆)。
+    def system_prompt(
+        self, profile_block: str = "", capability_block: str = ""
+    ) -> str:
+        """人设 + **能力清单** + **用户画像**。
 
-        画像必须进 system prompt 而不是 user prompt:
-        它是"长期约束"(这个人是谁、怎么跟他说话),
-        不是"这一轮的输入"。放在 user 里会跟具体任务混在一起,模型容易忽略。
+        两个块都必须进 system prompt 而不是 user prompt:
+        它们是"长期事实"(我能做什么 / 这个人是谁),不是"这一轮的输入"。
+        放在 user 里会跟具体任务混在一起,模型容易忽略。
 
         Args:
-            profile_block: `SemanticMemoryStore.build_profile_block()` 的产物,
-                为空表示没有画像(不影响原有行为)。
+            profile_block: `SemanticMemoryStore.build_profile_block()` 的产物。
+            capability_block: `core.capabilities.build_capability_block()` 的产物。
+
+        **能力清单为什么必须有**:没有它,模型在被问"你能做什么"时会
+        退回基础模型的通用自我认知("我只是个文本模型,不能执行代码"),
+        哪怕系统明明有执行环境。实机踩过。
         """
-        if not profile_block:
-            return self._BASE_PROMPT
-        return (
-            f"{self._BASE_PROMPT}\n\n"
-            f"{profile_block}\n\n"
-            "以上「用户画像」是这个用户长期稳定的偏好与习惯,"
-            "生成回答时必须遵守(与当前任务不冲突时优先满足)。"
-        )
+        parts = [self._BASE_PROMPT]
+        if capability_block:
+            parts.append(capability_block)
+        if profile_block:
+            parts.append(
+                f"{profile_block}\n\n"
+                "以上「用户画像」是这个用户长期稳定的偏好与习惯,"
+                "生成回答时必须遵守(与当前任务不冲突时优先满足)。"
+            )
+        return "\n\n".join(parts)
 
     async def orchestrate(
         self,
@@ -49,6 +57,7 @@ class OrchestratorAgent(BaseAgent):
         selected_skill: Optional[Skill] = None,
         context: Optional[Context] = None,
         profile_block: str = "",
+        capability_block: str = "",
     ) -> str:
         """整合数据,生成回答(异步)"""
         tool_data = self._format_tool_results(tool_results)
@@ -57,9 +66,11 @@ class OrchestratorAgent(BaseAgent):
             return await self._generate_with_methodology(
                 user_input, tool_data, selected_skill.method, selected_skill.steps,
                 ctx_block=ctx_block, profile_block=profile_block,
+                capability_block=capability_block,
             )
         return await self._generate_direct(
-            user_input, tool_data, ctx_block=ctx_block, profile_block=profile_block
+            user_input, tool_data, ctx_block=ctx_block,
+            profile_block=profile_block, capability_block=capability_block,
         )
 
     async def stream(
@@ -69,6 +80,7 @@ class OrchestratorAgent(BaseAgent):
         selected_skill: Optional[Skill] = None,
         context: Optional[Context] = None,
         profile_block: str = "",
+        capability_block: str = "",
     ) -> AsyncIterator[str]:
         """流式输出(逐 token)"""
         tool_data = self._format_tool_results(tool_results)
@@ -81,18 +93,18 @@ class OrchestratorAgent(BaseAgent):
             prompt = self._build_direct_prompt(user_input, tool_data, ctx_block=ctx_block)
 
         async for token in self.llm.stream([
-            {"role": "system", "content": self.system_prompt(profile_block)},
+            {"role": "system", "content": self.system_prompt(profile_block, capability_block)},
             {"role": "user", "content": prompt},
         ]):
             yield token
 
     async def _generate_with_methodology(
         self, user_input: str, tool_data: str, method: str, steps: List,
-        ctx_block: str = "", profile_block: str = "",
+        ctx_block: str = "", profile_block: str = "", capability_block: str = "",
     ) -> str:
         prompt = self._build_prompt(user_input, tool_data, method, steps, ctx_block=ctx_block)
         resp = await self.llm.chat_with_retry([
-            {"role": "system", "content": self.system_prompt(profile_block)},
+            {"role": "system", "content": self.system_prompt(profile_block, capability_block)},
             {"role": "user", "content": prompt},
         ])
         self.logger.info("Orchestrator", "回答生成完成")
@@ -100,11 +112,11 @@ class OrchestratorAgent(BaseAgent):
 
     async def _generate_direct(
         self, user_input: str, tool_data: str, ctx_block: str = "",
-        profile_block: str = "",
+        profile_block: str = "", capability_block: str = "",
     ) -> str:
         prompt = self._build_direct_prompt(user_input, tool_data, ctx_block=ctx_block)
         resp = await self.llm.chat_with_retry([
-            {"role": "system", "content": self.system_prompt(profile_block)},
+            {"role": "system", "content": self.system_prompt(profile_block, capability_block)},
             {"role": "user", "content": prompt},
         ])
         self.logger.info("Orchestrator", "回答生成完成")

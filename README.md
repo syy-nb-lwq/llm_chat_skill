@@ -69,6 +69,11 @@
   - 优先用 **DeepSeek 自研搜索**（`/v1/tools/search` + `/v1/tools/fetch`），
     公开引擎（duckduckgo/mojeek/bing）兜底
   - 工具可链式调用：`${t1.data.results[0].url}` 占位符 + `depends_on`
+- **agent 能自己造工具**（`create_tool`）：
+  - 声明式 HTTP 工具（给 URL 模板 + 参数）或代码工具（直接写 Python）
+  - 静态校验 → 风险分级 → **真跑测试用例** → 发布，本轮/下一轮就能用
+  - **只读工具自动生效**；写操作 / 带密钥的需人工批准（`/api/tool-proposals`）
+  - **跨重启恢复**，能力不会因为重启而丢失
 - **生成的文件/视频能直接下载预览**：`/api/artifacts`（带鉴权 + 防路径穿越）,
   聊天气泡下方列出「生成的文件」
 - **流式增量合并**：上千个 `message_delta` 合成 1～4 次推送，顺序不乱
@@ -88,7 +93,7 @@
 
 测试状态：
 
-- `708 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `751 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 

@@ -135,6 +135,40 @@ class ManagerAgent(BaseAgent):
             names = []
         return names or list(self.FALLBACK_TOOLS)
 
+    def _tool_signatures(self) -> str:
+        """工具签名清单(名字 + 参数 + 一句说明)。
+
+        **为什么不能只给名字**:planner 只看到 `web_fetch` 三个字,
+        它不知道参数叫 `url`,于是会把"从结果里选一个链接"这种文字
+        塞进参数值里 —— 执行期必然失败。
+
+        实机踩过:造工具时它不知道 `create_tool` 有哪些字段,
+        只能凭想象拼,连着两次校验失败。
+
+        格式紧凑(`?` 表示可选),工具多时不至于挤爆上下文。
+        """
+        try:
+            from tools.hub import get_tool_hub
+
+            schemas = get_tool_hub().schemas()
+        except Exception:
+            return ", ".join(self._available_tool_names())
+
+        lines = []
+        for sch in schemas:
+            try:
+                parts = []
+                for pm in sch.params:
+                    mark = "" if getattr(pm, "required", True) else "?"
+                    ptype = (getattr(pm, "type", "") or "string").replace("string", "str")
+                    parts.append(f"{pm.name}{mark}: {ptype}")
+                sig = ", ".join(parts) if parts else "无参数"
+                desc = (sch.description or "").strip().splitlines()[0][:80]
+                lines.append(f"- {sch.name}({sig}) — {desc}")
+            except Exception:
+                continue
+        return "\n".join(lines) if lines else ", ".join(self._available_tool_names())
+
     @property
     def plan_schema(self) -> Dict:
         """规划 schema —— 工具枚举从 ToolHub 动态生成。
@@ -173,7 +207,7 @@ class ManagerAgent(BaseAgent):
     def system_prompt(self) -> str:
         skills = self.skill_store.list_all()
         skills_list = self._format_skills(skills)
-        tools = ", ".join(self._available_tool_names())
+        tools = self._tool_signatures()
         return f"""你是一个任务规划助手。作为流转中枢,你需要:
 
 1. 选择合适的技能(方法论)来完成任务
@@ -181,7 +215,10 @@ class ManagerAgent(BaseAgent):
 
 重要规则:
 - **意图已经由上游判别层判定**,你不需要(也不应该)重新判断意图,只管规划怎么做
-- 工具只能从以下列表选择:{tools}
+- **参数名必须用下面列出的**(带 ? 的表示可选);不要自己编参数名,
+  也不要把自然语言描述塞进参数值里
+- 能用的工具(名字+参数):
+{tools}
 - 如果用户说"重新回答"、"再说一遍"、"上次"、"之前"等,说明要重试上一次的执行,tool_tasks 要与上次保持一致
 - 技能是完成任务的方法论,工具是获取数据的手段
 - 没有合适的工具时,tool_tasks 返回空数组,不要硬凑
@@ -191,6 +228,24 @@ class ManagerAgent(BaseAgent):
 - 参数里引用上游结果用 `${{任务id.data.字段}}`;**数组用下标,如 `${{t1.data.results[0].url}}`**
 - 也支持 `${{任务id.success}}`、`${{任务id.error}}`、`${{user_input}}`、`${{user_input.字段}}`
 - **绝对不要写"从结果里选一个链接"这种文字占位** —— 占位符会被替换成真实值,文字描述不会,执行期必失败
+
+**要造新工具时(create_tool)** —— 两个关键字段别弄错:
+- 没有现成接口、要自己算 → `"kind": "code"` + `"implementation"`(Python 代码,
+  用 `PARAMS['名']` 取参数,用 `return` 给结果)
+- 有现成的 REST 接口 → `"kind": "http"` + `"url_template"`(参数用花括号占位)+ `"params"`
+- **只读 http 工具立即生效;code / 写操作需人工批准**
+
+示例(造一个计算工具,立即可用):
+```json
+{{"id": "t1", "type": "create_tool", "params": {{
+  "name": "bmi_calc",
+  "description": "根据身高体重算 BMI 并给出分级",
+  "kind": "code",
+  "implementation": "h = float(PARAMS['height']); w = float(PARAMS['weight']); bmi = w / (h * h); return {{'bmi': round(bmi, 1)}}",
+  "params": [{{"name": "height", "type": "number", "description": "身高(米)"}}, {{"name": "weight", "type": "number", "description": "体重(公斤)"}}],
+  "rationale": "用户需要反复计算 BMI"
+}}}}
+```
 
 正确示例(先搜索再读最相关的那篇):
 ```json

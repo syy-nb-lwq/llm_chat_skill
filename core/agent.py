@@ -103,6 +103,8 @@ class Agent:
         self.persist_memory = bool(getattr(config, "semantic_memory_enabled", False))
         self._memory_tasks: set = set()
         self._profile_cache: Optional[str] = None
+        #: 能力清单缓存(每轮清一次,见 _get_capability_block)
+        self._capability_cache: Optional[str] = None
 
         # 用户纠正信号(自演化的质量信号):
         # 上一轮的执行上下文 —— 下一轮如果用户在纠正,就用它重评
@@ -312,6 +314,28 @@ class Agent:
         self._profile_cache = block
         return block
 
+    def _get_capability_block(self) -> str:
+        """本轮的能力清单(**每轮只读一次**)。
+
+        为什么要注入:回答层的 system prompt 如果只说"你是回答助手",
+        模型被问"你能做什么"时会退回基础模型的通用自我认知
+        ——"我只是个文本模型,不能执行代码"。哪怕系统里明明有执行环境。
+
+        实机踩过:用户问"能不能执行代码/发网络请求/读写文件",
+        agent 一条条回答"不能"。它不知道自己兜里有什么。
+        """
+        if self._capability_cache is not None:
+            return self._capability_cache
+        block = ""
+        try:
+            from core.capabilities import build_capability_block
+
+            block = build_capability_block()
+        except Exception as exc:
+            self.logger.warning("Agent", f"生成能力清单失败: {exc}")
+        self._capability_cache = block
+        return block
+
     # ===== 分阶段耗时记录 =====
 
     def _new_trace(self):
@@ -491,9 +515,12 @@ class Agent:
         self.context.add_user_message(user_input)
         self.logger.info("Agent", f"INPUT: {user_input[:50]}")
 
-        # 用户画像:每轮取一次,规划与回答生成共用同一份(避免两处读不一致)
+        # 用户画像与能力清单:每轮取一次,规划与回答生成共用同一份
+        # (避免两处读不一致)
         self._profile_cache = None
+        self._capability_cache = None
         profile_block = self._get_profile_block()
+        capability_block = self._get_capability_block()
 
         # 分阶段耗时记录(产品化的最低观测要求,见 core/trace.py)
         trace = self._new_trace()
@@ -577,6 +604,7 @@ class Agent:
             async for d in self.orchestrator.stream(
                 user_input, tool_results, skill, self.context,
                 profile_block=profile_block,
+                capability_block=capability_block,
             ):
                 if trace is not None and not first_seen:
                     trace.since(STAGE_FIRST_TOKEN, turn_start)
@@ -751,6 +779,7 @@ class Agent:
                 ans = await self.orchestrator.orchestrate(
                     user_input, tool_results, plan.selected_skill, self.context,
                     profile_block=profile_block,
+                    capability_block=capability_block,
                 )
                 emit("message_delta", {"delta": ans})
 

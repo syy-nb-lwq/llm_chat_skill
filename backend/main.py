@@ -108,6 +108,21 @@ async def _startup():
     except Exception as exc:
         logger.warning("startup", f"tool hub connect failed: {exc}")
 
+    # 恢复 agent 自己造过的工具 —— 否则每次重启它就"忘掉"学会的能力，
+    # "能力自增长"就是假的。
+    try:
+        from tools.proposal import restore_published
+
+        restored = restore_published(hub)
+        if restored:
+            logger.info(
+                "startup",
+                f"restored {restored} agent-created tools "
+                f"(total {len(hub.names())})",
+            )
+    except Exception as exc:
+        logger.warning("startup", f"restore agent tools failed: {exc}")
+
     if config.self_evolution_enabled:
         try:
             await _start_reflect_loop()
@@ -690,6 +705,87 @@ async def list_tools():
     return {
         "tools": [{"name": tool.name, "description": tool.description} for tool in tools]
     }
+
+
+# ===== 自制工具提案(agent 自己造的工具)=====
+#
+# 只读的声明式工具/代码工具会自动发布(见 tools/proposal.py 的风险分级);
+# 会改外部状态的(写方法、带密钥)进待审队列,**必须人工批准**。
+# 这几个接口是那个"人工批准"的入口。
+
+@app.get("/api/tool-proposals")
+async def list_tool_proposals(status: str = ""):
+    """列出工具提案(可按 status 过滤: pending / published / rejected)。"""
+    from tools.proposal import get_proposal_store
+
+    store = get_proposal_store()
+    items = store.list(status or None)
+    return {
+        "count": len(items),
+        "proposals": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "description": p.description,
+                "kind": p.kind,
+                "method": p.method,
+                "url_template": p.url_template,
+                "status": p.status,
+                "risk": p.risk,
+                "rationale": p.rationale,
+                "created_at": p.created_at,
+                "reviewed_by": p.reviewed_by,
+                "blocked_reason": p.blocked_reason,
+                "implementation": (p.implementation or "")[:2000],
+                "validation": p.validation,
+            }
+            for p in items
+        ],
+    }
+
+
+@app.post("/api/tool-proposals/{proposal_id}/approve")
+@require_auth
+async def approve_tool_proposal(proposal_id: str):
+    """人工批准一个待审工具（发布后 planner 立刻能看到）。"""
+    from tools.hub import get_tool_hub
+    from tools.proposal import approve
+
+    ok, msg = approve(proposal_id, get_tool_hub(), reviewer="human")
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"approved": proposal_id, "message": msg}
+
+
+@app.post("/api/tool-proposals/{proposal_id}/reject")
+@require_auth
+async def reject_tool_proposal(proposal_id: str, payload: Optional[dict] = None):
+    """人工拒绝一个提案。"""
+    from tools.proposal import reject
+
+    reason = str((payload or {}).get("reason") or "")
+    if not reject(proposal_id, reviewer="human", reason=reason):
+        raise HTTPException(status_code=404, detail=f"提案不存在: {proposal_id}")
+    return {"rejected": proposal_id}
+
+
+@app.delete("/api/tool-proposals/{proposal_id}")
+@require_auth
+async def delete_tool_proposal(proposal_id: str):
+    """删除一个提案；如果它是已发布状态,同时把工具撤下来。"""
+    from tools.hub import get_tool_hub
+    from tools.proposal import get_proposal_store, unpublish
+
+    store = get_proposal_store()
+    proposal = store.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail=f"提案不存在: {proposal_id}")
+
+    removed = False
+    if proposal.status == "published":
+        removed = unpublish(proposal, get_tool_hub())
+    store.delete(proposal_id)
+    return {"deleted": proposal_id, "tool_unregistered": removed}
 
 
 @app.get("/api/patches")
