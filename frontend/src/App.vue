@@ -243,6 +243,8 @@ export default {
         this.messages[this.pendingIndex].content = payload.content
         // 带上 execution_id —— 前端靠它把 👍/👎 关联到具体那条回答
         this.messages[this.pendingIndex].execution_id = payload.execution_id || ''
+        // 产物(文件/视频)—— 以前只在后端工作区里,用户看不到
+        this.messages[this.pendingIndex].artifacts = payload.artifacts || []
       }
       this.pendingIndex = -1
       this.endTurn()

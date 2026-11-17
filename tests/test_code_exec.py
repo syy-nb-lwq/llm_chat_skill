@@ -133,8 +133,11 @@ async def test_exec_collects_artifacts(exec_tool, workspace):
     assert "out.txt" in names
     # 产物要落在工作区里(不是临时目录 —— 临时目录会被删)
     saved = [a for a in result.data["artifacts"] if a["name"] == "out.txt"][0]
-    assert str(workspace) in saved["path"]
-    assert os.path.exists(saved["path"])
+    # path 是**相对工作区**的路径(直接拼下载 URL);
+    # 绝对路径在 abs_path 里。
+    assert saved["path"] == "out.txt"
+    assert str(workspace) in saved["abs_path"]
+    assert os.path.exists(saved["abs_path"])
 
 
 # ============================================================

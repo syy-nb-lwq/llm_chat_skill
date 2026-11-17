@@ -69,6 +69,9 @@
   - 优先用 **DeepSeek 自研搜索**（`/v1/tools/search` + `/v1/tools/fetch`），
     公开引擎（duckduckgo/mojeek/bing）兜底
   - 工具可链式调用：`${t1.data.results[0].url}` 占位符 + `depends_on`
+- **生成的文件/视频能直接下载预览**：`/api/artifacts`（带鉴权 + 防路径穿越）,
+  聊天气泡下方列出「生成的文件」
+- **流式增量合并**：上千个 `message_delta` 合成 1～4 次推送，顺序不乱
 - **刷新页面不丢对话**：前端重连后自动拉回本会话历史
   —— 会话内容本来就是全量保留的，只是之前没取
 - **能接 MCP 工具源**（现成的文件/网页/浏览器/Git/数据库工具）：
@@ -85,7 +88,7 @@
 
 测试状态：
 
-- `676 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `708 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 

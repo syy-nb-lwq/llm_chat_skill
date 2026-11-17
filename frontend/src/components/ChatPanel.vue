@@ -3,6 +3,24 @@
     <div class="messages" ref="messagesContainer">
       <div v-for="(msg, index) in messages" :key="index" class="message" :class="msg.role">
         <div class="message-content" v-html="renderMarkdown(msg.content)"></div>
+        <!--
+          产物下载:python_exec / write_script 生成的文件(报表、图片、视频…)。
+          以前只落在后端工作区里,用户完全看不到。
+        -->
+        <div v-if="msg.artifacts && msg.artifacts.length" class="artifact-list">
+          <div class="artifact-title">📎 生成的文件</div>
+          <div v-for="a in msg.artifacts" :key="a.path" class="artifact-row">
+            <a
+              class="artifact-link"
+              :href="artifactUrl(a)"
+              target="_blank"
+              rel="noopener"
+              :title="a.path"
+            >{{ a.name }}</a>
+            <span class="artifact-size">{{ formatSize(a.size) }}</span>
+            <a class="artifact-dl" :href="artifactUrl(a, true)" :download="a.name" title="下载">⬇</a>
+          </div>
+        </div>
         <div
           v-if="msg.clarification && msg.clarification.options && msg.clarification.options.length"
           class="clarify-options"
@@ -55,6 +73,8 @@
 
 <script>
 import MarkdownIt from 'markdown-it'
+import { API_BASE } from '../config'
+import { wsService } from '../websocket'
 
 export default {
   name: 'ChatPanel',
@@ -78,6 +98,23 @@ export default {
   methods: {
     renderMarkdown(content) {
       return content ? this.md.render(content) : ''
+    },
+
+    // 产物链接:后端要求会话令牌,所以拼上 token 作为 query
+    // (浏览器直接打开链接时带不了自定义 header)
+    artifactUrl(artifact, download = false) {
+      const base = artifact.url || `/api/artifacts/${artifact.path}`
+      const token = (wsService.session && wsService.session.token) || ''
+      const parts = [`token=${encodeURIComponent(token)}`]
+      if (download) parts.push('download=true')
+      return `${API_BASE}${base}?${parts.join('&')}`
+    },
+
+    formatSize(bytes) {
+      const n = Number(bytes) || 0
+      if (n < 1024) return `${n} B`
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+      return `${(n / 1024 / 1024).toFixed(1)} MB`
     },
     // sendMessage(prefill):prefill 是候选项文本(来自澄清按钮);
     // 回车触发时 prefill 是 KeyboardEvent,此时用输入框内容

@@ -146,6 +146,46 @@ class Agent:
             self.logger.warning("Agent", f"记录技能使用结果失败: {exc}")
 
     @staticmethod
+    def _collect_artifacts(tool_results: dict) -> list:
+        """从本轮工具结果里收集产物(文件/视频),给前端做下载链接。
+
+        `python_exec` 会把生成的文件名放在 `data.artifacts` 里;
+        其他工具如果也返回 artifacts 结构,同样能被收集到。
+
+        这里只做**归一化 + 去重**,不做鉴权 —— 鉴权在下载接口上
+        (`/api/artifacts/...` 要求会话令牌 + 路径必须在工作区内)。
+        """
+        out: list = []
+        seen: set = set()
+        try:
+            for result in (tool_results or {}).values():
+                data = getattr(result, "data", None)
+                if not isinstance(data, dict):
+                    continue
+                for item in data.get("artifacts") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("path") or item.get("name") or "").strip()
+                    if not name:
+                        continue
+                    key = name.replace("\\", "/").lstrip("/")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append({
+                        "name": str(item.get("name") or key),
+                        "path": key,
+                        "size": int(item.get("size") or 0),
+                        "url": f"/api/artifacts/{key}",
+                    })
+        except Exception as exc:
+            try:
+                get_logger().warning("Agent", f"收集产物失败: {exc}")
+            except Exception:
+                pass
+        return out
+
+    @staticmethod
     def _ensure_answer(ans: str) -> str:
         """空回答兜底 —— 不能给用户一个空气泡。
 
@@ -716,7 +756,11 @@ class Agent:
 
             ans = self._ensure_answer(ans)
             self.context.add_assistant_message(ans)
-            emit("message_final", {"content": ans})
+            # 把本轮产物一起给前端 —— 否则"生成的视频/报表"做出来了用户也看不到
+            emit("message_final", {
+                "content": ans,
+                "artifacts": self._collect_artifacts(tool_results),
+            })
 
             duration = (time.time() - start) * 1000
             self.logger.info("Agent", f"DONE: {duration:.0f}ms")

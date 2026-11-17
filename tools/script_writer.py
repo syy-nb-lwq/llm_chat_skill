@@ -164,6 +164,7 @@ class WriteScriptTool(Tool):
                 pass
 
         self.logger.info("WriteScript", f"已保存 {target} ({len(content)} 字符)")
+        rel = str(target.relative_to(workspace_dir())).replace("\\", "/")
         return ToolResult(
             success=True,
             data={
@@ -172,6 +173,13 @@ class WriteScriptTool(Tool):
                 "size": len(content.encode("utf-8")),
                 "run_id": self.run_id,
                 "description": description,
+                # 脚本也是交付物 —— 用统一的 artifacts 结构,
+                # 前端「生成的文件」区才能把它列出来下载
+                "artifacts": [{
+                    "name": name,
+                    "path": rel,
+                    "size": len(content.encode("utf-8")),
+                }],
             },
             meta={"run_id": self.run_id},
         )

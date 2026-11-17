@@ -53,6 +53,16 @@ def _get_session_secret() -> bytes:
 
     优先用 ``SESSION_SECRET``;未配置时用进程级随机密钥
     (进程重启后旧令牌失效,客户端重新 init 即可)。
+
+    **但这个"重新 init 即可"是骗人的**:客户端 localStorage 里存着
+    user_token(长期身份凭证)。密钥一变,那个 token 就验不过 →
+    服务端把它当成新用户 → 建新会话 → **用户看到的是"历史对话全没了"**。
+
+    实机踩过:开发时反复重启后端,每重启一次就"丢一次历史"。
+
+    所以:
+    - 生产/长期使用**必须**配 `SESSION_SECRET`(固定值)
+    - 没配时启动会打一条醒目的警告(见 `warn_if_unstable_secret`)
     """
     global _process_secret
     configured = (getattr(config, "session_secret", "") or "").strip()
@@ -61,6 +71,28 @@ def _get_session_secret() -> bytes:
     if _process_secret is None:
         _process_secret = secrets.token_bytes(32)
     return _process_secret
+
+
+def warn_if_unstable_secret() -> bool:
+    """没配 SESSION_SECRET 时警告一次。返回是否是稳定密钥。
+
+    这不是"可选的优化" —— 它直接决定用户刷新/重启后还在不在同一份历史里。
+    """
+    configured = (getattr(config, "session_secret", "") or "").strip()
+    if configured:
+        return True
+    try:
+        from infra.logger import get_logger
+
+        get_logger().warning(
+            "Auth",
+            "SESSION_SECRET 未配置:每次重启后端,所有已签发的令牌都会失效,"
+            "用户会被当成新用户(表现为「历史对话没了」)。"
+            "长期使用请在 .env 里配一个固定的 SESSION_SECRET。",
+        )
+    except Exception:
+        pass
+    return False
 
 
 def _b64e(raw: bytes) -> str:

@@ -7,6 +7,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -69,6 +70,12 @@ async def _startup():
 
     sessions.ttl_s = int(config.session_ttl_s)
     await register_handlers()
+
+    # 没配 SESSION_SECRET → 令牌密钥每次重启都变 → 用户被当成新用户,
+    # 表现为"刷新/重启后历史对话没了"。启动就警告,别等用户来问。
+    from infra.auth import warn_if_unstable_secret
+
+    warn_if_unstable_secret()
 
     from infra.providers.registry import init_providers_from_config
 
@@ -843,6 +850,163 @@ async def memory_stats():
     from core.memory import get_memory_store
 
     return get_memory_store().get_stats()
+
+
+# ===== 产物下载(文件/视频交付)=====
+#
+# `python_exec` / `write_script` 生成的文件落在 `memory/workspace/`,
+# 但这些文件**前端拿不到** —— 只有 agent 自己能访问。
+# 所以"帮我生成一个视频/报表"这种需求，产物明明做出来了，用户却看不到。
+#
+# 这里开一个受控的下载口：
+#   - 只允许读 `memory/workspace/` 里面的文件（路径穿越一律拒）
+#   - 需要会话令牌（和记忆面板同一套鉴权）
+#   - 用 FileResponse，浏览器能直接预览/下载
+
+#: 允许下载的目录(相对项目根)
+_ARTIFACT_ROOT = Path(__file__).parent.parent / "memory" / "workspace"
+
+#: 常见类型的 Content-Type(FileResponse 会按扩展名推断，这里只补少数几个)
+_ARTIFACT_MEDIA_HINTS = {
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".pdf": "application/pdf",
+    ".md": "text/markdown; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".csv": "text/csv; charset=utf-8",
+    ".json": "application/json",
+    ".html": "text/html; charset=utf-8",
+}
+
+
+def _resolve_artifact(name: str) -> Path:
+    """把 URL 里的名字解析成 workspace 内的真实文件。
+
+    **必须挡路径穿越**:`../../.env` 这类输入会让整个鉴权形同虚设。
+    """
+    raw = (name or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+    # 统一分隔符，避免 Windows 反斜杠绕过
+    raw = raw.replace("\\", "/")
+    if raw.startswith("/") or ".." in raw.split("/"):
+        raise HTTPException(status_code=400, detail="非法路径")
+
+    root = _ARTIFACT_ROOT.resolve()
+    try:
+        target = (root / raw).resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="非法路径")
+
+    try:
+        target.relative_to(root)
+    except ValueError:
+        # 解析后跑到工作区外面去了
+        raise HTTPException(status_code=403, detail="只能下载工作区内的文件")
+
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail=f"文件不存在: {raw}")
+    return target
+
+
+def _resolve_artifact_user(request: Request) -> str:
+    """产物接口的鉴权：**接受 header 或 `?token=`**。
+
+    ## 为什么要特殊对待
+
+    浏览器直接打开 `<a href="/api/artifacts/x.mp4">` 时**带不了自定义头**,
+    所以下载链接只能把令牌放进 URL。这是权衡:
+
+    - 好处:用户点一下就预览/下载,不用额外弹窗
+    - 代价:令牌会出现在浏览器历史、代理日志、Referer 里
+
+    所以:
+    1. 这个口子**只给产物接口**用,管理接口仍然只认 header
+    2. 令牌本来就绑定 client_id + session,泄露后影响面有限
+    3. 真要更严,应该发**短期一次性下载凭证**而不是复用会话令牌
+       (记在 docs/11 的待办里)
+    """
+    from infra.auth import verify_session_token, verify_user_token
+
+    token = ""
+    if hasattr(request, "headers"):
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:].strip()
+    if not token:
+        token = (request.query_params.get("token") or "").strip()
+
+    payload = verify_session_token(token) or verify_user_token(token)
+    if not payload or not payload.get("user_id"):
+        raise HTTPException(
+            status_code=401,
+            detail="需要 Authorization: Bearer <会话令牌> 或 ?token=<令牌>",
+        )
+    return str(payload["user_id"])
+
+
+@app.get("/api/artifacts")
+async def list_artifacts(request: Request, limit: int = 200):
+    """列出工作区里的产物(给前端做「生成的文件」区)。"""
+    _resolve_artifact_user(request)
+    root = _ARTIFACT_ROOT
+    if not root.exists():
+        return {"artifacts": [], "count": 0}
+
+    items = []
+    for path in sorted(root.rglob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        items.append({
+            "name": path.name,
+            "path": rel,
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
+            "url": f"/api/artifacts/{rel}",
+        })
+        if len(items) >= max(1, min(limit, 500)):
+            break
+    return {"artifacts": items, "count": len(items)}
+
+
+@app.get("/api/artifacts/{name:path}")
+async def download_artifact(name: str, request: Request, download: bool = False):
+    """下载/预览工作区里的一个产物。
+
+    `download=true` 强制下载(Content-Disposition: attachment),
+    否则浏览器能预览的直接预览(视频、图片、PDF)。
+    """
+    _resolve_artifact_user(request)
+    target = _resolve_artifact(name)
+
+    media_type = _ARTIFACT_MEDIA_HINTS.get(target.suffix.lower())
+    return FileResponse(
+        path=str(target),
+        media_type=media_type,
+        filename=target.name,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{target.name}"'
+                if download
+                else "inline"
+            ),
+            # 产物可能被同名覆盖,别让浏览器缓存旧内容
+            "Cache-Control": "no-cache",
+        },
+    )
 
 
 # ===== 用户画像面板(A-09 / U-04)=====

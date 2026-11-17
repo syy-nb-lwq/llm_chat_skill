@@ -124,11 +124,37 @@ class SessionMemoryStore:
 
         统一走 `core.sqlite_util.connect` —— 会话写入是高频路径,
         多用户并发时裸 `sqlite3.connect` 会 `database is locked`。
-        """
-        return sqlite_util.connect(self.db_path, row_factory=sqlite3.Row)
 
-    def _init_db(self) -> None:
-        conn = self._connect()
+        **自愈**:目录只在 `__init__` 建一次。如果运行期间被外部删掉
+        (日志清理/部署脚本/手动清理),这里要重新建 —— 否则每次读会话
+        都抛 `unable to open database file`,接口直接 500。
+
+        实机踩过:删了 memory/ 之后刷新页面,`GET /api/session/messages`
+        就是 500(而不是"没有历史")。
+        """
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self.logger.warning("SessionMemory", f"建目录失败 {self.db_path.parent}: {exc}")
+
+        # 文件也可能被删了(不只是目录)。
+        # 新建的空库里没有表,之后每次读写都会
+        # `no such table: sessions` —— 同样表现为 500。
+        # 所以此时补一次建表。
+        need_init = not self.db_path.exists()
+        conn = sqlite_util.connect(self.db_path, row_factory=sqlite3.Row)
+        if need_init:
+            try:
+                self._init_db(conn)
+            except Exception as exc:
+                self.logger.warning("SessionMemory", f"重建表失败: {exc}")
+        return conn
+
+    def _init_db(self, conn: Optional[sqlite3.Connection] = None) -> None:
+        """建表。传入连接时复用它(避免 `_connect` 递归)。"""
+        own = conn is None
+        if own:
+            conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -178,7 +204,8 @@ class SessionMemoryStore:
             "ON session_summaries(session_id, cover_until_seq)"
         )
         conn.commit()
-        conn.close()
+        if own:
+            conn.close()
 
     # ===== 会话 =====
 

@@ -106,6 +106,10 @@ class UserService:
     def _save(self, user: User) -> None:
         path = self._path(user.id)
         try:
+            # 自愈:目录可能被外部删了(日志清理/部署脚本)。
+            # 不建目录的话,每次写档案都失败,用户会变成"每次都是新用户" ——
+            # 表现和"历史对话丢了"一模一样。
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 json.dumps(user.to_dict(), ensure_ascii=False, indent=2),
                 encoding="utf-8",

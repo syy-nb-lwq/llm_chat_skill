@@ -465,7 +465,12 @@ class PythonExecTool(Tool):
             total += size
             out.append({
                 "name": str(rel).replace("\\", "/"),
-                "path": str(dest),
+                # **相对工作区的路径** —— 下载接口按这个取文件。
+                # 早先这里给的是绝对路径(`D:\...\workspace\a.txt`),
+                # 拼成下载 URL 会得到 `/api/artifacts/D:/...`,
+                # 前端点开就是 404。
+                "path": str(rel).replace("\\", "/"),
+                "abs_path": str(dest),
                 "size": size,
             })
         return out
