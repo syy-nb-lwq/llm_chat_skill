@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -808,6 +808,139 @@ async def memory_stats():
     from core.memory import get_memory_store
 
     return get_memory_store().get_stats()
+
+
+# ===== 用户画像面板(A-09 / U-04)=====
+#
+# 「你记住了我什么 / 忘掉这件事」
+#
+# **用户级接口,不是管理员接口。** 所以不能用 `require_auth`
+# (那是 owner token,管的是删技能/审批补丁这类管理操作)。
+# 这里校验的是**会话令牌 / 用户令牌** —— 两者都是 HMAC 签名的,
+# payload 里带 user_id,服务端据此认定"你只能看自己的画像"。
+#
+# **最重要的一条**:user_id **只能从令牌里取**,绝不能从 query 参数取。
+# 否则用户 A 传个 user_id=B 就能看/删 B 的画像 —— 那是越权。
+
+#: 画像类型的展示标签(与 build_profile_block 保持一致)
+_PROFILE_LABELS = {
+    "preference": "偏好",
+    "habit": "习惯",
+    "method": "方法",
+    "constraint": "雷区",
+    "fact": "事实",
+}
+
+
+def _resolve_user_id(request: Request) -> str:
+    """从请求头里的令牌解析出 user_id;无效则 401。
+
+    接受两种令牌:
+    - **会话令牌**(WS 连接期间签发):payload 带 user_id/session_id/client_id
+    - **用户令牌**(长期凭证):payload 带 user_id/tenant_id
+    """
+    from infra.auth import verify_session_token, verify_user_token
+
+    auth = ""
+    if hasattr(request, "headers"):
+        auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
+
+    payload = verify_session_token(token) or verify_user_token(token)
+    if not payload or not payload.get("user_id"):
+        raise HTTPException(
+            status_code=401,
+            detail="需要 Authorization: Bearer <会话令牌>",
+        )
+    return str(payload["user_id"])
+
+
+@app.get("/api/memory/profile")
+async def get_profile(request: Request):
+    """列出当前用户的画像(长期记忆)条目。
+
+    同时返回**此刻正在注入**的那段文本 —— 让用户看清楚
+    "现在到底哪些东西在影响我的回答"。
+    """
+    from core.semantic_memory import get_semantic_memory
+
+    user_id = _resolve_user_id(request)
+    store = get_semantic_memory()
+
+    entries = store.get_profile(user_id, limit=100)
+    block = store.build_profile_block(user_id)
+
+    items = []
+    for e in entries:
+        items.append({
+            "id": e.id,
+            "type": e.type,
+            "label": _PROFILE_LABELS.get(e.type, e.type),
+            "content": e.content,
+            "confidence": round(float(e.confidence), 3),
+            "importance": round(float(e.importance), 3),
+            "created_at": e.created_at,
+            "source_session_id": e.source_session_id or "",
+        })
+
+    return {
+        "user_id": user_id,
+        "entries": items,
+        "count": len(items),
+        # 正在注入的画像块(用户能直观看到"生效中的"内容)
+        "injected_block": block,
+        "injected_chars": len(block),
+    }
+
+
+@app.delete("/api/memory/profile/{entry_id}")
+async def forget_profile_entry(entry_id: str, request: Request):
+    """「忘掉这一条」:软删除某条画像。
+
+    用软删除而不是硬删 —— 删完立刻就不再被召回,
+    但保留了"曾经记过"的事实,便于排查误删。
+    """
+    from core.semantic_memory import get_semantic_memory
+
+    user_id = _resolve_user_id(request)
+    store = get_semantic_memory()
+
+    # **先确认这条属于该用户** —— 不然可以拿别的用户的 entry_id 来删
+    owned = [
+        e for e in store.get_profile(user_id, limit=1000)
+        if e.id == entry_id
+    ]
+    if not owned:
+        # 也可能是已被删过/不在画像类型里 —— 一律 404,不泄露存在性
+        raise HTTPException(status_code=404, detail="画像条目不存在")
+
+    ok = store.forget(entry_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="画像条目不存在")
+    return {"forgotten": entry_id, "user_id": user_id}
+
+
+@app.delete("/api/memory/profile")
+async def forget_all_profile(request: Request):
+    """「忘掉关于我的一切」:清空当前用户的全部画像。"""
+    from core.semantic_memory import get_semantic_memory
+
+    user_id = _resolve_user_id(request)
+    store = get_semantic_memory()
+
+    entries = store.get_profile(user_id, limit=1000)
+    forgotten, failed = [], []
+    for e in entries:
+        if store.forget(e.id):
+            forgotten.append(e.id)
+        else:
+            failed.append(e.id)
+
+    return {
+        "user_id": user_id,
+        "forgotten": len(forgotten),
+        "failed": len(failed),
+    }
 
 
 @app.get("/api/reflections")

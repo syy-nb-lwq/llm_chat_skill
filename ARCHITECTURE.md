@@ -375,6 +375,9 @@ Frontend / CLI / Streamlit
 - **能执行代码**：`python_exec` 子进程隔离（独立 cwd / `-I` / env 白名单 / 超时 / AST 黑名单）；
   `write_script` 持久化脚本。**子进程隔离是崩溃隔离不是安全边界**，
   多租户对外开放前必须关掉 `CODE_EXEC_ENABLED` 或换容器隔离
+- **用户可见可管理自己的长期记忆**（「记忆」面板）:
+  列出、分类、逐条忘掉、全部忘掉;同时显示正在注入的内容。
+  **隔离是强的**:`user_id` 只从令牌里取,不信任 query 参数
 - **能读文档并引用原文**：`read_document` 返回带锚点的 markdown
   (锚点带页码/表名/单元格),再用 `locate_document` 反查原文;
   扫描件 PDF 明确报错而不是返回空

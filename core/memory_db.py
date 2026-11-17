@@ -689,6 +689,56 @@ class MemoryDB:
         """列出某用户的 active 记忆(给"你记住了我什么"用)"""
         return self.get_recent(user_id=user_id, types=types, limit=limit)
 
+    def clear_all(self) -> int:
+        """清空所有记忆(含 FTS 索引)。
+
+        两个用途:
+        - **测试隔离**:conftest 用的是 session 级共享 DB,
+          不清的话上一个测试的画像会漏到下一个测试里
+        - **数据重置**:用户要求"忘掉关于我的一切"时按用户维度清理
+
+        Returns:
+            删除的条数
+        """
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM memories")
+        count = cursor.fetchone()[0]
+        cursor.execute("DELETE FROM memories")
+        cursor.execute("DELETE FROM memories_fts")
+        # 重建 FTS 索引(外部内容表模式需要重建才能对上)
+        try:
+            cursor.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+        self.logger.info("MemoryDB", f"清空记忆: 删除 {count} 条")
+        return count
+
+    def clear_user(self, user_id: str) -> int:
+        """清空某个用户的全部记忆(不含别人的)。
+
+        Returns:
+            删除的条数
+        """
+        if not user_id:
+            return 0
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,))
+        count = cursor.fetchone()[0]
+        cursor.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        cursor.execute(
+            "DELETE FROM memories_fts WHERE id IN "
+            "(SELECT id FROM memories WHERE user_id = ?)",
+            (user_id,),
+        )
+        conn.commit()
+        conn.close()
+        self.logger.info("MemoryDB", f"清空用户 {user_id} 的记忆: 删除 {count} 条")
+        return count
+
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         conn = self._connect()

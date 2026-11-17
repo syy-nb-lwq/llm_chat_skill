@@ -53,6 +53,10 @@
 - **能写脚本、能跑脚本**（`python_exec` / `write_script`）：
   - 子进程隔离执行：独立 cwd、`-I` 隔离模式、**env 白名单(子进程拿不到 API key)**、超时、AST 静态黑名单
   - **子进程隔离 = 崩溃隔离,不是安全边界**——多租户对外开放前必须关掉 `CODE_EXEC_ENABLED` 或换容器隔离
+- **用户看得见、也删得掉自己的记忆**（「🧠 记忆」面板）：
+  - 列出“系统记住了我什么”,分类过滤,逐条忘掉 / 全部忘掉
+  - 同时显示**此刻正在影响你回答的内容**(已注入那段文本)
+  - **用户级隔离**:`user_id` 只能从令牌里取,传 query 参数不作数
 - **能读文档，能引用原文**（`read_document` / `locate_document`）：
   - docx / xlsx / pptx / pdf / md / csv / html → 带锚点的 markdown
   - **锚点带位置**（如 `[B7 p.3]` / `[B2 数据|A1:C3]`）——LLM 引用后用户可核对
@@ -71,7 +75,7 @@
 
 测试状态：
 
-- `620 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `635 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 
