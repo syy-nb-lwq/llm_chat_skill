@@ -365,6 +365,42 @@ class Agent:
         except Exception:
             return 180.0
 
+    # ===== 方法论自增长（后台，不阻塞回答） =====
+
+    async def _harvest_skill(self, user_input: str, tool_results: Dict,
+                             rounds: int, planned_tasks: List) -> None:
+        """把一次成功的多步任务提炼成技能草稿。
+
+        **永远不抛异常**：这是附加价值，失败不能影响主流程。
+        """
+        try:
+            from infra.config import config
+
+            if not getattr(config, "skill_harvest_enabled", True):
+                return
+            from core.skill_harvest import harvest
+
+            specs = {}
+            for t in (planned_tasks or []):
+                try:
+                    specs[t.id] = {"type": t.type, "params": dict(t.params or {})}
+                except Exception:
+                    continue
+            outcome = await harvest(
+                user_input,
+                tool_results,
+                rounds=rounds,
+                task_specs=specs,
+            )
+            if outcome.skill:
+                self.logger.info(
+                    "Agent", f"沉淀出方法论草稿: {outcome.skill.name}"
+                )
+            elif outcome.reason:
+                self.logger.info("Agent", f"未沉淀方法论: {outcome.reason}")
+        except Exception as exc:
+            self.logger.warning("Agent", f"方法论提炼失败(忽略): {exc}")
+
     # ===== 分阶段耗时记录 =====
 
     def _new_trace(self):
@@ -844,6 +880,14 @@ class Agent:
                 active["plan"] = new_plan
                 return new_plan
 
+            # 让子智能体知道"这是谁在问" —— 它要拿这个去取用户画像
+            try:
+                from core.subagents import set_current_user
+
+                set_current_user(self.user_id)
+            except Exception:
+                pass
+
             tools_start = time.perf_counter()
             goal = await run_goal_loop(
                 first_plan=plan,
@@ -929,6 +973,16 @@ class Agent:
                 user_id=self.identity.user_id if self.identity else self.user_id,
                 session_id=self.identity.session_id if self.identity else self.session_id,
             )
+            # 方法论自增长：**只有真的做完了**才沉淀经验
+            # （失败的轨迹没有复用价值；提炼本身在后台跑，不阻塞回答）
+            if goal.completed:
+                pending_async.append(asyncio.ensure_future(
+                    self._harvest_skill(
+                        user_input, tool_results, goal.rounds,
+                        planned_holder["tasks"],
+                    )
+                ))
+
             # 异步执行 critic,收集到 pending_async 末尾 await
             pending_async.append(asyncio.ensure_future(
                 self._evaluate_with_skill_quality(execution_context)

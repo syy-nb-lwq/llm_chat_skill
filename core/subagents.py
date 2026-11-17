@@ -35,7 +35,26 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from contextvars import ContextVar
+
 from infra.logger import get_logger
+
+
+#: 当前这一轮是**哪个用户**在问 —— 子智能体要拿它去取用户画像。
+#:
+#: 为什么不一路传参：`run_subagents` 是工具，工具签名里塞 user_id 会很脏；
+#: 而 `contextvars` 在 `asyncio.create_task()` 时会复制上下文，
+#: 所以 gather 出来的子智能体任务能自动读到，正好合用。
+_current_user: ContextVar[str] = ContextVar("dsh_subagent_user", default="")
+
+
+def set_current_user(user_id: str) -> None:
+    """一轮开始时由 Agent 调用。"""
+    _current_user.set(user_id or "")
+
+
+def get_current_user() -> str:
+    return _current_user.get() or ""
 
 
 # ===== 状态 =====
@@ -311,8 +330,19 @@ class SubAgentPool:
             if findings:
                 enriched = goal_text + "\n\n已完成的部分：\n" + "\n".join(findings)
 
+            # **带用户画像** —— 用户的长期习惯必须影响子智能体怎么做事。
+            # 不传的话，子智能体就是个"没人格的执行器"，
+            # 和"结合使用者习惯"的定位不一致。
+            profile_block = ""
+            uid = get_current_user()
+            if uid:
+                try:
+                    profile_block = manager.profile_block(uid)
+                except Exception:
+                    profile_block = ""
+
             try:
-                plan = await manager.plan(enriched)
+                plan = await manager.plan(enriched, profile_block=profile_block)
             except Exception as exc:
                 task.error = f"规划失败: {exc}"
                 task.status = STATUS_FAILED

@@ -69,6 +69,8 @@
   - 优先用 **DeepSeek 自研搜索**（`/v1/tools/search` + `/v1/tools/fetch`），
     公开引擎（duckduckgo/mojeek/bing）兜底
   - 工具可链式调用：`${t1.data.results[0].url}` 占位符 + `depends_on`
+- **方法论自增长**：做成一件多步任务后，自动把过程提炼成技能草稿
+  （真实工具链 + 自动回归样例），人批准才生效（`/api/skill-drafts`）
 - **目标循环（不是一问一答）**：一轮没做完就带着已知结果再规划一轮，
   直到规划层明确说「达成」；`docs/15` 有设计，四道闸防死循环/烧钱/打转/失败被吞
 - **子智能体并行**（`run_subagents`）：把互不依赖的子目标派出去并行做，
@@ -98,7 +100,7 @@
 
 测试状态：
 
-- `801 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `825 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 

@@ -120,6 +120,14 @@ class Config(BaseSettings):
     goal_time_budget_s: int = Field(
         180, description="目标循环总时长预算(秒),超了就收尾"
     )
+    # 方法论自增长：做成一件多步任务后，把过程提炼成技能草稿
+    #
+    # 默认开启，但**提炼出来的技能是草稿，不会自动生效** ——
+    # 垃圾技能比没有技能更糟（会污染检索、占用注入预算、可能被误选），
+    # 所以必须人批准才进技能库。
+    skill_harvest_enabled: bool = Field(
+        True, description="Harvest skills from successful tasks"
+    )
     intent_mode: str = Field("rule_first", description="Intent detection mode")
     intent_rule_threshold: int = Field(5, description="Rule threshold")
     intent_llm_fallback: bool = Field(True, description="Fallback to LLM")

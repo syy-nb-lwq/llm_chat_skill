@@ -788,6 +788,44 @@ async def delete_tool_proposal(proposal_id: str):
     return {"deleted": proposal_id, "tool_unregistered": removed}
 
 
+# ===== 方法论草稿（agent 从成功任务里提炼出来的技能）=====
+#
+# 「工具自增长」做完之后，方法论也得能自增长 —— 否则每做成一件新事，
+# 经验就丢一次。但**垃圾技能比没有技能更糟**（污染检索、占注入预算、
+# 可能被误选），所以提炼出来一律进草稿队列，人批准才生效。
+
+@app.get("/api/skill-drafts")
+async def list_skill_drafts():
+    """列出待批准的方法论草稿。"""
+    from core.skill_harvest import get_draft_store
+
+    drafts = get_draft_store().list()
+    return {"count": len(drafts), "drafts": drafts}
+
+
+@app.post("/api/skill-drafts/{draft_id}/approve")
+@require_auth
+async def approve_skill_draft(draft_id: str):
+    """批准一个方法论草稿 → 进技能库并激活（planner 立刻能看到）。"""
+    from core.skill_harvest import approve_draft
+
+    ok, msg = approve_draft(draft_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"approved": draft_id, "message": msg}
+
+
+@app.delete("/api/skill-drafts/{draft_id}")
+@require_auth
+async def delete_skill_draft(draft_id: str):
+    """丢弃一个方法论草稿。"""
+    from core.skill_harvest import get_draft_store
+
+    if not get_draft_store().delete(draft_id):
+        raise HTTPException(status_code=404, detail=f"草稿不存在: {draft_id}")
+    return {"deleted": draft_id}
+
+
 @app.get("/api/patches")
 async def list_patches():
     from core.memory import get_memory_store
