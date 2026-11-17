@@ -94,6 +94,37 @@ class MemoryStore:
         for d in [self.failures_dir, self.successes_dir, self.patches_dir, self.audit_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
+    def _ensure_parent(self, path: Path) -> Path:
+        """确保某个文件的**父目录**存在,返回该路径。
+
+        为什么要单独做这个:`_ensure_dirs()` 只在 `__init__` 调一次。
+        如果目录在进程运行期间被删掉(日志清理、部署脚本、磁盘清理、
+        或者有人手动 `rm -rf memory/`),store 手里就攥着**失效的路径**,
+        之后每次写/读都抛
+        `[WinError 3] 系统找不到指定的路径`。
+
+        实机踩过:跑测试时 `Remove-Item memory -Recurse -Force` 把整个目录删了,
+        而后端还在跑 —— 自演化链路当场断掉,用户在界面上看到两次报错。
+
+        所以:**每个碰磁盘的操作前都确认一次目录还在**。
+        开销是几个 stat,换来的是"目录没了也不炸"。
+        """
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self.logger.warning("MemoryStore", f"创建目录失败 {path.parent}: {exc}")
+        return path
+
+    def _safe_iterdir(self, directory: Path):
+        """遍历目录;目录不存在时返回空 —— 不抛异常。"""
+        try:
+            if not directory.exists():
+                return []
+            return list(directory.iterdir())
+        except Exception as exc:
+            self.logger.warning("MemoryStore", f"遍历 {directory} 失败: {exc}")
+            return []
+
     # ---- 审计(M3-06) ----
 
     def write_audit(self, kind: str, payload: Dict) -> str:
@@ -107,7 +138,7 @@ class MemoryStore:
             **payload,
         }
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        path = self.audit_dir / f"{kind}_{stamp}.json"
+        path = self._ensure_parent(self.audit_dir / f"{kind}_{stamp}.json")
         try:
             path.write_text(json.dumps(record, ensure_ascii=False, default=str), encoding="utf-8")
         except Exception as exc:
@@ -195,7 +226,7 @@ class MemoryStore:
             pattern=pattern,
         )
 
-        path = self.successes_dir / "success_index.jsonl"
+        path = self._ensure_parent(self.successes_dir / "success_index.jsonl")
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
 
@@ -204,7 +235,7 @@ class MemoryStore:
 
     def add_pending_patch(self, patch: SkillPatch) -> None:
         """添加待审阅的技能改进建议"""
-        path = self.patches_dir / f"{patch.id}.json"
+        path = self._ensure_parent(self.patches_dir / f"{patch.id}.json")
         path.write_text(json.dumps(asdict(patch), ensure_ascii=False), encoding="utf-8")
         self.logger.info("MemoryStore", f"添加 SkillPatch: {patch.id}, confidence={patch.confidence:.2f}")
 
@@ -217,7 +248,7 @@ class MemoryStore:
     ) -> List[FailureRecord]:
         """获取最近的失败记录,按时间倒序"""
         records: List[FailureRecord] = []
-        for month_dir in sorted(self.failures_dir.iterdir(), reverse=True):
+        for month_dir in sorted(self._safe_iterdir(self.failures_dir), reverse=True):
             if not month_dir.is_dir():
                 continue
             for path in sorted(month_dir.glob("*.json"), reverse=True):
@@ -304,7 +335,7 @@ class MemoryStore:
     def get_pending_patches(self) -> List[SkillPatch]:
         """获取所有待审阅的改进建议"""
         patches: List[SkillPatch] = []
-        for path in self.patches_dir.glob("*.json"):
+        for path in (self.patches_dir.glob("*.json") if self.patches_dir.exists() else []):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("status") == "pending":
@@ -353,7 +384,7 @@ class MemoryStore:
 
     def enforce_capacity(self, max_per_month: int = 50, keep_ratio: float = 0.8):
         """每月超过 max_per_month 条时,保留 success_rate 最高的 keep_ratio 部分"""
-        for month_dir in self.failures_dir.iterdir():
+        for month_dir in self._safe_iterdir(self.failures_dir):
             if not month_dir.is_dir():
                 continue
             files = list(month_dir.glob("*.json"))
@@ -388,7 +419,7 @@ class MemoryStore:
 
         `success_index.jsonl` 是追加写的,所以要整体重写一遍。
         """
-        path = self.successes_dir / "success_index.jsonl"
+        path = self._ensure_parent(self.successes_dir / "success_index.jsonl")
         if not path.exists():
             return False
         try:
@@ -437,8 +468,7 @@ class MemoryStore:
 
         failures = 0
         corrected = 0
-        if self.failures_dir.exists():
-            for month in self.failures_dir.iterdir():
+        for month in self._safe_iterdir(self.failures_dir):
                 if not month.is_dir():
                     continue
                 for f in month.glob("*.json"):
@@ -463,7 +493,7 @@ class MemoryStore:
     def get_stats(self) -> Dict[str, Any]:
         """获取记忆统计"""
         total_failures = sum(
-            1 for m in self.failures_dir.iterdir()
+            1 for m in self._safe_iterdir(self.failures_dir)
             if m.is_dir() for _ in m.glob("*.json")
         )
         total_successes = 0
@@ -479,7 +509,7 @@ class MemoryStore:
             "pending_patches": len(pending),
             "recent_failures_by_month": {
                 m.name: len(list(m.glob("*.json")))
-                for m in self.failures_dir.iterdir() if m.is_dir()
+                for m in self._safe_iterdir(self.failures_dir) if m.is_dir()
             },
         }
         stats.update(self.get_adoption_rate())

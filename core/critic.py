@@ -133,12 +133,35 @@ class ExecutionCritic:
         # 根据评估结果决定记录什么
         records_generated: List[str] = []
 
+        # ===== 记录区:任何失败都只记日志,不影响本轮 =====
+        #
+        # **自演化是"锦上添花",它挂了不能影响用户拿答案。**
+        # 实机踩过:目录被外部清理掉(log 清理/部署脚本)之后,
+        # `record_failure` 抛 FileNotFoundError,整个 evaluate() 崩掉,
+        # 错误直接冒到用户界面上 —— 用户看到的是"[WinError 3]",
+        # 而不是他的回答。
+        #
+        # 存储层已经自愈(目录没了会自己建),这里再加一道:
+        # 万一还有别的 IO 问题(磁盘满/权限),也只丢一条记录,不影响其他。
+        def _safe_write(action: str, fn, *args, **kwargs) -> bool:
+            try:
+                fn(*args, **kwargs)
+                return True
+            except Exception as exc:
+                self.logger.warning(
+                    "ExecutionCritic",
+                    f"{action} 落盘失败(已忽略,不影响本轮): {exc}",
+                )
+                return False
+
         # 1. 失败情况:记录失败(success_rate < 1.0 **或被用户纠正**)
         #
         # 被纠正是比"工具失败"更强的信号:工具全调通了但答案是错的,
         # 在旧逻辑里会被记成"成功",学习系统就永远学不到这件事。
         if success_rate < 1.0 or user_corrected:
-            failure_record = self.memory.record_failure(
+            if _safe_write(
+                "失败记录",
+                self.memory.record_failure,
                 trace_id=context.trace_id,
                 scenario=context.scenario,
                 intent=context.intent,
@@ -154,8 +177,8 @@ class ExecutionCritic:
                 user_id=context.user_id,
                 session_id=context.session_id,
                 turn_id=context.turn_id,
-            )
-            records_generated.append("failure_record")
+            ):
+                records_generated.append("failure_record")
 
         # 2. 有改进建议且置信度高:生成 SkillPatch
         if suggestion and confidence >= 0.7:
@@ -192,19 +215,22 @@ class ExecutionCritic:
                     )
             else:
                 records_generated.append("patch_pending")
-            self.memory.add_pending_patch(patch)
+            if _safe_write("待审补丁", self.memory.add_pending_patch, patch):
+                records_generated.append("patch_recorded")
 
         # 3. 成功情况:记录成功路径
         #    被用户纠正的轮次**不算成功** —— 它已经在上面记成失败了
         if success_rate == 1.0 and fallback_count == 0 and not user_corrected:
-            self.memory.record_success(
+            if _safe_write(
+                "成功记录",
+                self.memory.record_success,
                 trace_id=context.trace_id,
                 scenario=context.scenario,
                 matched_skill=context.selected_skill or "",
                 latency_ms=context.latency_ms,
                 pattern=context.intent,
-            )
-            records_generated.append("success_record")
+            ):
+                records_generated.append("success_record")
 
         # 4. 用户纠正:分析修正
         if user_corrected and context.user_feedback:
@@ -219,8 +245,8 @@ class ExecutionCritic:
                 confidence=0.85,
                 status="pending",
             )
-            self.memory.add_pending_patch(patch)
-            records_generated.append("patch_correction")
+            if _safe_write("纠正补丁", self.memory.add_pending_patch, patch):
+                records_generated.append("patch_correction")
 
         result = EvaluationResult(
             trace_id=context.trace_id,

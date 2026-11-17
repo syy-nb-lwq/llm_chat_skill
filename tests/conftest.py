@@ -112,6 +112,49 @@ def _restore_global_getters():
             setattr(module, name, original)
 
 
+#: 会被"功能开关接口"改写的配置字段。
+#:
+#: 这些字段是**全局 config 单例上的可变属性** —— 接口直接 `setattr`,
+#: 不是 monkeypatch,所以不会自动还原。测试之间必须手动还原,
+#: 否则一个测试关掉开关,后面所有测试都以为它关着。
+_FEATURE_FLAGS = (
+    "self_evolution_enabled",
+    "semantic_memory_enabled",
+    "multi_provider_enabled",
+    "intent_l1_enabled",
+    "trace_enabled",
+    "code_exec_enabled",
+    "mcp_enabled",
+)
+
+#: 会话开始时拍下的快照
+_ORIGINAL_FEATURE_FLAGS: dict = {}
+
+
+def _capture_feature_flags():
+    """拍下功能开关的初始值(导入时调一次)。"""
+    from infra.config import config
+
+    for name in _FEATURE_FLAGS:
+        if hasattr(config, name):
+            _ORIGINAL_FEATURE_FLAGS[name] = getattr(config, name)
+
+
+def _restore_feature_flags():
+    """把功能开关还原到会话开始时的值(每个测试后调)。"""
+    from infra.config import config
+
+    for name, value in _ORIGINAL_FEATURE_FLAGS.items():
+        try:
+            if getattr(config, name, None) is not value:
+                setattr(config, name, value)
+        except Exception:
+            pass
+
+
+_capture_feature_flags()
+
+
 @pytest.fixture
 def mem_store(tmp_path):
     """一个干净的 MemoryStore(每个测试独立)。
@@ -275,3 +318,16 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     yield
     # 强制还原被永久改写的全局入口(见 _capture_global_getters 的说明)
     _restore_global_getters()
+    # ===== 还原功能开关 =====
+    #
+    # `POST /api/features/self-evolution` 会**直接改全局 config 单例**
+    # (`Config.set_feature_flag` → `setattr(self, ...)`)。
+    # 它不是 monkeypatch,所以**不会自动还原** ——
+    # 一个测试把开关关掉,后面所有测试的
+    # `get_self_evolution_enabled()` 都返回 False。
+    #
+    # 实测踩过:`test_backend.py` 关了一次自演化,导致
+    # `test_critic_isolation.py` 的 3 个用例全部失败
+    # (critic 直接短路返回 `diagnosis='self_evolution_disabled'`)——
+    # 而单独跑那个文件是全绿的,典型的“测试间污染”。
+    _restore_feature_flags()
