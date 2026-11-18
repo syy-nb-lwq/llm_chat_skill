@@ -31,11 +31,49 @@
         </div>
       </div>
 
+      <!-- 记忆全景：让用户看清"系统实际记得什么" -->
+      <div v-if="overview" class="overview-box">
+        <div class="overview-title">记忆全景</div>
+        <div class="overview-grid">
+          <div class="ov-item">
+            <span class="ov-num">{{ overview.short_term.count }}</span>
+            <span class="ov-label">本会话消息</span>
+          </div>
+          <div class="ov-item">
+            <span class="ov-num">{{ overview.profile.count }}</span>
+            <span class="ov-label">长期画像</span>
+          </div>
+          <div class="ov-item">
+            <span class="ov-num">{{ overview.lessons.count }}</span>
+            <span class="ov-label">失败教训</span>
+          </div>
+          <div class="ov-item">
+            <span class="ov-num">{{ overview.skill_drafts.count }}</span>
+            <span class="ov-label">待批方法论</span>
+          </div>
+          <div class="ov-item">
+            <span class="ov-num">{{ overview.patches.count }}</span>
+            <span class="ov-label">待批补丁</span>
+          </div>
+        </div>
+      </div>
+
       <div v-if="loading && !entries.length" class="empty">加载中...</div>
 
       <div v-else-if="!entries.length" class="empty">
-        还没有记住关于你的任何信息。
-        <p class="hint">你可以在对话里说「以后回答都用中文」这类偏好,系统会自动记住。</p>
+        还没有抽取到长期画像。
+        <p class="hint">
+          画像由 LLM 从你的话里抽取，但只记长期稳定的东西：
+          身份、长期偏好、硬性约束、长期目标。
+        </p>
+        <p class="hint">
+          单纯下任务（比如「帮我生成一个视频」）不会产生画像 —— 这是刻意的：
+          否则每一句指令都会变成"偏好"，污染之后所有的回答。
+        </p>
+        <p class="hint">
+          想让它记住，直接说「以后…」「我一向…」「记住…」。
+          抽到的内容会显示在上面的注入块里，你可以随时删掉。
+        </p>
       </div>
 
       <template v-else>
@@ -103,6 +141,9 @@ export default {
         { key: 'constraint', label: '雷区' },
         { key: 'fact', label: '事实' },
       ],
+      // 记忆全景：短期/长期/经验各层到底有多少东西
+      // 只展示画像时，用户会以为"系统什么都没记" —— 其实别的层有数据
+      overview: null,
     }
   },
   computed: {
@@ -144,6 +185,16 @@ export default {
         this.entries = data.entries || []
         this.injectedBlock = data.injected_block || ''
         this.injectedChars = data.injected_chars || 0
+
+        // 全景是"锦上添花"：拿不到不影响画像列表
+        try {
+          const ov = await fetch(`${API_BASE}/api/memory/overview`, {
+            headers: this._authHeaders(),
+          })
+          if (ov.ok) this.overview = await ov.json()
+        } catch (e) {
+          this.overview = null
+        }
       } catch (e) {
         this.error = `加载失败: ${e.message}`
       } finally {
@@ -403,5 +454,37 @@ export default {
   border-radius: 4px;
   font-size: 12px;
   margin-bottom: 8px;
+}
+.overview-box {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(120, 120, 120, 0.25);
+  border-radius: 8px;
+  background: rgba(120, 120, 120, 0.06);
+}
+.overview-title {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-bottom: 8px;
+}
+.overview-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.ov-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 62px;
+}
+.ov-num {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.ov-label {
+  font-size: 11px;
+  opacity: 0.7;
 }
 </style>
