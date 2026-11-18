@@ -189,6 +189,59 @@ class ToolHub:
         *,
         on_event: Optional[Callable[[str, Any], Awaitable[None]]] = None,
     ) -> ToolResult:
+        """所有工具调用的**唯一入口** —— 在这里记账。
+
+        记账放在这一层而不是各工具内部，保证：
+        - 不漏（任何路径都经过这里）
+        - 不重复（工具自己不需要关心观测）
+        """
+        import time as _time
+
+        from core.tool_health import get_health_store
+
+        started = _time.perf_counter()
+        known = tool_name in self._tools
+
+        # 调一个**不存在**的工具 —— 这是"能力缺口"的强信号
+        # （agent 想要的能力还没有），要单独记，不能当普通工具失败统计，
+        # 否则"健康度"里会混进一堆幽灵工具。
+        if not known:
+            try:
+                get_health_store().record_gap(
+                    f"需要一个能做「{tool_name}」的能力，但工具表里没有",
+                    tried=f"尝试调用 {tool_name}",
+                    blocked_by="工具不存在",
+                )
+            except Exception:
+                pass
+
+        result = await self._call_tool_inner(tool_name, params, on_event=on_event)
+
+        if known:
+            try:
+                source = ""
+                info = self._tools.get(tool_name)
+                if info is not None:
+                    source = str(getattr(info, "source_name", "") or "")
+                get_health_store().record(
+                    tool_name,
+                    bool(getattr(result, "success", False)),
+                    error=str(getattr(result, "error", "") or ""),
+                    duration_ms=(_time.perf_counter() - started) * 1000,
+                    source=source,
+                )
+            except Exception:
+                pass
+
+        return result
+
+    async def _call_tool_inner(
+        self,
+        tool_name: str,
+        params: Dict[str, Any],
+        *,
+        on_event: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    ) -> ToolResult:
         tool_info = self._tools.get(tool_name)
         if not tool_info:
             return ToolResult(success=False, error=f"Unknown tool: {tool_name}")
@@ -389,10 +442,29 @@ def get_tool_hub() -> ToolHub:
             from infra.config import config
 
             if config.tool_creation_enabled:
-                from tools.meta_tools import CreateToolTool, ListCreatedToolsTool
+                from tools.meta_tools import (
+                    CreateToolTool,
+                    ListCreatedToolsTool,
+                    ReportCapabilityGapTool,
+                )
 
                 _hub.register_python_tool(CreateToolTool())
                 _hub.register_python_tool(ListCreatedToolsTool())
+                # 自诊断：让 agent 自己申报"我缺什么能力"
+                _hub.register_python_tool(ReportCapabilityGapTool())
+
+            if config.tool_repair_enabled:
+                from tools.meta_tools import RepairToolTool
+
+                _hub.register_python_tool(RepairToolTool())
+
+            # 工具健康度（任何时候都可查，和造工具无关）
+            try:
+                from tools.meta_tools import ToolHealthTool
+
+                _hub.register_python_tool(ToolHealthTool())
+            except Exception:
+                pass
 
             # 产物登记:把授权目录里已有的文件变成可下载产物
             try:

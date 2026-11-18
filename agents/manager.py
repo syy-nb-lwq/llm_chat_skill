@@ -227,6 +227,14 @@ class ManagerAgent(BaseAgent):
             workspace_block = build_workspace_block()
         except Exception:
             workspace_block = ""
+
+        # 工具健康度：哪些工具最近老失败 —— 让规划层**别往坏工具上撞**
+        try:
+            from core.tool_health import get_health_store
+
+            health_block = get_health_store().health_block()
+        except Exception:
+            health_block = ""
         tools = self._tool_signatures()
         return f"""你是一个任务规划助手。作为流转中枢,你需要:
 
@@ -299,6 +307,8 @@ class ManagerAgent(BaseAgent):
 {skills_list}
 
 {workspace_block}
+
+{health_block}
 
 严格按以下 JSON 格式输出:
 {{

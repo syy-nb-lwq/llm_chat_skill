@@ -320,3 +320,142 @@ class ListCreatedToolsTool(Tool):
                 ],
             },
         )
+
+
+# ============================================================
+# 自诊断：让 agent 自己说出来"我缺什么"、"哪个工具坏了"
+# ============================================================
+
+class ReportCapabilityGapTool(Tool):
+    """如实申报"我需要一个能力，但现在没有"。"""
+
+    name = "report_capability_gap"
+    description = (
+        "当你**因为缺少某种能力**而无法完成用户的任务时，用这个工具如实申报。\n"
+        "典型场景：任务需要一个接口/库/程序，但工具表里没有，你也造不出来。\n"
+        "**不要**用它代替做事；也不要默默降级交付（比如把一段视频改名成'成片'）。\n"
+        "宁可如实说'缺 X'，也不要给用户一个假的东西。"
+    )
+    required_flag = "tool_creation_enabled"
+
+    def __init__(self):
+        self.logger = get_logger()
+
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            params=[
+                ToolParam(name="need", type="string", required=True,
+                          description="缺的是什么能力（一句话说清，例如「拼接视频」）"),
+                ToolParam(name="tried", type="string", required=False,
+                          description="你尝试过什么"),
+                ToolParam(name="blocked_by", type="string", required=False,
+                          description="被什么挡住了（例如「没有 ffmpeg」、「接口未授权」）"),
+            ],
+            returns={"recorded": "是否已记录", "suggestion": "下一步建议"},
+        )
+
+    async def execute(self, need: str = "", tried: str = "",
+                      blocked_by: str = "") -> ToolResult:
+        from core.tool_health import get_health_store
+
+        text = (need or "").strip()
+        if not text:
+            return ToolResult(success=False, error="need 不能为空：说明你缺什么能力")
+
+        store = get_health_store()
+        store.record_gap(text, tried=tried or "", blocked_by=blocked_by or "")
+        self.logger.info("CapabilityGap", f"申报能力缺口: {text[:80]}")
+
+        return ToolResult(
+            success=True,
+            data={
+                "recorded": True,
+                "need": text,
+                "suggestion": (
+                    "已记录到能力缺口清单。如果这个能力可以用一段代码或一个 REST 接口实现，"
+                    "现在就用 create_tool 造出来；如果造不出来（缺密钥/缺可执行程序/缺授权），"
+                    "就如实告诉用户缺什么，不要用近似的东西冒充交付物。"
+                ),
+            },
+        )
+
+
+class ToolHealthTool(Tool):
+    """查工具健康度（哪些工具最近老失败）。"""
+
+    name = "tool_health"
+    description = (
+        "查看各工具的真实调用记录：成功/失败次数、失败率、最近的错误。\n"
+        "想知道「某个工具是不是坏了」、「该不该换个做法」时用它。"
+    )
+
+    def __init__(self):
+        self.logger = get_logger()
+
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            params=[ToolParam(
+                name="only_unhealthy", type="boolean", required=False, default=False,
+                description="只看不健康的工具",
+            )],
+            returns={"tools": "[{tool, total, failed, fail_rate, reason, recent_errors}]"},
+        )
+
+    async def execute(self, only_unhealthy: bool = False) -> ToolResult:
+        from core.tool_health import get_health_store
+
+        store = get_health_store()
+        items = store.unhealthy() if only_unhealthy else store.snapshot()
+        return ToolResult(
+            success=True,
+            data={
+                "count": len(items),
+                "tools": [h.to_dict() for h in items],
+                "gaps": store.list_gaps(limit=10),
+            },
+        )
+
+
+class RepairToolTool(Tool):
+    """让 agent 主动修一个自己造的工具。"""
+
+    name = "repair_tool"
+    description = (
+        "修理一个**自己造的**、反复失败的工具：会读真实失败记录、生成修正版、"
+        "校验并跑测试，通过后替换旧版。\n"
+        "只能修用 create_tool 造的工具；内置工具修不了（源码不归 agent 管），"
+        "那种情况请换做法或用 report_capability_gap 申报。"
+    )
+    required_flag = "tool_repair_enabled"
+
+    def __init__(self):
+        self.logger = get_logger()
+
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            params=[ToolParam(
+                name="tool_name", type="string", required=True,
+                description="要修的工具名",
+            )],
+            returns={"published": "是否已发布修正版", "reason": "结果说明"},
+        )
+
+    async def execute(self, tool_name: str = "") -> ToolResult:
+        from core.tool_repair import repair_tool
+
+        name = (tool_name or "").strip()
+        if not name:
+            return ToolResult(success=False, error="tool_name 不能为空")
+
+        r = await repair_tool(name)
+        return ToolResult(
+            success=bool(r.published),
+            data=r.to_dict(),
+            error="" if r.published else (r.reason or "未能修复"),
+        )

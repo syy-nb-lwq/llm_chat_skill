@@ -401,6 +401,32 @@ class Agent:
         except Exception as exc:
             self.logger.warning("Agent", f"方法论提炼失败(忽略): {exc}")
 
+    async def _repair_tools(self) -> None:
+        """检查有没有"自己造的、反复失败"的工具，有就试着修一版。
+
+        **永远不抛异常** —— 自修复是附加价值，失败不能影响主流程。
+        只修有 create_tool 提案的工具；内置工具源码不动。
+        """
+        try:
+            from infra.config import config
+
+            if not getattr(config, "tool_repair_enabled", True):
+                return
+            from core.tool_health import get_health_store
+            from core.tool_repair import auto_repair
+
+            bad = get_health_store().unhealthy()
+            if not bad:
+                return
+            results = await auto_repair(max_repairs=1)
+            for r in results:
+                if r.published:
+                    self.logger.info("Agent", f"自动修复工具: {r.tool} -> {r.reason}")
+                elif r.attempted:
+                    self.logger.info("Agent", f"尝试修复未成功: {r.tool} — {r.reason}")
+        except Exception as exc:
+            self.logger.warning("Agent", f"工具自修复失败(忽略): {exc}")
+
     # ===== 分阶段耗时记录 =====
 
     def _new_trace(self):
@@ -975,6 +1001,10 @@ class Agent:
                 user_id=self.identity.user_id if self.identity else self.user_id,
                 session_id=self.identity.session_id if self.identity else self.session_id,
             )
+            # 工具自修复：自己造的工具反复失败 → 让它自己修一版
+            # （后台跑，不阻塞回答；只动 agent 自己造的，内置源码不碰）
+            pending_async.append(asyncio.ensure_future(self._repair_tools()))
+
             # 方法论自增长：**只有真的做完了**才沉淀经验
             # （失败的轨迹没有复用价值；提炼本身在后台跑，不阻塞回答）
             if goal.completed:

@@ -826,6 +826,43 @@ async def delete_skill_draft(draft_id: str):
     return {"deleted": draft_id}
 
 
+# ===== 自诊断 / 自修复（让"它自己发现并修"这件事可观测）=====
+
+@app.get("/api/tool-health")
+async def tool_health(only_unhealthy: bool = False):
+    """工具健康度：真实调用记录算出来的成功率与最近错误。"""
+    from core.tool_health import get_health_store
+
+    store = get_health_store()
+    items = store.unhealthy() if only_unhealthy else store.snapshot()
+    return {
+        "count": len(items),
+        "unhealthy": len(store.unhealthy()),
+        "tools": [h.to_dict() for h in items],
+    }
+
+
+@app.get("/api/capability-gaps")
+async def capability_gaps(limit: int = 50):
+    """能力缺口清单：agent 自己申报的"我缺什么"。"""
+    from core.tool_health import get_health_store
+
+    gaps = get_health_store().list_gaps(limit=limit)
+    return {"count": len(gaps), "gaps": gaps}
+
+
+@app.post("/api/tool-repair/{tool_name}")
+@require_auth
+async def trigger_tool_repair(tool_name: str):
+    """手动触发一次工具自修复（只对 agent 造的工具有效）。"""
+    from core.tool_repair import repair_tool
+
+    result = await repair_tool(tool_name)
+    if not result.attempted:
+        return {"tool": tool_name, "attempted": False, "reason": result.reason}
+    return result.to_dict()
+
+
 @app.get("/api/patches")
 async def list_patches():
     from core.memory import get_memory_store

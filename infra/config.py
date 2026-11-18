@@ -128,6 +128,13 @@ class Config(BaseSettings):
     skill_harvest_enabled: bool = Field(
         True, description="Harvest skills from successful tasks"
     )
+    # 工具自修复：agent 自己造的工具反复失败时，让它自动出一版修正
+    #
+    # **只修 agent 自己造的**（能找到 create_tool 提案的）。
+    # 内置工具的源码绝不自动改写 —— 那是我们的代码，不是 agent 的产物。
+    tool_repair_enabled: bool = Field(
+        True, description="Auto-repair agent-created tools when they keep failing"
+    )
     intent_mode: str = Field("rule_first", description="Intent detection mode")
     intent_rule_threshold: int = Field(5, description="Rule threshold")
     intent_llm_fallback: bool = Field(True, description="Fallback to LLM")
