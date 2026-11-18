@@ -402,6 +402,15 @@ def get_tool_hub() -> ToolHub:
             except Exception:
                 pass
 
+            # 视频:探测 / 拼接(ffmpeg 由我们受控调用,python_exec 里的 subprocess 仍然禁)
+            try:
+                from tools.video import VideoConcatTool, VideoProbeTool
+
+                _hub.register_python_tool(VideoProbeTool())
+                _hub.register_python_tool(VideoConcatTool())
+            except Exception:
+                pass
+
             # 子智能体:把互不依赖的子任务派出去并行做
             if config.subagents_enabled:
                 from core.subagents import get_subagent_pool

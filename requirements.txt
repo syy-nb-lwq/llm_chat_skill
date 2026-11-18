@@ -38,3 +38,13 @@ python-pptx>=1.0.0
 pdfplumber>=0.11.0
 # 可选:markitdown>=0.1.0(装了就多支持一批格式,没装也能读上面四种)
 # 可选:reportlab>=4.0.0(仅测试用,生成带文本层的 PDF 固件)
+
+# 视频处理(video_probe / video_concat)
+#
+# imageio-ffmpeg 自带**静态 ffmpeg 二进制**(约 100MB),装完就有一个
+# 可用的 ffmpeg,不需要动系统 PATH、也不需要管理员权限。
+# 这是拼接/加字幕/配音的前提 —— 没有 ffmpeg,这些全都做不了。
+#
+# 注意:python_exec 仍然**禁止 subprocess**,所以 agent 不能自己调 ffmpeg;
+# 拼接必须走 video_concat 工具(参数受控、无 shell)。
+imageio-ffmpeg>=0.4.9
