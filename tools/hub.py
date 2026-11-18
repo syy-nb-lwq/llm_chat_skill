@@ -394,6 +394,14 @@ def get_tool_hub() -> ToolHub:
                 _hub.register_python_tool(CreateToolTool())
                 _hub.register_python_tool(ListCreatedToolsTool())
 
+            # 产物登记:把授权目录里已有的文件变成可下载产物
+            try:
+                from tools.artifact_publish import PublishArtifactTool
+
+                _hub.register_python_tool(PublishArtifactTool())
+            except Exception:
+                pass
+
             # 子智能体:把互不依赖的子任务派出去并行做
             if config.subagents_enabled:
                 from core.subagents import get_subagent_pool

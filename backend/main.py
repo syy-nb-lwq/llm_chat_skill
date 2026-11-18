@@ -1047,7 +1047,18 @@ def _resolve_artifact(name: str) -> Path:
         raise HTTPException(status_code=403, detail="只能下载工作区内的文件")
 
     if not target.is_file():
-        raise HTTPException(status_code=404, detail=f"文件不存在: {raw}")
+        # 历史消息里的产物链接会一直留在对话里，文件却可能已经被清理/删掉了。
+        # 只说"文件不存在"用户不知道该怎么办，所以给出可执行的下一步。
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"文件不存在: {raw}。可能原因：① 该文件已被清理"
+                "（清理产物目录、或换机器后没同步）；"
+                "② agent 生成文件时用的目录不在产物区。"
+                "解决办法：让 agent 重新生成，或用 publish_artifact 工具"
+                "把已有文件登记成可下载产物。"
+            ),
+        )
     return target
 
 
