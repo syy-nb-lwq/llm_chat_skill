@@ -6,8 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.text_match import query_fragments as _query_fragments
+from core.text_match import score_fragments as _score_fragments
 from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
+
+#: hints 与当前输入的相关度门槛(命中查询片段的 20%,与检索通道保持一致)
+_HINT_MIN_SCORE = 0.2
 
 # ---- 数据结构 ----
 
@@ -286,18 +291,26 @@ class MemoryStore:
         """
         if not get_self_evolution_enabled():
             return []
-            
+
+        # 中文没有空格,`diagnosis.split()` 会得到整句,永远匹配不上 ——
+        # 统一用 CJK 二元组打分(见 core/text_match)。
+        fragments = _query_fragments(user_input)
+        if not fragments:
+            return []
+
         hints: List[str] = []
+        seen: set = set()
 
         # 从最近失败中找相关
         failures = self.get_recent_failures(top_k=10)
         for f in failures:
-            if not f.diagnosis:
+            if not f.diagnosis or f.diagnosis in seen:
                 continue
-            # 简单关键词匹配
-            keywords = [w for w in f.diagnosis.split() if len(w) > 2]
-            matches = sum(1 for kw in keywords if kw in user_input)
-            if matches >= 1:
+            haystack = " ".join(
+                part for part in (f.diagnosis, f.scenario, f.intent) if part
+            )
+            if _score_fragments(haystack, fragments) >= _HINT_MIN_SCORE:
+                seen.add(f.diagnosis)
                 hints.append(f"[失败教训] {f.diagnosis}")
 
         # 从成功中找相关
@@ -313,6 +326,10 @@ class MemoryStore:
         if not path.exists():
             return hints
 
+        fragments = _query_fragments(user_input)
+        if not fragments:
+            return hints
+
         try:
             with path.open(encoding="utf-8") as f:
                 lines = f.readlines()
@@ -320,11 +337,17 @@ class MemoryStore:
                 try:
                     data = json.loads(line)
                     record = SuccessRecord(**data)
-                    # 关键词匹配
-                    if any(kw in user_input for kw in [record.scenario, record.matched_skill]):
-                        hints.append(f"[成功经验] {record.matched_skill} 适合处理 {record.scenario}")
                 except Exception:
-                    pass
+                    continue
+                haystack = " ".join(
+                    part
+                    for part in (record.scenario, record.matched_skill, record.pattern)
+                    if part
+                )
+                if _score_fragments(haystack, fragments) >= _HINT_MIN_SCORE:
+                    hints.append(
+                        f"[成功经验] {record.matched_skill} 适合处理 {record.scenario}"
+                    )
                 if len(hints) >= top_k:
                     break
         except Exception:

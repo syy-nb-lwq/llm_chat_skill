@@ -133,6 +133,19 @@ class MemoryDB:
             )
         """)
 
+        # 回填缺失的索引行(幂等)。
+        #
+        # 老库在引入 FTS 之前就有数据;此外 FTS 插入失败过的记录、
+        # 外部工具直接写 memories 的记录,都会在索引里缺行 ——
+        # 缺了行全文检索就永远召回不到。这里按 id 对齐补一次。
+        cursor.execute("""
+            INSERT INTO memories_fts (id, content)
+            SELECT m.id, m.content FROM memories m
+            WHERE NOT EXISTS (
+                SELECT 1 FROM memories_fts f WHERE f.id = m.id
+            )
+        """)
+
         # 索引
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)")
@@ -602,23 +615,29 @@ class MemoryDB:
         if content:
             updates.append("content = ?")
             params.append(content)
-            # 更新 FTS 表
-            cursor.execute("UPDATE memories_fts SET content = ? WHERE id = ?", (content, id))
-        
+
         if metadata:
             updates.append("metadata = ?")
             params.append(json.dumps(metadata, ensure_ascii=False))
-        
+
         updates.append("updated_at = ?")
         params.append(datetime.now().isoformat())
-        
+
         params.append(id)
-        
+
         cursor.execute(f"UPDATE memories SET {', '.join(updates)} WHERE id = ?", params)
-        conn.commit()
         success = cursor.rowcount > 0
+
+        if success and content:
+            # FTS5 的 UPDATE 在索引缺行时不会补行 —— 先删后插,保证内容与索引一致
+            cursor.execute("DELETE FROM memories_fts WHERE id = ?", (id,))
+            cursor.execute(
+                "INSERT INTO memories_fts (id, content) VALUES (?, ?)", (id, content)
+            )
+
+        conn.commit()
         conn.close()
-        
+
         return success
 
     def delete(self, id: str) -> bool:
@@ -627,10 +646,10 @@ class MemoryDB:
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM memories WHERE id = ?", (id,))
-        cursor.execute("DELETE FROM memories_fts WHERE id = ?", (id,))
-        
-        conn.commit()
         success = cursor.rowcount > 0
+        cursor.execute("DELETE FROM memories_fts WHERE id = ?", (id,))
+
+        conn.commit()
         conn.close()
         
         return success
@@ -656,23 +675,25 @@ class MemoryDB:
         cutoff = cutoff - timedelta(days=days)
 
         placeholders = ",".join("?" * len(PROFILE_MEMORY_TYPES))
-        cursor.execute(
-            f"""
-            DELETE FROM memories
-            WHERE created_at < ?
+        where_sql = f"""
+            created_at < ?
             AND type NOT IN ({placeholders})
             AND type != 'failure'
             AND id NOT IN (
                 SELECT id FROM memories WHERE metadata LIKE '%"important":true%'
             )
-            """,
-            (cutoff.isoformat(), *PROFILE_MEMORY_TYPES),
+        """
+        params = (cutoff.isoformat(), *PROFILE_MEMORY_TYPES)
+
+        # 先按同一条件摘掉 FTS 索引,再删主表 ——
+        # 只删主表会留下孤儿索引行(检索走 JOIN 虽然不会召回,但索引会无限膨胀)。
+        cursor.execute(
+            f"DELETE FROM memories_fts WHERE id IN (SELECT id FROM memories WHERE {where_sql})",
+            params,
         )
+        cursor.execute(f"DELETE FROM memories WHERE {where_sql}", params)
 
         count = cursor.rowcount
-
-        # 重建 FTS
-        cursor.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize')")
 
         conn.commit()
         conn.close()
@@ -706,11 +727,6 @@ class MemoryDB:
         count = cursor.fetchone()[0]
         cursor.execute("DELETE FROM memories")
         cursor.execute("DELETE FROM memories_fts")
-        # 重建 FTS 索引(外部内容表模式需要重建才能对上)
-        try:
-            cursor.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
-        except Exception:
-            pass
         conn.commit()
         conn.close()
         self.logger.info("MemoryDB", f"清空记忆: 删除 {count} 条")
@@ -728,12 +744,14 @@ class MemoryDB:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,))
         count = cursor.fetchone()[0]
-        cursor.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
+        # 必须在删主表**之前**摘索引:先删主表,下面的子查询就查不到 id,
+        # FTS 行会永久残留。
         cursor.execute(
             "DELETE FROM memories_fts WHERE id IN "
             "(SELECT id FROM memories WHERE user_id = ?)",
             (user_id,),
         )
+        cursor.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
         self.logger.info("MemoryDB", f"清空用户 {user_id} 的记忆: 删除 {count} 条")
