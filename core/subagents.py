@@ -57,6 +57,25 @@ def get_current_user() -> str:
     return _current_user.get() or ""
 
 
+#: 当前这一轮的**对话上下文** —— 子智能体必须能看到，否则它不知道在聊什么。
+#:
+#: 实机踩过：用户说"发"，主智能体知道指的是刚才那个视频任务；
+#: 子智能体只拿到"提交视频生成任务"这一句，既不知道是哪个视频，
+#: 也不知道前面已经建了哪些文件、试过哪些接口 —— 只能从头猜。
+#:
+#: 同样用 contextvars 传递（asyncio 任务创建时会复制上下文）。
+_current_context: ContextVar[Any] = ContextVar("dsh_subagent_ctx", default=None)
+
+
+def set_current_context(ctx: Any) -> None:
+    """一轮开始时由 Agent 调用。"""
+    _current_context.set(ctx)
+
+
+def get_current_context() -> Any:
+    return _current_context.get()
+
+
 # ===== 状态 =====
 
 STATUS_PENDING = "pending"
@@ -342,7 +361,14 @@ class SubAgentPool:
                     profile_block = ""
 
             try:
-                plan = await manager.plan(enriched, profile_block=profile_block)
+                # **带上主对话上下文** —— 用户说"发"，子智能体得知道指的是什么。
+                # Context 对象由规划层自己按 token 预算截断，这里不用额外裁剪。
+                plan = await manager.plan(
+                    enriched,
+                    get_current_context(),
+                    user_id=uid,
+                    profile_block=profile_block,
+                )
             except Exception as exc:
                 task.error = f"规划失败: {exc}"
                 task.status = STATUS_FAILED

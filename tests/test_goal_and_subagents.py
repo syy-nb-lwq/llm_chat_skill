@@ -574,3 +574,62 @@ async def test_subagent_blocks_recursive_tools(monkeypatch):
 
     assert "run_subagents" not in captured.get("types", []), "递归工具没被拦住"
     assert "web_search" in captured["types"]
+
+
+# ============================================================
+# 10. 子智能体必须共享主对话上下文（实机踩过）
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_subagent_receives_main_context(monkeypatch):
+    """**回归**：子智能体规划时要能看到主对话上下文。
+
+    实机症状：用户说「发」，主智能体知道指的是刚才那个视频任务；
+    子智能体只拿到「提交视频生成任务」一句，既不知道是哪个视频，
+    也不知道前面建了哪些文件、试过哪些接口 —— 只能从头猜。
+    """
+    import agents.learning as learning_mod
+    import agents.manager as manager_mod
+    import core.subagents as sa
+
+    captured = {}
+
+    async def fake_plan(self, goal, context=None, **kw):
+        captured["goal"] = goal
+        captured["context"] = context
+        return FakePlan(tool_tasks=[], goal_done=True)
+
+    monkeypatch.setattr(manager_mod.ManagerAgent, "plan", fake_plan)
+
+    sentinel = object()          # 冒充主对话 Context
+    sa.set_current_context(sentinel)
+    try:
+        pool = SubAgentPool(timeout_s=10)
+        task = SubAgentTask(goal="提交视频生成任务", depth=1)
+        await pool._execute(task)
+    finally:
+        sa.set_current_context(None)
+
+    assert captured.get("context") is sentinel, (
+        "子智能体没拿到主对话上下文 —— 它不知道\"发\"指的是什么"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_context_defaults_to_none(monkeypatch):
+    """没有主上下文时也不能崩（独立调用场景）。"""
+    import agents.manager as manager_mod
+    import core.subagents as sa
+
+    captured = {}
+
+    async def fake_plan(self, goal, context=None, **kw):
+        captured["context"] = context
+        return FakePlan(tool_tasks=[], goal_done=True)
+
+    monkeypatch.setattr(manager_mod.ManagerAgent, "plan", fake_plan)
+    sa.set_current_context(None)
+
+    pool = SubAgentPool(timeout_s=10)
+    await pool._execute(SubAgentTask(goal="x", depth=1))
+    assert captured["context"] is None

@@ -218,6 +218,15 @@ class ManagerAgent(BaseAgent):
     def system_prompt(self) -> str:
         skills = self.skill_store.list_all()
         skills_list = self._format_skills(skills)
+
+        # 工作区现状：让规划层知道"手上已经有什么"
+        # （实机踩过：agent 把 key 存进文件后，下一轮却说自己"拿不到 key"）
+        try:
+            from core.workspace_view import build_workspace_block
+
+            workspace_block = build_workspace_block()
+        except Exception:
+            workspace_block = ""
         tools = self._tool_signatures()
         return f"""你是一个任务规划助手。作为流转中枢,你需要:
 
@@ -288,6 +297,8 @@ class ManagerAgent(BaseAgent):
 
 已有技能列表:
 {skills_list}
+
+{workspace_block}
 
 严格按以下 JSON 格式输出:
 {{

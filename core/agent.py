@@ -880,11 +880,13 @@ class Agent:
                 active["plan"] = new_plan
                 return new_plan
 
-            # 让子智能体知道"这是谁在问" —— 它要拿这个去取用户画像
+            # 让子智能体知道"这是谁在问"、"前面聊到哪了"
             try:
-                from core.subagents import set_current_user
+                from core.subagents import set_current_context, set_current_user
 
                 set_current_user(self.user_id)
+                # 共享主对话上下文 —— 否则子智能体不知道"发"指的是什么
+                set_current_context(self.context)
             except Exception:
                 pass
 
