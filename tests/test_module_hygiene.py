@@ -129,3 +129,31 @@ def test_event_bus_swallows_emitter_errors():
         clear_emitter()
 
     asyncio.run(run())
+
+
+def test_redact_secrets_masks_keys():
+    """密钥不能以明文进日志(实机踩过: agent 把用户的 key 写进代码,
+    而"执行工具: {params}"会把参数原样打进日志)。"""
+    from infra.logger import redact_secrets
+
+    assert "sk-api-4mlcprXetest1234567890" not in redact_secrets(
+        "{'code': \"KEY = 'sk-api-4mlcprXetest1234567890'\"}"
+    )
+    assert "abcdefghijklmnop123456" not in redact_secrets(
+        "Authorization: Bearer abcdefghijklmnop123456"
+    )
+    assert "SECRETVALUE12345" not in redact_secrets("api_key=SECRETVALUE12345")
+
+
+def test_redact_secrets_leaves_normal_text():
+    from infra.logger import redact_secrets
+
+    text = "帮我查一下 Python 3.13 的新特性, 不需要密钥"
+    assert redact_secrets(text) == text
+
+
+def test_redact_never_raises():
+    from infra.logger import redact_secrets
+
+    assert redact_secrets(None) == ""
+    assert isinstance(redact_secrets({"a": 1}), str)

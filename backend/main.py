@@ -1099,6 +1099,13 @@ async def list_artifacts(request: Request, limit: int = 200):
     for path in sorted(root.rglob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
         if not path.is_file():
             continue
+        # `_run` 是 python_exec 的**常驻执行目录**(相对路径要跨调用有效)，
+        # 里面的文件会作为产物复制到根目录。列出来会跟根目录重复，所以跳过。
+        try:
+            if "_run" in path.relative_to(root).parts:
+                continue
+        except Exception:
+            pass
         try:
             stat = path.stat()
         except OSError:

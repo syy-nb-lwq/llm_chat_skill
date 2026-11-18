@@ -132,15 +132,25 @@ def static_check(code: str) -> List[str]:
 
         # --- 危险调用 ---
         if isinstance(node, ast.Call):
-            fname = _call_name(node.func)
-            if fname in ("eval", "exec", "compile", "__import__"):
+            dotted = _dotted_name(node.func)
+
+            # 裸调用 eval/exec/compile/__import__ → 拦
+            if isinstance(node.func, ast.Name) and dotted in DANGEROUS_BARE_CALLS:
                 problems.append(
-                    f"禁止调用 {fname}()(第 {node.lineno} 行):"
+                    f"禁止调用 {dotted}()(第 {node.lineno} 行):"
                     f"它是动态执行入口,静态检查无法保证安全"
                 )
-            if fname in ("getattr", "setattr"):
+            # 带模块前缀的危险调用(os.system / builtins.compile …) → 拦
+            elif dotted in DANGEROUS_QUALIFIED_CALLS:
                 problems.append(
-                    f"不建议调用 {fname}()(第 {node.lineno} 行):"
+                    f"禁止调用 {dotted}()(第 {node.lineno} 行):"
+                    f"它能执行命令或动态代码,静态检查无法保证安全"
+                )
+
+            # getattr/setattr 只在裸调用时提醒(减少误报)
+            if isinstance(node.func, ast.Name) and dotted in ("getattr", "setattr"):
+                problems.append(
+                    f"不建议调用 {dotted}()(第 {node.lineno} 行):"
                     f"常用它绕过静态检查"
                 )
 
@@ -148,12 +158,74 @@ def static_check(code: str) -> List[str]:
 
 
 def _call_name(func: ast.AST) -> str:
-    """取调用的名字(只取最后一段,如 `os.system` → `system`)。"""
+    """取调用的名字(只取最后一段,如 `os.system` → `system`)。
+
+    **注意:这个函数只用于提示文案,不能用它做拦截判断。**
+    历史上用它对一切调用做黑名单匹配,结果 `re.compile(...)`
+    被当成"调用了 compile()"直接拦掉 —— 见 `_dotted_name`。
+    """
     if isinstance(func, ast.Name):
         return func.id
     if isinstance(func, ast.Attribute):
         return func.attr
     return ""
+
+
+#: **裸调用**就危险的内建函数（不带任何模块前缀）
+DANGEROUS_BARE_CALLS = {
+    "eval",
+    "exec",
+    "compile",
+    "__import__",
+    "breakpoint",
+}
+
+#: 需要**带模块前缀**才算危险的调用：`re.compile` 安全，`builtins.compile` 不安全
+DANGEROUS_QUALIFIED_CALLS = {
+    "builtins.eval",
+    "builtins.exec",
+    "builtins.compile",
+    "builtins.__import__",
+    "importlib.__import__",
+    "importlib.import_module",
+    "os.system",
+    "os.popen",
+    "os.execv",
+    "os.execve",
+    "os.execl",
+    "os.execle",
+    "os.execlp",
+    "os.execvp",
+    "os.spawnl",
+    "os.spawnv",
+    "os.startfile",
+    "ctypes.CDLL",
+    "ctypes.cdll",
+}
+
+
+def _dotted_name(func: ast.AST) -> str:
+    """把调用目标还原成点号全名，如 `re.compile` / `os.path.join` / `eval`。
+
+    **为什么必须看全名**：只取最后一段会把
+    `re.compile`(编译正则)、`pandas.DataFrame.eval`(表达式求值)
+    这类完全合法的调用误判成动态执行入口。
+    实机踩过：agent 写了一段用 `re.compile` 的校验脚本，被拦两次，
+    它只能绕开正则、改用别的方式，白折腾。
+    """
+    parts = []
+    node = func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    elif isinstance(node, ast.Call):
+        # 形如 foo().bar  —— 取不到稳定全名，返回空表示"判断不了"
+        return ""
+    else:
+        return ""
+    return ".".join(reversed(parts))
 
 
 def _build_env() -> Dict[str, str]:
@@ -313,8 +385,19 @@ class PythonExecTool(Tool):
             # 只是"不建议",放行但提示
             self.logger.info("PythonExec", f"代码有建议项: {problems}")
 
-        # --- 准备独立工作目录 ---
-        workdir = Path(tempfile.mkdtemp(prefix=f"exec_{uuid.uuid4().hex[:8]}_"))
+        # --- 准备工作目录（**持久**，不是一次性的临时目录）---
+        #
+        # 实机踩过：agent 第一轮用相对路径建了
+        # `ai_drama_project/04_分镜/分镜表.csv`，第二轮再读同一个相对路径
+        # → FileNotFoundError，因为临时目录跑完就被 rmtree 了。
+        # 多步文件任务因此根本做不下去，agent 只能被迫改成绝对路径硬编码，
+        # 又依赖它自己记住写到哪了 —— 非常脆。
+        #
+        # 现在用 workspace 下的 `_run` 作为常驻执行目录：
+        #   - 相对路径跨调用保持有效（符合"在一个工作区里做事"的直觉）
+        #   - 与产物根目录分离，workspace 根目录仍然只放交付物
+        workdir = _run_dir()
+        before = _snapshot(workdir)
         try:
             files = kwargs.get("files") or []
             if not isinstance(files, list):
@@ -391,7 +474,7 @@ class PythonExecTool(Tool):
             stdout = self._decode(stdout_b)
             stderr = self._decode(stderr_b)
 
-            artifacts = self._collect_artifacts(workdir)
+            artifacts = self._collect_artifacts(workdir, before)
 
             data = {
                 "success": not timed_out and proc.returncode == 0,
@@ -416,9 +499,13 @@ class PythonExecTool(Tool):
                 ),
                 meta={"duration_ms": duration_ms, "workdir": str(workdir)},
             )
-        finally:
-            # 产物已经收集到 workspace,临时目录可以删了
-            shutil.rmtree(workdir, ignore_errors=True)
+        except Exception as exc:
+            # 执行环境本身出错（建目录、写脚本、起进程……）—— 返回结构化失败，
+            # 不要让异常冒泡成 500，那样 agent 只看到"工具崩了"，查不出原因。
+            self.logger.warning("PythonExec", f"执行环境异常: {exc}")
+            return ToolResult(success=False, error=f"执行环境异常: {exc}")
+        # 注意：**不要删 workdir**。
+        # 它是常驻执行目录，删了就等于让相对路径再次失效（就是上面那个 bug）。
 
     # ===== 内部 =====
 
@@ -432,11 +519,16 @@ class PythonExecTool(Tool):
         # Windows 的 \r\n 对 LLM 是噪声,统一成 \n
         return text.replace("\r\n", "\n").replace("\r", "\n")
 
-    def _collect_artifacts(self, workdir: Path) -> List[Dict[str, Any]]:
-        """把生成的文件复制到 workspace,并返回清单。
+    #: 执行器自己写的文件，永远不算产物
+    _INFRA_FILES = {"main.py", "input.json"}
 
-        产物要**留在主进程能访问的地方** —— 临时目录会被删,
-        而用户可能想让 agent 下一轮接着处理这个文件。
+    def _collect_artifacts(self, workdir: Path,
+                           before: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
+        """把**本次执行新产生/改动过**的文件复制到 workspace，并返回清单。
+
+        为什么要 `before` 快照：执行目录现在是常驻的（相对路径要跨调用有效），
+        所以直接遍历会把**上一次甚至上上一次**产生的文件也当成本次产物。
+        用 mtime 快照做差集，只报这次真正动过的。
         """
         out: List[Dict[str, Any]] = []
         ws = _workspace_dir()
@@ -444,8 +536,14 @@ class PythonExecTool(Tool):
         for path in sorted(workdir.rglob("*")):
             if not path.is_file():
                 continue
-            if path.name == "main.py":
-                continue  # 我们自己写的脚本,不算产物
+            if path.name in self._INFRA_FILES:
+                continue  # 我们自己写的脚本/输入文件,不算产物
+            if before is not None:
+                try:
+                    if before.get(str(path)) == path.stat().st_mtime_ns:
+                        continue      # 这次没动过 → 不是本次产物
+                except OSError:
+                    continue
             if len(out) >= MAX_ARTIFACT_FILES:
                 break
             try:
@@ -492,6 +590,37 @@ def _kill_process_group(proc) -> None:
             proc.kill()
         except Exception:
             pass
+
+
+def _run_dir() -> Path:
+    """常驻执行目录（相对路径跨调用的前提）。
+
+    放在 workspace 下的 `_run`，和交付物根目录分开 ——
+    根目录只放用户能下载的东西。
+    """
+    d = _workspace_dir() / "_run"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def _snapshot(root: Path, *, max_files: int = 20000) -> Dict[str, int]:
+    """记录目录下所有文件的 mtime，用来算"这次改了什么"。"""
+    snap: Dict[str, int] = {}
+    try:
+        for i, path in enumerate(root.rglob("*")):
+            if i >= max_files:
+                break
+            try:
+                if path.is_file():
+                    snap[str(path)] = path.stat().st_mtime_ns
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return snap
 
 
 def _resolve_workspace_script(script_path: str) -> Optional[Path]:

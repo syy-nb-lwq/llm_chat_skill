@@ -1,5 +1,6 @@
 """日志系统 - 基于 stdlib logging,支持 level/文件/格式化"""
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,44 @@ from infra.config import config
 # 在 Windows 中文/日文等非 UTF-8 系统的默认代码页 (cp936 / cp932 / cp1252) 下,
 # logging.StreamHandler 直接写入 sys.stdout 会把中文切成 mojibake。
 # 用一个"重新编码字节再回写"的包装类,使 stdout 行为统一为 UTF-8。
+
+# ===== 日志脱敏 =====
+#
+# 为什么要有这个：实机踩过 —— agent 把用户的 API key
+# （`sk-api-...`）直接写进了 python_exec 的代码里，
+# 而 `执行工具: {...params...}` 会**把参数原样打进日志**。
+# 结果密钥以明文躺在 backend.log 里（12 处），还可能被一起提交/发出去。
+#
+# 脱敏不是"防止 agent 用密钥"（那是另一层：子进程 env 白名单），
+# 而是**不让密钥在日志里沉淀**。
+
+_RE_SK = re.compile(r"sk-[A-Za-z0-9_\-]{12,}")
+_RE_BEARER = re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9_\-\.]{12,})")
+_RE_KV = re.compile(
+    r"(?i)((?:api[_-]?key|access[_-]?key|access[_-]?token|secret[_-]?key"
+    r"|secret|password|passwd)\s*[=:]\s*)([\"']?)([A-Za-z0-9_\-\.]{10,})"
+)
+
+
+def _mask(value: str) -> str:
+    if len(value) <= 8:
+        return "***"
+    return value[:6] + "***"
+
+
+def redact_secrets(text: Any) -> str:
+    """把文本里的密钥打码。**永远不抛异常**（日志不能因为它挂掉）。"""
+    try:
+        s = "" if text is None else str(text)
+        if not s:
+            return s
+        s = _RE_SK.sub(lambda m: _mask(m.group(0)), s)
+        s = _RE_BEARER.sub(lambda m: f"{m.group(1)} {_mask(m.group(2))}", s)
+        s = _RE_KV.sub(lambda m: f"{m.group(1)}{m.group(2)}{_mask(m.group(3))}", s)
+        return s
+    except Exception:
+        return "<脱敏失败>"
+
 
 class _Utf8Stream:
     """把字符串先编码为 UTF-8,再写入底层二进制流。

@@ -328,3 +328,127 @@ def test_flag_gating_respects_config(monkeypatch):
 
     monkeypatch.setattr(config, "code_exec_enabled", True)
     assert _flag_allows(PythonExecTool()) is True
+
+
+# ============================================================
+# 静态检查：误拦 / 漏拦（实机踩过）
+# ============================================================
+
+def test_re_compile_is_allowed():
+    """**回归**：`re.compile()` 必须放行。
+
+    实机症状：agent 写了一段用 `re.compile` 的校验脚本，连续两次
+    「代码被安全检查拦截」，它只好绕开正则重写，白折腾。
+
+    根因：`_call_name()` 只取调用名的最后一段，`re.compile` → `"compile"`
+    → 命中 eval/exec/compile 黑名单。
+    同样的坑还会拦 `pandas.DataFrame.eval()`。
+    """
+    code = "import re\np = re.compile(r'\\d+')\nprint(p.findall('a1b2'))"
+    hard = [p for p in static_check(code) if p.startswith("禁止")]
+    assert hard == [], f"re.compile 被误拦: {hard}"
+
+
+def test_attribute_named_eval_is_allowed():
+    """对象上的 `.eval()`（pandas 有）也不是动态执行入口。"""
+    code = "df = object()\nprint(df.eval('a + 1'))"
+    hard = [p for p in static_check(code) if p.startswith("禁止")]
+    assert hard == []
+
+
+def test_bare_eval_exec_compile_blocked():
+    for code in ("eval('1+1')", "exec('x=1')", "compile('x=1', '<s>', 'exec')"):
+        hard = [p for p in static_check(code) if p.startswith("禁止")]
+        assert hard, f"该拦却没拦: {code}"
+
+
+def test_qualified_dangerous_calls_blocked():
+    """带前缀的危险调用也要拦 —— 这几个以前是**漏的**。
+
+    旧实现只看最后一段：`os.system` → `system`（不在名单里）→ 放行。
+    """
+    cases = [
+        "import builtins\nbuiltins.eval('1+1')",
+        "import os\nos.system('dir')",
+        "import importlib\nimportlib.import_module('os')",
+    ]
+    for code in cases:
+        hard = [p for p in static_check(code) if p.startswith("禁止")]
+        assert hard, f"漏拦了: {code}"
+
+
+def test_os_path_and_open_still_allowed():
+    for code in ("import os\nprint(os.path.join('a', 'b'))",
+                 "open('x.txt', 'w').write('hi')"):
+        hard = [p for p in static_check(code) if p.startswith("禁止")]
+        assert hard == []
+
+
+# ============================================================
+# 执行目录必须**持久**（实机踩过）
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_relative_path_persists_across_calls(exec_tool):
+    """**回归**：两次 python_exec 之间，相对路径必须还有效。
+
+    实机症状：第一轮建了 `ai_drama_project/04_分镜/分镜表.csv`，
+    第二轮读同一个相对路径 → FileNotFoundError。
+
+    根因：每次调用都 `mkdtemp()` 新建临时目录、跑完 `rmtree()` 删掉。
+    多步文件任务因此根本做不下去，agent 只能被迫改成绝对路径硬编码。
+    """
+    create = "\n".join([
+        "from pathlib import Path",
+        "Path('proj').mkdir(parents=True, exist_ok=True)",
+        r"Path('proj/data.csv').write_text('a,b\n1,2\n', encoding='utf-8')",
+        "print('created')",
+    ])
+    read = "\n".join([
+        "from pathlib import Path",
+        "p = Path('proj/data.csv')",
+        "print('EXISTS:', p.exists())",
+    ])
+
+    r1 = await exec_tool.execute(code=create)
+    assert r1.success, r1.error
+
+    r2 = await exec_tool.execute(code=read)
+    assert r2.success, r2.error
+    assert "EXISTS: True" in r2.data["stdout"], (
+        f"相对路径跨调用丢了: {r2.data['stdout']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_artifacts_only_report_changed_files(exec_tool):
+    """执行目录常驻之后，产物只能报**本次变动**的文件。
+
+    否则第二次调用会把上一次的文件再报一遍，前端就会重复列出。
+    """
+    create = "\n".join([
+        "from pathlib import Path",
+        "Path('out').mkdir(parents=True, exist_ok=True)",
+        r"Path('out/a.txt').write_text('x', encoding='utf-8')",
+    ])
+    read_only = "print('nothing written')"
+
+    r1 = await exec_tool.execute(code=create)
+    assert [a["path"] for a in r1.data["artifacts"]] == ["out/a.txt"]
+
+    r2 = await exec_tool.execute(code=read_only)
+    assert r2.data["artifacts"] == [], (
+        f"没动文件却报了产物: {r2.data['artifacts']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_infra_files_are_not_artifacts(exec_tool):
+    """执行器自己写的 main.py / input.json 不该算用户产物。"""
+    r = await exec_tool.execute(
+        code="print('hi')",
+        files=[{"name": "input.json", "content": "{}"}],
+    )
+    names = [a["name"] for a in r.data["artifacts"]]
+    assert "main.py" not in names
+    assert "input.json" not in names

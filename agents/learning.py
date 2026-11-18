@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
-from infra.logger import get_logger
+from infra.logger import get_logger, redact_secrets
 from tools.base import ToolResult
 from tools.hub import get_tool_hub
 
@@ -174,7 +174,8 @@ class LearningAgent:
         local_params = dict(params) if params else {}
 
         async def _run_once() -> ToolResult:
-            self.logger.info(tool_type, f"执行工具: {local_params}")
+            # **脱敏**：参数里可能有用户直接贴进来的 API key
+            self.logger.info(tool_type, f"执行工具: {redact_secrets(local_params)}")
             try:
                 result = await asyncio.wait_for(
                     self.hub.call_tool(tool_type, local_params),
