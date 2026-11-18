@@ -267,6 +267,8 @@ class PythonExecTool(Tool):
         "不可以:启动子进程、动态执行(eval/exec/__import__)、装包、"
         "读进程环境变量里的密钥(密钥不在环境里,要用请显式传入)。"
         "生成的文件会作为产物返回,路径在 artifacts 里。"
+        "**产物放到当前目录就行**(例如 `output/a.mp4` 或 `a.mp4`),"
+        "不要再套一层 `workspace/` 前缀 —— 否则会变成 workspace/workspace/… 的套娃路径。"
     )
 
     def __init__(
@@ -553,6 +555,18 @@ class PythonExecTool(Tool):
             if total + size > MAX_ARTIFACT_BYTES:
                 break
             rel = path.relative_to(workdir)
+
+            # **剥掉多套的一层 `workspace/`。**
+            #
+            # 执行目录现在常驻在 `memory/workspace/_run`。如果脚本按老习惯写
+            # `workspace/output/x.mp4`（以为 cwd 是上级目录），就会落到
+            # `_run/workspace/output/x.mp4`，产物路径变成 workspace/workspace/…
+            # 实机踩过：成片落在 `_run/workspace/output/` 里，用户在界面上
+            # 根本下载不到 —— 明明文件是好的。
+            rel_parts = list(rel.parts)
+            if len(rel_parts) > 1 and rel_parts[0] == "workspace":
+                rel = Path(*rel_parts[1:])
+
             dest = ws / str(rel)
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)

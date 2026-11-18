@@ -452,3 +452,28 @@ async def test_infra_files_are_not_artifacts(exec_tool):
     names = [a["name"] for a in r.data["artifacts"]]
     assert "main.py" not in names
     assert "input.json" not in names
+
+
+@pytest.mark.asyncio
+async def test_workspace_prefix_is_stripped_from_artifacts(exec_tool):
+    """**回归**：脚本写 `workspace/output/x` 时产物路径不能套娃。
+
+    执行目录常驻在 `memory/workspace/_run`。如果脚本按老习惯写
+    `workspace/output/x.mp4`（以为 cwd 是上级目录），会落到
+    `_run/workspace/output/x.mp4`，产物路径变成 `workspace/workspace/x`。
+
+    实机症状：成片落在 `_run/workspace/output/` 里，
+    用户在界面上根本下载不到 —— 文件明明是好的。
+    """
+    code = "\n".join([
+        "from pathlib import Path",
+        "Path('workspace/output').mkdir(parents=True, exist_ok=True)",
+        "Path('workspace/output/v.mp4').write_text('fake-video', encoding='utf-8')",
+        "print('done')",
+    ])
+    r = await exec_tool.execute(code=code)
+    assert r.success, r.error
+
+    paths = [a["path"] for a in r.data["artifacts"]]
+    assert "output/v.mp4" in paths, f"多套了一层 workspace/：{paths}"
+    assert not any(p.startswith("workspace/") for p in paths), paths
