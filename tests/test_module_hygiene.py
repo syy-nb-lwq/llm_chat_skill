@@ -133,16 +133,66 @@ def test_event_bus_swallows_emitter_errors():
 
 def test_redact_secrets_masks_keys():
     """密钥不能以明文进日志(实机踩过: agent 把用户的 key 写进代码,
-    而"执行工具: {params}"会把参数原样打进日志)。"""
+    而"执行工具: {params}"会把参数原样打进日志)。
+
+    注意：这里用**明显的假串**，不要拿真实 key 的前缀当测试数据 ——
+    那等于把真实凭据的一部分提交进仓库。
+    """
     from infra.logger import redact_secrets
 
-    assert "sk-api-4mlcprXetest1234567890" not in redact_secrets(
-        "{'code': \"KEY = 'sk-api-4mlcprXetest1234567890'\"}"
+    fake_key = "sk-FAKE0000fakefakefake0000"
+    assert fake_key not in redact_secrets(
+        "{'code': \"KEY = '" + fake_key + "'\"}"
     )
     assert "abcdefghijklmnop123456" not in redact_secrets(
         "Authorization: Bearer abcdefghijklmnop123456"
     )
     assert "SECRETVALUE12345" not in redact_secrets("api_key=SECRETVALUE12345")
+
+
+def test_no_real_looking_keys_in_repo():
+    """**守卫**：**会被提交**的文件里不能出现看起来像真实密钥的长串。
+
+    只看 `git ls-files`（被跟踪的文件）—— 本地 `.env` 本来就该有 key，
+    它被 .gitignore 挡着，不会进仓库。要守的是"会进 GitHub 的那批文件"。
+
+    规则：`sk-` 后面跟超过 30 个密钥字符。真实 key 都很长，
+    测试用的假串刻意保持很短。
+    """
+    import re
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent
+    try:
+        out = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(root), capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        pytest.skip("拿不到 git ls-files")
+
+    if out.returncode != 0:
+        pytest.skip("不是 git 仓库，跳过")
+
+    pattern = re.compile(r"sk-[A-Za-z0-9_\-]{30,}")
+    skip_suffix = {".mp4", ".png", ".jpg", ".zip", ".pyc", ".gif", ".webp"}
+
+    offenders = []
+    for rel in out.stdout.splitlines():
+        path = root / rel.strip()
+        if not path.is_file():
+            continue
+        if path.suffix.lower() in skip_suffix:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for m in pattern.finditer(text):
+            offenders.append(f"{rel}: {m.group(0)[:12]}…")
+
+    assert not offenders, "被跟踪的文件里疑似有真实密钥：\n" + "\n".join(offenders)
 
 
 def test_redact_secrets_leaves_normal_text():

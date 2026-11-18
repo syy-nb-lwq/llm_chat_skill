@@ -1,6 +1,16 @@
 # 环境变量
 .env
 .env.*
+# 任何以 .env 结尾的文件（如 config/minimax.env）—— `.env.*` 挡不住这种命名
+*.env
+# 其它凭据
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+credentials.json
 
 # Python
 __pycache__/
