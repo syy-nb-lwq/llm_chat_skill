@@ -331,3 +331,19 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     # (critic 直接短路返回 `diagnosis='self_evolution_disabled'`)——
     # 而单独跑那个文件是全绿的,典型的“测试间污染”。
     _restore_feature_flags()
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_health(tmp_path, monkeypatch):
+    """把**工具健康账本**隔离到 tmp —— 每个测试独立。
+
+    实机踩过：只要测试里调了 `hub.call_tool()`，流水就会写进真实的
+    `memory/tools/health.jsonl`，于是 `/api/tool-health` 里冒出
+    `a` / `flaky` / `stub_1` 这些测试用的假工具名 —— 生产数据被污染了。
+
+    和 `mem_store` 那个 fixture 是同一个道理：**测试不许碰真实数据目录**。
+    """
+    import core.tool_health as th
+
+    store = th.ToolHealthStore(base_path=tmp_path / "tool_health")
+    monkeypatch.setattr(th, "_store", store)
+    return store
