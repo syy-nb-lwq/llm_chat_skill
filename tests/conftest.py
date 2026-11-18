@@ -347,3 +347,22 @@ def _isolate_tool_health(tmp_path, monkeypatch):
     store = th.ToolHealthStore(base_path=tmp_path / "tool_health")
     monkeypatch.setattr(th, "_store", store)
     return store
+
+
+@pytest.fixture(autouse=True)
+def _offline_profile_extractor(monkeypatch):
+    """画像抽取在测试里走**离线确定性**版本。
+
+    生产用 LLM（`core/profile_llm.extract_with_llm`）。但测试不能打网络：
+    既慢、又不确定 —— 同一个输入模型两次可能给出不同措辞，
+    断言就会随机失败。
+
+    这里换成旧的规则抽取器，语义与这些测试当年编写时一致。
+    """
+    import core.memory_writer as mw
+
+    async def _stub(text):
+        return mw.extract_candidates(text)
+
+    monkeypatch.setattr(mw, "_extractor", _stub)
+    return _stub

@@ -60,9 +60,47 @@ class MemoryCandidate:
     scope: str = "user"
     normalized_key: str = ""
     rule: str = ""
+    #: 用户原话里逐字出现的那一段（LLM 抽取时必须提供）
+    #:
+    #: 这是**反幻觉的结构性保证**：模型说不出证据、或证据在原话里找不到，
+    #: 整条候选直接丢弃（见 `core/profile_llm.validate_facts`）。
+    evidence: str = ""
 
 
-# ===== 规则提取 =====
+# ===== 抽取策略（可替换）=====
+#
+# 生产用 **LLM**：规则版只认「我习惯…/我喜欢…」这类句式，用户正常下任务
+# 时一条都抽不出来；偶尔抽出来的还是错的 —— 实机把
+# 「不要用国际站然后可以开始生成视频」当成了长期 constraint。
+#
+# 反幻觉不靠提示词，靠**结构性校验**：模型必须给出 evidence，
+# 且 evidence 必须能在用户原话里逐字找到，否则整条丢弃（见 core/profile_llm.py）。
+#
+# 为什么做成可替换：测试必须离线且确定 —— 打真实 LLM 会让测试变慢、
+# 变不稳定，还可能因为模型措辞不同而随机失败。
+
+
+async def _llm_extractor(user_input: str) -> List["MemoryCandidate"]:
+    from core.profile_llm import extract_with_llm
+
+    return await extract_with_llm(user_input)
+
+
+#: 当前抽取策略（生产 = LLM；测试可替换成离线的规则版）
+_extractor = _llm_extractor
+
+
+def set_extractor(fn) -> None:
+    """替换抽取策略（主要给测试用）。"""
+    global _extractor
+    _extractor = fn
+
+
+def get_extractor():
+    return _extractor
+
+
+# ===== 规则提取（旧策略，保留但不再作为生产默认）=====
 
 @dataclass(frozen=True)
 class _Rule:
@@ -457,7 +495,7 @@ class MemoryWriter:
             return result
 
         try:
-            candidates = extract_candidates(user_input)
+            candidates = await _extractor(user_input)
         except Exception as exc:
             self.logger.warning("MemoryWriter", f"候选提取失败: {exc}")
             return result

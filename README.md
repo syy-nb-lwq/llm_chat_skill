@@ -30,7 +30,7 @@
 - 意图评估可量化：`scripts/intent_eval_nightly.py` 出混淆矩阵 + 审计文件
 - **记忆分两层**（按"记的是什么"划分，不按时效）：
   - **短期记忆 = 会话内容**：全量落库、不设过期；服务重启 / 浏览器刷新后能接着聊
-  - **长期记忆 = 用户画像**：`preference/habit/method/constraint/fact` 由规则抽取写入，
+  - **长期记忆 = 用户画像**：`preference/habit/method/constraint/fact` 由 **LLM 抽取 + 证据校验**写入，
     **每轮常驻注入**（≤400 字符，进 **system prompt**，闲聊轮同样生效）；
     「忘掉这件事」软删除并同步清索引
 - 长期记忆按 `user_id` 严格隔离：检索接口的 `user_id` 是必填参数（跨用户召回为 0）
@@ -95,7 +95,7 @@
   - 架构契约由 `tests/test_intent_architecture.py` 守着，防止规则偷偷回来
 - **有真机基线了**（DeepSeek `deepseek-flash`）：
   - L1 意图：开发集 38 条 **100%**，留出集+封存集（95 条）**96.3%**
-  - 画像抽取 `scripts/profile_eval.py`（纯规则）：精确率 **100%**、召回率 100%
+  - 画像抽取：**LLM 抽取 + 证据逐字校验**（编造的证据对不上原话就丢弃）
   - 基线是**分布**：`--repeat` 多跑几遍，用最差的一遍做闸门
 
 测试状态：
@@ -184,7 +184,7 @@ python ui/cli.py
 - `core/clarifier.py`
   - L3 澄清层：意图不明时生成**一个**带候选项的问题（连续澄清上限 1 轮）
 - `core/memory_writer.py`
-  - 用户画像写入管线：规则抽取 → 敏感检查 → 去重/冲突 → 入库（0 次 LLM）
+  - 用户画像写入管线：**LLM 抽取**（证据校验）→ 敏感检查 → 去重/冲突 → 入库
 - `core/semantic_memory.py`
   - 长期记忆混合检索（向量 + FTS + CJK，RRF 融合）、画像常驻注入块、遗忘
 - `core/text_match.py`

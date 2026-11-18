@@ -1256,6 +1256,156 @@ def _resolve_user_and_session(request: Request) -> dict:
     }
 
 
+@app.get("/api/memory/overview")
+async def memory_overview(request: Request):
+    """记忆全景 —— 让用户看到"系统到底记得什么"。
+
+    ## 为什么需要这个接口
+
+    面板原来只展示"用户画像"（长期记忆）。而画像是**纯规则抽取**的
+    （只认"我习惯…/我喜欢…"这类句式，这是刻意的：不用 LLM 抽取，
+    避免幻觉污染记忆），日常下任务的对话几乎不会命中。
+
+    于是用户看到的是"一条记忆都没有"，但系统里其实还有：
+    会话内容、失败教训、待批方法论、待批补丁 —— 只是没暴露出来。
+
+    **记忆不是一样东西，是分层的**（docs/13）：
+    短期 = 会话内容；长期 = 用户画像；此外还有经验层（教训 / 方法论）。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    identity = _resolve_user_and_session(request)
+    user_id = identity["user_id"]
+    session_id = identity["session_id"]
+
+    out: Dict[str, Any] = {"user_id": user_id, "session_id": session_id}
+
+    # ---------- 短期记忆：本会话最近的消息 ----------
+    short: Dict[str, Any] = {"count": 0, "recent": []}
+    try:
+        from core.session_memory import get_session_memory_store
+
+        recent = get_session_memory_store().get_recent_messages(
+            session_id, limit=40, user_id=user_id
+        ) or []
+        short["count"] = len(recent)
+        short["recent"] = [
+            {
+                "role": m.get("role", ""),
+                "content": str(m.get("content") or "")[:180],
+            }
+            for m in recent[-6:]
+        ]
+    except Exception as exc:
+        short["error"] = str(exc)
+    out["short_term"] = short
+
+    # ---------- 长期记忆：用户画像 ----------
+    profile: Dict[str, Any] = {"count": 0, "entries": [], "injected_chars": 0}
+    try:
+        from core.semantic_memory import get_semantic_memory
+
+        smem = get_semantic_memory()
+        entries = smem.get_profile(user_id, limit=100) or []
+        block = smem.build_profile_block(user_id) or ""
+        profile["count"] = len(entries)
+        profile["injected_chars"] = len(block)
+        profile["entries"] = [
+            {
+                "id": e.id,
+                "type": _PROFILE_LABELS.get(e.type, e.type),
+                "content": e.content,
+                "confidence": round(float(e.confidence), 3),
+            }
+            for e in entries
+        ]
+    except Exception as exc:
+        profile["error"] = str(exc)
+    out["profile"] = profile
+
+    # ---------- 经验：失败教训 ----------
+    lessons: Dict[str, Any] = {"count": 0, "recent": []}
+    try:
+        fdir = _Path(__file__).parent.parent / "memory" / "failures"
+        files = sorted(
+            fdir.rglob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        mine = []
+        for f in files:
+            try:
+                raw = _json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if raw.get("user_id") and raw.get("user_id") != user_id:
+                continue
+            mine.append(raw)
+        lessons["count"] = len(mine)
+        lessons["recent"] = [
+            {
+                "at": str(r.get("timestamp") or "")[:19],
+                "diagnosis": str(r.get("diagnosis") or "")[:200],
+            }
+            for r in mine[:3]
+        ]
+    except Exception as exc:
+        lessons["error"] = str(exc)
+    out["lessons"] = lessons
+
+    # ---------- 经验：待批方法论草稿 ----------
+    drafts: Dict[str, Any] = {"count": 0, "recent": []}
+    try:
+        from core.skill_harvest import get_draft_store
+
+        items = get_draft_store().list()
+        drafts["count"] = len(items)
+        drafts["recent"] = [
+            {"name": d.get("name"), "capability": d.get("capability")}
+            for d in items[:3]
+        ]
+    except Exception as exc:
+        drafts["error"] = str(exc)
+    out["skill_drafts"] = drafts
+
+    # ---------- 经验：待批补丁 ----------
+    patches: Dict[str, Any] = {"count": 0, "recent": []}
+    try:
+        from core.memory import get_memory_store
+
+        items = get_memory_store().get_pending_patches()
+        patches["count"] = len(items)
+        patches["recent"] = [
+            {"type": p.patch_type, "diagnosis": str(p.diagnosis or "")[:160]}
+            for p in items[:3]
+        ]
+    except Exception as exc:
+        patches["error"] = str(exc)
+    out["patches"] = patches
+
+    # ---------- 工具经验：健康度 ----------
+    try:
+        from core.tool_health import get_health_store
+
+        store = get_health_store()
+        snap = store.snapshot()
+        out["tool_health"] = {
+            "count": len(snap),
+            "unhealthy": len([h for h in snap if not h.healthy]),
+            "gaps": len(store.list_gaps(limit=200)),
+        }
+    except Exception as exc:
+        out["tool_health"] = {"error": str(exc)}
+
+    out["total"] = (
+        profile.get("count", 0)
+        + short.get("count", 0)
+        + lessons.get("count", 0)
+        + drafts.get("count", 0)
+        + patches.get("count", 0)
+    )
+    return out
+
+
 @app.get("/api/memory/profile")
 async def get_profile(request: Request):
     """列出当前用户的画像(长期记忆)条目。
