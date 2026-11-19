@@ -51,10 +51,19 @@ Frontend / CLI / Streamlit
 
 ### 2.2 会话层
 
-- `backend/session.py` 按**服务端签发的 `client_id`** 持有 `Session`
+- `backend/session.py` 按**服务端签发的 `client_id`** 持有 `Session`；
+  额外维护 `session_id → Session`，**同会话的重连复用同一个 `Session`/`Agent`**
+  （否则新旧两个 Agent 会同时写会话库、各自维护摘要基线）
 - `SessionManager.issue_identity()` 维护 `conn_id → client_id` 绑定，
   `resolve_identity()` 按绑定放行（本地单用户，无令牌校验）
 - 每个 `Session` 内含一个 `Agent`（带签发的 `session_id`）
+- **每个 `Session` 有一条工作队列 + 一个 worker**：`chat` / `reset` / `feedback`
+  都投递到队列里串行执行。`Agent.handle()` 依赖 `identity` / `execution_id` /
+  `context` 等可变实例状态，两轮交叉会串台
+- **dispatcher 只投递、不执行**：它是所有连接共用的一条回调，在它里面
+  `await` 一整轮会把其他人的 `ping` / `init` 一起卡住（`ping` 走快通道）
+- 一个 `Session` 可能被多条连接引用，`gc` / `destroy` **只摘除引用**，
+  最后一个引用消失时才 dispose（并取消 worker）
 - 支持 TTL GC（会话过期时同步清理身份绑定）
 - dispose 回调现在支持异步 await
 
@@ -218,24 +227,66 @@ Frontend / CLI / Streamlit
 - `GET /api/reflections`
 - `POST /api/reflections/request`
 
-## 6.1 记忆分层
+## 6.1 记忆三层：工作 / 短期 / 长期
 
-记忆按**"记的是什么"**分两层，不是按存储时效性分：
+记忆按**"它回答什么问题"**分三层，不按存储时效性分。三层的唯一入口在
+`core/memorykit/`：主链只认这三张脸，不直接摸底层 store。
 
-| 层 | 内容 | 存储 | 注入方式 |
+| 层 | 回答的问题 | 生命周期 | 载体 | 唯一入口 |
+|---|---|---|---|---|
+| **工作记忆** | 这一轮做到哪了？ | 单轮，轮末即弃 | 进程内对象（不落库） | `memorykit/working.py` |
+| **短期记忆** | 这次会话说过什么？ | 会话，跨重启 | `memory/sessions.db` | `memorykit/short_term.py` |
+| **长期记忆** | 这个人是谁 / 什么做法长期有效？ | 永久 | `semantic_memory.db` + `memory/*` | `memorykit/long_term.py` |
+
+### 谁写、谁读（硬约束）
+
+| 层 | 谁**可以**写 | 谁**可以**读 | 禁止 |
 |---|---|---|---|
-| **短期** | 会话内容（用户与助手说了什么） | `memory/sessions.db` | 摘要 + 最近 N 轮 |
-| **长期** | 用户画像（习惯 / 偏好 / 做事方法） | `memory/semantic_memory.db` | **常驻注入**（≤400 字符，进 system prompt） |
+| 工作记忆 | Agent 主链、SubAgentPool（本轮内） | 重规划、回答生成、goal loop | 跨轮复用；注入 prompt 以外的持久化 |
+| 短期记忆 | **只有**会话层（`Context.sink` 落库路径） | 会话恢复、会话内检索、`/api/sessions` | 工具 / 子智能体 / critic 写；把摘要当长期事实 |
+| 长期记忆 | **只有**后台写入器（`MemoryWriter` / `Critic` / `SkillQuality`） | 轮首装配一次（画像 ≤400 字常驻）、规划前 hints | 工具内写画像；每轮全量注入；同步阻塞回答 |
 
-会话内容的取舍是：**全量保留，不设过期、不删除**。存储与注入分开 ——
-存储一直留着，注入时才按 token 预算裁剪成"摘要 + 最近 N 轮"。
+调用矩阵（谁 → 哪层 → 什么时候）：
 
-> 长期记忆的注入方式是"常驻"而不是"按需召回"，因为画像描述的是**这个人是谁**
-> （说话方式、习惯、做事方法），等 query 命中才注入就晚了。
-> 画像同时进入 **L2 规划提示词**（影响调哪个工具）和 **回答生成的 system prompt**
-> （影响怎么说话）—— 后者是画像真正生效的地方。
+| 调用方 | 工作记忆 | 短期记忆 | 长期记忆 |
+|---|---|---|---|
+| `Agent.handle` | 轮首 `begin_turn`，全程读写，`finally` 里 `end_turn` | 轮末经 `Context.sink` 追加消息 | 轮首读画像，异步写画像 |
+| `ManagerAgent.plan` | 读 `findings`（重规划回灌） | 读会话内检索结果 | 读画像块 + 经验 hints |
+| `LearningAgent` / `ToolHub` | 读上游槽位、写自己的结果 | — | — |
+| `OrchestratorAgent` | 读 `tool_results` | —（上下文由 Agent 传入） | —（画像由 Agent 传入） |
+| `SubAgentPool` | 独立命名空间 `subagent:<task_id>` | — | — |
+| `MemoryWriter`（后台） | — | — | 写画像 |
+| `ExecutionCritic` | 读执行上下文 | — | 写成功 / 失败经验 |
+| REST API / 前端 | — | 列、删会话 | 列、忘记忆 |
 
-### 写入与读取
+### 唯一允许的流向：单向沉淀
+
+```text
+工作记忆 ──轮末──> 短期记忆（消息原文）──抽取──> 长期记忆（画像 / 经验）
+```
+
+反向全部禁止：长期记忆不写回短期（画像不是"说过的话"）；工作记忆不直接写长期
+（一次工具输出不能改画像）；短期内容不被当长期知识注入（会话里的一句话不是这个人的属性）。
+
+### 工作记忆的槽位契约
+
+槽位名是跨模块约定，改名先改这张表：
+
+| 槽位 | 写入方 | 读取方 |
+|---|---|---|
+| `plan` | Agent（规划后、重规划后） | 回答生成、重试 |
+| `tool_results` | Agent（DAG 执行后） | 回答生成、Orchestrator |
+| `findings` | Agent（重规划前追加） | `prior_findings` 回灌 |
+| `subagent:<task_id>` | SubAgentPool | Agent 汇总 |
+| `failure` | Agent（失败取证） | 排障脚本 / `/api/traces` |
+
+约束：单值 4k 字符、最多 200 个槽位，超限截断并标注（工作记忆不能长成第二个数据库）。
+**只在本轮失败时** `dump()` 到 `memory/turns/<execution_id>.json` 供排障，其余情况轮末 `clear()`。
+
+### 短期记忆
+
+取舍是：**全量保留，不设过期、不删除**。存储与注入分开 —— 存储一直留着，
+注入时才按 token 预算裁剪成"摘要 + 最近 N 轮"。
 
 ```
 用户消息 ──┐
@@ -246,6 +297,19 @@ Frontend / CLI / Streamlit
 
 每轮调 LLM：system + 滚动摘要 + 最近 N 轮原文 + 本轮输入
 ```
+
+### 长期记忆由三个子库组成，但只有一个入口
+
+| 子库 | 存什么 | 载体 | 写入方 |
+|---|---|---|---|
+| 画像 | 偏好 / 习惯 / 方法 / 雷区 / 事实 | `memory/semantic_memory.db` | `MemoryWriter`（异步 + 证据校验） |
+| 经验 | 失败诊断、成功模式、待审补丁 | `memory/failures`、`memory/successes`、`memory/skill_patches` | `ExecutionCritic`、`Reflect` |
+| 台账 | 技能通过率（验收 + 线上被纠正） | `memory/skills/quality.jsonl` | `SkillQualityStore` |
+
+> 画像的注入方式是"常驻"而不是"按需召回"，因为画像描述的是**这个人是谁**
+> （说话方式、习惯、做事方法），等 query 命中才注入就晚了。
+> 画像同时进入 **L2 规划提示词**（影响调哪个工具）和 **回答生成的 system prompt**
+> （影响怎么说话）—— 后者是画像真正生效的地方。
 
 ### 会话恢复
 
@@ -262,17 +326,23 @@ Frontend / CLI / Streamlit
 
 ### 相关位置
 
-- `core/session_memory.py` —— `SessionMemoryStore`（消息 / 摘要 / 检索）
+- `core/memorykit/` —— **三层门面与职责契约（改记忆先看这里）**
+- `core/memorykit/working.py` —— 工作记忆（轮级工作台，contextvar 暴露给工具/子智能体）
+- `core/session_memory.py` —— 短期记忆的真实存储（消息 / 摘要 / 检索）
 - `core/session_rollup.py` —— 滚动摘要
 - `core/session_config.py` —— 恢复条数 / 滚动阈值
-- `core/context.py` —— `sink` + `summary`
-- `core/agent.py` —— `persist_session` 开关与恢复逻辑
+- `core/semantic_memory.py` + `core/memory_db.py` —— 长期记忆·画像
+- `core/memory.py` + `core/skill_quality.py` —— 长期记忆·经验与台账
+- `core/context.py` —— `sink` + `summary`（工作上下文，**不是**记忆）
+- `core/agent.py` —— 三层的调用编排（`begin_turn` / `sink` / `profile_block` / `end_turn`）
 
 ### 相关 API
 
 - `GET /api/sessions`
 - `GET /api/sessions/{session_id}/messages`
 - `DELETE /api/sessions/{session_id}`
+- `GET /api/memories`
+- `DELETE /api/memories/{memory_id}`
 
 ## 7. 启动与关闭
 
@@ -384,10 +454,13 @@ Frontend / CLI / Streamlit
 
 - `docs/` 下的细分设计文档仍有部分历史描述，需继续同步
 - `frontend` 没有端到端自动化测试
-- 长期记忆**前端面板**未做（「你记住了我什么」目前只有 `GET /api/memories`）
-- 用户画像抽取**只用规则**（`core/memory_writer.py`）—— 召回率有上限，
-  用户显式说"记住…"能兜住一部分；见 `docs/13` D14
-- 统一存储层（Repository 协议）未做：`MemoryStore`(JSON) 与 `MemoryDB`(SQLite) 仍是两套
+- 长期记忆面板已做（`frontend/src/components/MemoryPanel.vue` 接 `GET /api/memories`），
+  但**没有**「这条记忆是从哪句话来的」溯源展示
+- 用户画像抽取是 **LLM + 证据校验**（`core/memory_writer.py` + `core/profile_llm.py`），
+  不是纯规则；召回率的天花板在于"用户没说出口的偏好"抽不出来
+- 记忆三层已收口到 `core/memorykit/`（调用方只认三个门面），
+  但**底层仍是两套存储**：画像/经验走 SQLite + JSON 文件两条路，
+  统一存储层（Repository 协议）仍未做；见 §6.1
 - **自演化质量信号已接通**，但**只有纠正信号**：
   `user_feedback` 现在会被写入（隐式纠正语 + 前端 👍/👎），critic 会把被纠正的轮次记成失败；
   见 `docs/14` §2.3
@@ -409,6 +482,7 @@ backend/      FastAPI、Session、WebSocket
 frontend/     Vue 3 前端
 agents/       三个业务 Agent + Trainer
 core/         Agent、Context、DAG、Memory、SessionMemory、Critic、Reflect
+core/memorykit/  记忆三层门面（工作 / 短期 / 长期）与职责契约
 skills/       技能模型、加载、注册、存储
 tools/        工具实现与 ToolHub
 infra/        配置、Provider、日志

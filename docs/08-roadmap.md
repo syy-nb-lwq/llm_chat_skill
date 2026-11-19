@@ -165,7 +165,7 @@ tests/
 ├── test_agents.py           # Manager / Orchestrator / Trainer / Context / emit 顺序
 ├── test_more_dag.py         # 扩展 DAG 场景(并行/fallback/重试)
 ├── test_logger.py           # logging 级别 / 订阅 / 单例
-├── test_memory.py          # MemoryStore / ExecutionCritic / SkillMerger
+├── test_memory.py          # MemoryStore / ExecutionCritic
 └── test_backend.py          # FastAPI 集成: REST + WebSocket 全协议
 ```
 
@@ -201,7 +201,7 @@ pytest -v
 
 | 组件 | 文件 |
 |---|---|
-| SkillMerger | `core/merger.py` |
+| SkillMerger | ~~`core/merger.py`~~（2026-11 移除：零引用，从未接进主链） |
 | PatchReview UI | `frontend/src/components/PatchReview.vue` |
 
 ### Phase 3: SelfReflectLoop ✅

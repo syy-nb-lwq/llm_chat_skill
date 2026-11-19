@@ -111,8 +111,9 @@
   规则优先的意图识别
 - `core/semantic_memory.py`
   语义记忆，可选能力，受 feature flag 控制
-- `core/merger.py`
-  技能合并尝试，当前不是主链路核心依赖
+
+> `core/merger.py`（SkillMerger）与 `core/capability.py`（CapabilityAnalyzer）
+> 已于 2026-11 删除：全仓零引用，且从未接进主链。
 
 ## 7. 当前缺陷
 
