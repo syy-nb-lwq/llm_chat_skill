@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -52,6 +53,8 @@ class SessionMessage:
     role: str
     content: str
     created_at: str = ""
+    #: 本轮执行的工具计划。``None`` = 不知道,``[]`` = 那一轮不需要工具。
+    tool_tasks: Optional[List[Dict]] = None
 
     def to_dict(self) -> Dict:
         return {
@@ -63,6 +66,7 @@ class SessionMessage:
             "role": self.role,
             "content": self.content,
             "created_at": self.created_at,
+            "tool_tasks": self.tool_tasks,
         }
 
 
@@ -96,6 +100,66 @@ def _new_id() -> str:
     return uuid.uuid4().hex
 
 
+def _dump_tool_tasks(tasks: Optional[List[Dict]]) -> str:
+    """工具计划 → JSON 字符串。
+
+    ``None`` 和 ``[]`` 必须能区分:前者是"不知道",后者是"那一轮不需要工具"。
+    """
+    if tasks is None:
+        return ""
+    try:
+        return json.dumps(tasks, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _load_tool_tasks(raw: Any) -> Optional[List[Dict]]:
+    """落库的 JSON → 工具计划(坏数据当没有)。"""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _col(row: Any, name: str, default: Any = "") -> Any:
+    """读一列(列不存在时返回默认值 —— 老库可能还没迁移过)。"""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return default
+
+
+class _PooledConn:
+    """连接代理 —— ``close()`` 只是"我用完了",不真的关连接。
+
+    连接是**进程级复用**的。以前每写一条消息都新建 + 关闭一个 SQLite
+    连接,实测单次 90ms+(比 INSERT 本身贵三个数量级),而且全发生在
+    事件循环里。现在整个 store 共用一个连接,``close()`` 退化成 no-op,
+    调用点一行都不用改。
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+    def close(self) -> None:
+        """归还连接(不真的关闭)。"""
+
+    def __enter__(self) -> "_PooledConn":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.close()
+        return False
+
+
 def query_fragments(query: str) -> List[str]:
     """把查询切成检索片段(实现见 `core.text_match`)。"""
     return _query_fragments(query)
@@ -115,46 +179,75 @@ class SessionMemoryStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.logger = get_logger()
+        # 每个线程一个连接(threading.local):进程内复用,但不跨线程共享 ——
+        # 共享连接会让两个线程的语句落在同一个事务里,谁先 commit 谁倒霉。
+        self._local = threading.local()
+        self._conn_lock = threading.RLock()
         self._init_db()
 
     # ===== schema =====
 
-    def _connect(self) -> sqlite3.Connection:
-        """打开一个配好并发参数的连接(WAL + busy_timeout)。
+    def _connect(self) -> _PooledConn:
+        """取一个可用连接(**每个线程一个**,进程内复用,不会真的关掉)。
 
-        统一走 `core.sqlite_util.connect` —— 会话写入是高频路径,
-        多用户并发时裸 `sqlite3.connect` 会 `database is locked`。
+        **不再每条消息开关一次连接** —— 以前一次 append 要新建 + 关闭一个
+        SQLite 连接,实测 90ms+,比 INSERT 本身贵三个数量级,而且全发生在
+        事件循环里(一轮对话两条消息 ≈ 190ms 卡顿)。现在一个线程一条连接,
+        复用到底。
 
-        **自愈**:目录只在 `__init__` 建一次。如果运行期间被外部删掉
-        (日志清理/部署脚本/手动清理),这里要重新建 —— 否则每次读会话
-        都抛 `unable to open database file`,接口直接 500。
-
-        实机踩过:删了 memory/ 之后刷新页面,`GET /api/session/messages`
-        就是 500(而不是"没有历史")。
+        自愈:目录 / 文件被外部删掉时(日志清理 / 部署脚本 / 手动清理),
+        重新建连接并补建表 —— 实机踩过:删了 memory/ 之后刷新页面,
+        ``GET /api/session/messages`` 就是 500(而不是"没有历史")。
         """
-        try:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            self.logger.warning("SessionMemory", f"建目录失败 {self.db_path.parent}: {exc}")
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            if self.db_path.exists():
+                try:
+                    conn.execute("SELECT 1").fetchone()
+                    return _PooledConn(conn)
+                except sqlite3.Error:
+                    self._close_raw()
+            else:
+                # 文件被删了 —— 旧连接指向的是已被删除的 inode,必须重建
+                self._close_raw()
 
-        # 文件也可能被删了(不只是目录)。
-        # 新建的空库里没有表,之后每次读写都会
-        # `no such table: sessions` —— 同样表现为 500。
-        # 所以此时补一次建表。
-        need_init = not self.db_path.exists()
-        conn = sqlite_util.connect(self.db_path, row_factory=sqlite3.Row)
-        if need_init:
+        with self._conn_lock:
             try:
+                self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                self.logger.warning(
+                    "SessionMemory", f"建目录失败 {self.db_path.parent}: {exc}"
+                )
+
+            conn = sqlite_util.connect(self.db_path, row_factory=sqlite3.Row)
+            try:
+                # 幂等:表可能刚被删掉,这里补建
                 self._init_db(conn)
             except Exception as exc:
-                self.logger.warning("SessionMemory", f"重建表失败: {exc}")
-        return conn
+                self.logger.warning("SessionMemory", f"建表失败: {exc}")
+            self._local.conn = conn
+            return _PooledConn(conn)
+
+    def _close_raw(self) -> None:
+        """真正关掉本线程的底层连接(只在校验失败 / 重建时调用)。"""
+        conn = getattr(self._local, "conn", None)
+        self._local.conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+    def close(self) -> None:
+        """关闭本线程的底层连接(进程退出 / 测试清理时调用)。"""
+        with self._conn_lock:
+            self._close_raw()
 
     def _init_db(self, conn: Optional[sqlite3.Connection] = None) -> None:
-        """建表。传入连接时复用它(避免 `_connect` 递归)。"""
-        own = conn is None
-        if own:
-            conn = self._connect()
+        """建表 + 索引(幂等)。不传 conn 时自己拿一个。"""
+        if conn is None:
+            self._connect()  # 内部会带 conn 递归回来建表
+            return
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -180,6 +273,20 @@ class SessionMemoryStore:
                 created_at TEXT NOT NULL
             )
         """)
+        # 迁移:老库没有 tool_tasks 列 → 补上(老数据留空)
+        cols = {
+            r[1] for r in cursor.execute("PRAGMA table_info(session_messages)").fetchall()
+        }
+        if "tool_tasks" not in cols:
+            try:
+                cursor.execute(
+                    "ALTER TABLE session_messages "
+                    "ADD COLUMN tool_tasks TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.Error as exc:
+                self.logger.warning(
+                    "SessionMemory", f"迁移 tool_tasks 列失败: {exc}"
+                )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_sess_msg "
             "ON session_messages(session_id, seq)"
@@ -204,8 +311,6 @@ class SessionMemoryStore:
             "ON session_summaries(session_id, cover_until_seq)"
         )
         conn.commit()
-        if own:
-            conn.close()
 
     # ===== 会话 =====
 
@@ -329,10 +434,14 @@ class SessionMemoryStore:
         content: str,
         turn_id: str = "",
         tenant_id: str = DEFAULT_TENANT,
+        tool_tasks: Optional[List[Dict]] = None,
     ) -> int:
         """追加一条消息,返回分配的 ``seq``(会话内绝对序号)。
 
         ``seq`` 是会话内单调递增序号,用于摘要覆盖范围与稳定排序。
+
+        ``tool_tasks`` 是本轮执行的工具计划,随消息一起落库 —— 会话恢复后
+        才能知道"上一轮调了哪些工具"(重试要用)。
         """
         conn = self._connect()
         try:
@@ -357,12 +466,13 @@ class SessionMemoryStore:
             conn.execute(
                 """
                 INSERT INTO session_messages
-                    (id, session_id, tenant_id, user_id, seq, turn_id, role, content, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, session_id, tenant_id, user_id, seq, turn_id,
+                     role, content, tool_tasks, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     msg_id, session_id, tenant_id, user_id, seq, turn_id,
-                    role, content or "", _now(),
+                    role, content or "", _dump_tool_tasks(tool_tasks), _now(),
                 ),
             )
             conn.execute(
@@ -408,6 +518,7 @@ class SessionMemoryStore:
                     role=r["role"],
                     content=r["content"],
                     created_at=r["created_at"],
+                    tool_tasks=_load_tool_tasks(_col(r, "tool_tasks")),
                 )
                 for r in rows
             ]
@@ -443,6 +554,7 @@ class SessionMemoryStore:
                     role=r["role"],
                     content=r["content"],
                     created_at=r["created_at"],
+                    tool_tasks=_load_tool_tasks(_col(r, "tool_tasks")),
                 )
                 for r in reversed(rows)
             ]

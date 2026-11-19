@@ -66,7 +66,7 @@ class OrchestratorAgent(BaseAgent):
         避免它把未完成说成已完成。
         """
         tool_data = self._format_tool_results(tool_results)
-        ctx_block = self._build_context_block(context)
+        ctx_block = self._build_context_block(context, user_input)
         if selected_skill and selected_skill.method:
             return await self._generate_with_methodology(
                 user_input, tool_data, selected_skill.method, selected_skill.steps,
@@ -91,7 +91,7 @@ class OrchestratorAgent(BaseAgent):
     ) -> AsyncIterator[str]:
         """流式输出(逐 token)"""
         tool_data = self._format_tool_results(tool_results)
-        ctx_block = self._build_context_block(context)
+        ctx_block = self._build_context_block(context, user_input)
         if selected_skill and selected_skill.method:
             prompt = self._build_prompt(user_input, tool_data,
                                         selected_skill.method, selected_skill.steps,
@@ -172,36 +172,36 @@ class OrchestratorAgent(BaseAgent):
 
 请基于这些数据生成一个准确、简洁的回答。"""
 
-    def _build_context_block(self, context: Optional[Context]) -> str:
+    def _build_context_block(self, context: Optional[Context], user_input: str = "") -> str:
         """把对话上下文历史拼接成块,供 LLM 看到之前几轮对话。
 
         空 / None / 首轮 → 返回空串(不影响 prompt)。
         """
-        if context is None or len(context) == 0:
+        if context is None:
             return ""
-        history = context.to_llm_messages(max_tokens=1500)
-        recent = [
-            m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
-        ]
-        if len(recent) <= 1:
-            # 没有近期对话,但可能有早期内容的滚动摘要
-            return context.summary_block()
-        prior = recent[:-1]  # 去掉本轮 user_input
         lines = []
-        summary_block = context.summary_block()
-        if summary_block:
-            lines.append(summary_block)
-            lines.append("")
-        if not prior:
-            return "\n".join(lines)
-        lines.append("【对话历史】")
-        for m in prior[-6:]:
-            role = "用户" if m["role"] == "user" else "助手"
-            content = (m["content"] or "").strip()
-            if len(content) > 400:
-                content = content[:400] + "..."
-            lines.append(f"- {role}: {content}")
-        return "\n".join(lines)
+        for blk in (context.system_block(), context.summary_block()):
+            if blk:
+                lines.append(blk)
+                lines.append("")
+        # 剔除"本轮 user_input"之后的历史 —— 不能靠砍最后一条:
+        # 并发场景下最后一条未必是本轮输入。
+        history = context.to_llm_messages(
+            max_tokens=1500, exclude_content=user_input
+        )
+        prior = [
+            m for m in history
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+        if prior:
+            lines.append("【对话历史】")
+            for m in prior[-6:]:
+                role = "用户" if m["role"] == "user" else "助手"
+                content = (m["content"] or "").strip()
+                if len(content) > 400:
+                    content = content[:400] + "..."
+                lines.append(f"- {role}: {content}")
+        return "\n".join(lines).strip()
 
     def _format_tool_results(self, tool_results: Dict[str, ToolResult]) -> str:
         if not tool_results:

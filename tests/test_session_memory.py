@@ -346,7 +346,7 @@ async def test_rollup_creates_summary_and_keeps_messages(patched_store, monkeypa
     assert summary
     assert ctx.get_summary()
     # 30 条里摘要 25 条,保留最近 5 条原文
-    assert ctx.metadata["rollup_cover_seq"] == 25
+    assert ctx.rollup_cover_seq == 25
     # 摘要已落库
     latest = patched_store.get_latest_summary("s-roll")
     assert latest is not None
@@ -388,7 +388,7 @@ async def test_rollup_incremental(patched_store, monkeypatch):
         ctx, patched_store, session_id="s-inc", user_id="u1",
         threshold=10, keep_recent=5,
     )
-    first_cover = ctx.metadata["rollup_cover_seq"]
+    first_cover = ctx.rollup_cover_seq
     assert first_cover == 25
 
     for i in range(30, 45):
@@ -399,8 +399,8 @@ async def test_rollup_incremental(patched_store, monkeypatch):
         threshold=10, keep_recent=5,
     )
     # 第二次只摘要 26~40,保留 41~45
-    assert ctx.metadata["rollup_cover_seq"] == 40
-    assert ctx.metadata["rollup_cover_seq"] > first_cover
+    assert ctx.rollup_cover_seq == 40
+    assert ctx.rollup_cover_seq > first_cover
 
 
 @pytest.mark.asyncio

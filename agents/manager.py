@@ -741,6 +741,7 @@ class ManagerAgent(BaseAgent):
         不会破坏现有调用——若 context 为空/None,直接返回原 user_input。
         """
         summary_block = context.summary_block() if context is not None else ""
+        system_block = context.system_block() if context is not None else ""
         hint_block = self._build_intent_hint_block(intent_hint)
         findings_block = ""
         if (prior_findings or "").strip():
@@ -749,25 +750,23 @@ class ManagerAgent(BaseAgent):
                 + prior_findings.strip()
             )
         prefix = "\n\n".join(
-            x for x in (hint_block, summary_block, profile_block, findings_block) if x
+            x for x in (
+                system_block, hint_block, summary_block, profile_block, findings_block
+            ) if x
         )
 
         if context is None or len(context) == 0:
             return f"{prefix}\n\n{user_input}".strip() if prefix else user_input
-        history = context.to_llm_messages(max_tokens=2000)
-        if not history:
-            return f"{prefix}\n\n{user_input}".strip() if prefix else user_input
-        # 跳过 system 和 tool 类型,只保留可见的对话
-        recent = [
-            m for m in history if m.get("role") in ("user", "assistant") and m.get("content")
+        # 剔除"本轮 user_input"之后的历史。
+        # 不能靠砍最后一条 —— 子智能体并发跑的时候上下文会被别的分支追加,
+        # 最后一条未必是本轮输入,砍错了就把真历史砍了。
+        history = context.to_llm_messages(
+            max_tokens=2000, exclude_content=user_input
+        )
+        prior = [
+            m for m in history
+            if m.get("role") in ("user", "assistant") and m.get("content")
         ]
-        if len(recent) <= 1:
-            if prefix:
-                return f"{prefix}\n\n{user_input}"
-            return user_input
-        # 最后一条是当前 user_input 的内容(Agent.handle 已 add_user_message);
-        # 把它剔除,只拼历史。
-        prior = recent[:-1]
         lines = []
         if prefix:
             lines.append(prefix)

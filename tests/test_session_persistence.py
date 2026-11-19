@@ -115,9 +115,41 @@ def test_session_store_heals_after_dir_deleted(tmp_path):
     # 删掉整个目录(模拟外部清理)
     shutil.rmtree(tmp_path / "mem", ignore_errors=True)
 
-    # 不能抛,应返回空
+    # 读不能抛 —— 目录没了要能自愈(重建目录 + 补建表)
+    store.get_messages("s1")
+
+    # 文件真被删掉了 → 数据也该没了(store 会重建一个空库)。
+    # 注意:store 现在**复用连接**,Windows 上文件被我们持着句柄,
+    # 外部删除会被系统挡掉 —— 这时文件还在,数据也还在,不是 bug。
+    db_file = tmp_path / "mem" / "sessions.db"
+    if not db_file.exists():
+        assert store.session_exists("s1") is False
+        assert store.get_messages("s1") == []
+
+
+def test_session_store_rebuilds_after_db_file_removed(tmp_path):
+    """DB 文件被删掉后,store 会重建 —— 读到的是空的,不是旧数据。
+
+    这里先 ``close()`` 再删,是为了让删除在所有平台上都能真正发生
+    (Windows 上文件被连接持着句柄时删不掉)。等价于"进程重启后
+    目录被清理掉了"的真实场景。
+    """
+    from core.session_memory import SessionMemoryStore
+
+    store = SessionMemoryStore(db_path=tmp_path / "mem" / "sessions.db")
+    store.append_message("s1", "u1", "user", "hi")
+    assert store.get_messages("s1")  # 先确认写进去了
+
+    store.close()
+    (tmp_path / "mem" / "sessions.db").unlink()
+
+    # 同一个 store 实例:文件没了 → 自动重建 → 读到的是空的
     assert store.session_exists("s1") is False
     assert store.get_messages("s1") == []
+
+    # 重建之后还能正常写
+    store.append_message("s2", "u1", "user", "重建后写入")
+    assert len(store.get_messages("s2")) == 1
 
 
 def test_session_store_can_write_after_dir_deleted(tmp_path):

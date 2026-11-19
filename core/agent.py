@@ -509,16 +509,27 @@ class Agent:
             store.ensure_session(self.session_id, self.user_id)
             self.context.sink = self._persist_message
 
-            summary = store.get_latest_summary(self.session_id)
-            cover = 0
-            if summary is not None:
-                self.context.set_summary(summary.summary)
-                cover = int(summary.cover_until_seq)
-                # 摘要覆盖到的绝对序号(滚动摘要的记账基准)
-                self.context.metadata["rollup_cover_seq"] = cover
-
             # reset 之前的内容不装回工作上下文(但仍保留在库里、可检索)
             reset_at = store.get_reset_at_seq(self.session_id)
+
+            # 摘要只装回**覆盖到 reset 之后**的那一份。
+            # 整份摘要都在 reset 之前 → 它讲的是"被用户主动清掉的旧话题",
+            # 再塞回工作上下文等于 reset 没生效。
+            cover = 0
+            summary = store.get_latest_summary(self.session_id)
+            if summary is not None:
+                summary_cover = int(summary.cover_until_seq)
+                if summary_cover > reset_at:
+                    self.context.set_summary(summary.summary)
+                    # 摘要覆盖到的绝对序号(滚动摘要的记账基准)
+                    cover = summary_cover
+                    self.context.rollup_cover_seq = cover
+                else:
+                    self.logger.info(
+                        "Agent",
+                        f"会话摘要已被 reset 覆盖(cover={summary_cover} <= reset={reset_at}),不装回",
+                    )
+
             skip_before = max(cover, reset_at)
 
             # 只恢复"尚未被摘要覆盖"的消息,取最近若干条
@@ -529,8 +540,19 @@ class Agent:
                 if msg.seq <= skip_before:
                     continue
                 self.context.messages.append(
-                    Message(role=msg.role, content=msg.content, seq=msg.seq)
+                    Message(
+                        role=msg.role,
+                        content=msg.content,
+                        seq=msg.seq,
+                        tool_tasks=msg.tool_tasks,
+                    )
                 )
+            # 恢复"上一轮的工具计划" —— 重试要用。
+            # 注意空列表也是有效状态(那一轮不需要工具),所以判空用 is not None。
+            for msg in reversed(self.context.messages):
+                if msg.tool_tasks is not None:
+                    self.context.last_tool_tasks = msg.tool_tasks
+                    break
             if restored:
                 self.logger.info(
                     "Agent",
@@ -547,6 +569,7 @@ class Agent:
         """把一条消息写入会话库(由 Context.sink 回调触发)。
 
         落库后把绝对序号回填到 ``msg.seq`` —— 滚动摘要按它记账。
+        ``tool_tasks`` 一起落库 —— 会话恢复后才知道上一轮调了哪些工具。
         """
         if self._session_store is None:
             return
@@ -557,6 +580,7 @@ class Agent:
                 role=msg.role,
                 content=msg.content,
                 turn_id=self.turn_id,
+                tool_tasks=msg.tool_tasks,
             )
             msg.seq = int(seq)
         except Exception as exc:
@@ -817,6 +841,14 @@ class Agent:
                     self.logger.info("Agent", f"重试执行上次的 {len(last_tasks)} 个工具")
                     # 使用上一次的 tool_tasks 继续执行
                     plan.tool_tasks = last_tasks
+                elif last_tasks is not None:
+                    # 空列表 = 上一轮确实没有需要执行的工具(不是"没记录")
+                    emit("thinking", {"stage": "no_retry_history"})
+                    ans = "上一轮没有需要执行的工具,无法重试"
+                    self.context.add_assistant_message(ans)
+                    emit("message_final", {"content": ans})
+                    await _drain_pending()
+                    return ans
                 else:
                     emit("thinking", {"stage": "no_retry_history"})
                     ans = "没有找到上次的执行记录,无法重试"
@@ -911,8 +943,11 @@ class Agent:
                 from core.subagents import set_current_context, set_current_user
 
                 set_current_user(self.user_id)
-                # 共享主对话上下文 —— 否则子智能体不知道"发"指的是什么
-                set_current_context(self.context)
+                # 共享主对话上下文 —— 否则子智能体不知道"发"指的是什么。
+                # 给**快照**而不是本体:子智能体是并发跑的(gather),
+                # 共享本体会看到互相穿插的消息列表。快照不带 sink,
+                # 也不会把子智能体看到的东西再落一遍库。
+                set_current_context(self.context.snapshot())
             except Exception:
                 pass
 
@@ -932,6 +967,9 @@ class Agent:
             emit("thinking", {"stage": "goal_loop_done", **goal.to_dict()})
 
             # 存储本次 tool_tasks 用于重试
+            # 独立字段,不挂在 messages[-1] 上 —— 挂消息会挂错
+            # (写到这里时最后一条还是用户消息),而且空列表会被
+            # 当成"没有记录",导致重试重跑更早一轮的旧工具。
             self.context.set_last_tool_tasks(plan.tool_tasks)
 
             if trace is not None:
@@ -967,7 +1005,9 @@ class Agent:
                 emit("message_delta", {"delta": ans})
 
             ans = self._ensure_answer(ans)
-            self.context.add_assistant_message(ans)
+            # 本轮的工具计划跟着这条助手消息一起落库 —— 会话恢复后
+            # 才能知道上一轮调了哪些工具(重试要用)。
+            self.context.add_assistant_message(ans, tool_tasks=plan.tool_tasks)
             # 把本轮产物一起给前端 —— 否则"生成的视频/报表"做出来了用户也看不到
             emit("message_final", {
                 "content": ans,

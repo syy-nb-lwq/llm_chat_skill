@@ -10,16 +10,24 @@
 
 主要能力：
 
-- 记录 `user` / `assistant` / `system` / `tool` 消息
-- 保存上一轮 `tool_tasks`
-- 生成 LLM 所需消息格式
-- 按字符预算截断历史
+- 记录 `user` / `assistant` 对话消息（常驻指令走 `system_messages`，不进消息流）
+- 保存最近一轮 `tool_tasks`（独立字段 `last_tool_tasks`；`None` = 没记录，`[]` = 那轮不需要工具）
+- 生成 LLM 所需消息格式，并按字符预算截断历史（预算**真的守得住**）
+- 维护滚动摘要视图（`summary`，有长度上限）与摘要覆盖边界（`rollup_cover_seq`）
+
+几条容易踩的规则：
+
+- `system` 指令不能塞进 `messages` —— 下游按 role 过滤，塞进去等于白写
+- `tool_tasks` 不能挂在 `messages[-1]` 上 —— 写的那一刻最后一条还是用户消息
+- `rollup_cover_seq` 是持久化簿记，不能和 `metadata` 里的会话态一起 `clear()`
+- 剔除"本轮输入"要按内容匹配，不能砍最后一条 —— 并发时最后一条未必是本轮输入
 
 当前作用点：
 
 - `Agent.handle()` 在入口和出口都写入 `Context`
 - `ManagerAgent` 和 `OrchestratorAgent` 会把历史拼到 prompt
 - `retry` 意图依赖 `Context.get_last_tool_tasks()`
+- `Agent.reset()` 清工作上下文；旧摘要不会因为 reset 而复活
 
 ## 2. Agent 运行协调
 

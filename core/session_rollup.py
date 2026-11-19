@@ -4,8 +4,11 @@
 一条"索引视图"。这样既满足"会话内容都要保留",又不会让 token 无限膨胀。
 
 触发时机:会话内"尚未被摘要覆盖"的消息数超过阈值时压一次。
-覆盖范围记录在 ``context.metadata['rollup_index']``,
+覆盖范围记录在 ``context.rollup_cover_seq``,
 并写入 ``session_summaries`` 表(``cover_until_seq``)。
+
+摘要**只保留最近的一段**:``Context.set_summary`` 会把超长的摘要截断,
+落库存的就是截断后那一版 —— 内存和库必须一致,否则重启后摘要会缩水。
 """
 from __future__ import annotations
 
@@ -115,8 +118,8 @@ async def maybe_rollup(
         keep_recent if keep_recent is not None else session_rollup_keep_recent()
     )
 
-    # 已被摘要覆盖的绝对序号边界
-    covered_seq = int(context.metadata.get("rollup_cover_seq", 0))
+    # 已被摘要覆盖的绝对序号边界(持久化簿记,不是 metadata 里的会话态)
+    covered_seq = int(context.rollup_cover_seq or 0)
     uncovered = _uncovered(context.messages, covered_seq)
     if len(uncovered) <= threshold:
         return None
@@ -135,23 +138,27 @@ async def maybe_rollup(
         # 没有绝对序号就没法记账 —— 宁可不做,也不要记错
         return None
 
+    # 摘要视图:已有摘要 + 新摘要(新的是更近的)
+    # ``set_summary`` 内部会截断(摘要不能无限长),落库要存**截断后**的
+    # 那一版 —— 否则内存里和库里会长得不一样,重启后摘要还会缩水。
+    previous = context.get_summary()
+    merged = f"{previous}\n{summary}".strip() if previous else summary
+    context.set_summary(merged)
+    stored = context.get_summary()
+
     try:
         store.save_summary(
             session_id=session_id,
             user_id=user_id,
             cover_until_seq=last_seq,
-            summary=summary,
+            summary=stored,
         )
     except Exception as exc:
         if logger:
             logger.warning("SessionRollup", f"摘要落库失败: {exc}")
         return None
 
-    # 摘要视图:已有摘要 + 新摘要(新的是更近的)
-    previous = context.get_summary()
-    merged = f"{previous}\n{summary}".strip() if previous else summary
-    context.set_summary(merged)
-    context.metadata["rollup_cover_seq"] = last_seq
+    context.rollup_cover_seq = last_seq
 
     if logger:
         logger.info(
