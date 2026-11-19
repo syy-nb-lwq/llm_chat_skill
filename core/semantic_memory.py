@@ -4,6 +4,7 @@
 - 短期记忆 = 会话内容(`core/session_memory.py`),不进这里
 - 长期记忆 = 用户画像(`preference/habit/method/constraint/fact`),进这里
 """
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.memory_db import (
@@ -372,13 +373,16 @@ class SemanticMemoryStore:
 
 # ---- 全局单例 ----
 _semantic_memory: Optional[SemanticMemoryStore] = None
+_getter_lock = threading.Lock()
 
 
 def get_semantic_memory() -> SemanticMemoryStore:
     """获取 SemanticMemoryStore 全局实例"""
     global _semantic_memory
     if _semantic_memory is None:
-        _semantic_memory = SemanticMemoryStore()
+        with _getter_lock:
+            if _semantic_memory is None:
+                _semantic_memory = SemanticMemoryStore()
     return _semantic_memory
 
 

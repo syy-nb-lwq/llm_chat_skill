@@ -658,12 +658,17 @@ class SessionMemoryStore:
 # ===== 单例 =====
 
 _session_store: Optional[SessionMemoryStore] = None
+#: 保护懒初始化。asyncio 单线程下几乎不会争，但一旦有人用线程池 /
+#: `run_in_executor`，无锁的 `if x is None` 会造出两个实例（两个 SQLite 连接）。
+_getter_lock = threading.Lock()
 
 
 def get_session_memory_store() -> SessionMemoryStore:
     global _session_store
     if _session_store is None:
-        _session_store = SessionMemoryStore()
+        with _getter_lock:
+            if _session_store is None:
+                _session_store = SessionMemoryStore()
     return _session_store
 
 

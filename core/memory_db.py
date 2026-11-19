@@ -1,6 +1,7 @@
 """MemoryDB - SQLite + FTS5 长期记忆存储"""
 import json
 import sqlite3
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -944,13 +945,17 @@ class MemoryDB:
 
 # ---- 全局单例 ----
 _memory_db: Optional[MemoryDB] = None
+#: 保护懒初始化（线程池场景下避免造出两个 SQLite 连接）
+_getter_lock = threading.Lock()
 
 
 def get_memory_db() -> MemoryDB:
     """获取 MemoryDB 全局实例"""
     global _memory_db
     if _memory_db is None:
-        _memory_db = MemoryDB()
+        with _getter_lock:
+            if _memory_db is None:
+                _memory_db = MemoryDB()
     return _memory_db
 
 

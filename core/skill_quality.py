@@ -41,6 +41,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -418,12 +419,15 @@ class SkillQualityStore:
 # ===== 全局单例 =====
 
 _store: Optional[SkillQualityStore] = None
+_getter_lock = threading.Lock()
 
 
 def get_skill_quality_store() -> SkillQualityStore:
     global _store
     if _store is None:
-        _store = SkillQualityStore()
+        with _getter_lock:
+            if _store is None:
+                _store = SkillQualityStore()
     return _store
 
 

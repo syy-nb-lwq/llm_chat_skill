@@ -286,6 +286,11 @@ def test_websocket_init_and_ping_via_client():
             # 4) reset —— 本地单用户，无需令牌
             sub.topic = f"reset/{conn_id}"
             await dispatcher(sub, {})
+            # reset 现在排进会话队列（不能插进正在跑的一轮），等它跑完
+            _ident = sessions.resolve_identity(conn_id)
+            _session = sessions.get(_ident.client_id)
+            assert _session is not None
+            await _session.drain()
             assert any(
                 e["event"] == "reset_ack" and e["client_id"] == conn_id
                 for e in captured
@@ -336,6 +341,10 @@ def test_websocket_init_and_ping_via_client():
                 captured.clear()
                 sub.topic = f"chat/{conn_id}"
                 await dispatcher(sub, {"content": "hello"})
+                # dispatcher 只投递，整轮在 Session 队列里跑 —— 等它跑空
+                session = sessions.get(issued_client_id)
+                assert session is not None
+                await session.drain()
                 assert any(
                     e["event"] == "message_final"
                     for e in captured

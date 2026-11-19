@@ -47,6 +47,8 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -81,6 +83,42 @@ class SecurityError(Exception):
     """代码被静态检查拦下。"""
 
 
+class Severity(str, Enum):
+    """检查结果的严重级别。
+
+    **拦截判断只能看这个字段，不能看提示文案。** 历史实现是
+    `p.startswith(("禁止", "语法错误"))` —— 谁把"禁止 import sys"改成
+    "不建议 import sys"，就会把硬拦截静默降级成提示，而这类改动看起来
+    完全无害。
+    """
+
+    BLOCK = "block"
+    WARN = "warn"
+
+
+@dataclass(frozen=True)
+class Finding:
+    """一条静态检查结果。"""
+
+    severity: Severity
+    code: str          # 稳定的机器可读标识，如 blocked_import
+    message: str       # 给人/模型看的说明
+    lineno: int = 0
+
+    def __str__(self) -> str:
+        return self.message
+
+
+def blocking_findings(findings: List[Finding]) -> List[Finding]:
+    """只要该拦截的那部分。"""
+    return [f for f in findings if f.severity is Severity.BLOCK]
+
+
+def format_findings(findings: List[Finding]) -> str:
+    """拼成多行文本（给错误信息 / 日志用）。"""
+    return "\n".join(f.message for f in findings)
+
+
 def _module_root() -> Path:
     return Path(__file__).parent.parent
 
@@ -92,42 +130,76 @@ def _workspace_dir() -> Path:
     return root
 
 
-def static_check(code: str) -> List[str]:
-    """静态检查:返回**问题列表**(空 = 通过)。
+def check_code(code: str) -> List[Finding]:
+    """静态检查:返回**结构化问题列表**(空 = 通过)。
 
     用 `ast` 解析而不是正则 —— 正则能绕过的写法太多了
     (`getattr(os, "system")`、`__import__("os")`)。
     AST 至少能可靠地看到 import 了什么、调了哪些名字。
+
+    拦截与否请看 `Finding.severity`，不要解析 `message`。
     """
-    problems: List[str] = []
+    findings: List[Finding] = []
 
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
-        return [f"语法错误(第 {exc.lineno} 行): {exc.msg}"]
+        return [
+            Finding(
+                severity=Severity.BLOCK,
+                code="syntax_error",
+                message=f"语法错误(第 {exc.lineno} 行): {exc.msg}",
+                lineno=exc.lineno or 0,
+            )
+        ]
 
     for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", 0)
         # --- import ---
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
                 if root in BLOCKED_MODULES:
-                    problems.append(f"禁止 import {root}(第 {node.lineno} 行)")
+                    findings.append(
+                        Finding(
+                            Severity.BLOCK,
+                            "blocked_import",
+                            f"禁止 import {root}(第 {lineno} 行)",
+                            lineno,
+                        )
+                    )
                 elif root in RESTRICTED_MODULES:
-                    problems.append(
-                        f"注意 import {root}(第 {node.lineno} 行):"
-                        f"它能访问系统资源 —— "
-                        f"只需要读写文件的话用 open() 就行"
+                    findings.append(
+                        Finding(
+                            Severity.WARN,
+                            "restricted_import",
+                            f"注意 import {root}(第 {lineno} 行):"
+                            f"它能访问系统资源 —— "
+                            f"只需要读写文件的话用 open() 就行",
+                            lineno,
+                        )
                     )
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
             if root in BLOCKED_MODULES:
-                problems.append(f"禁止 from {root} import ...(第 {node.lineno} 行)")
+                findings.append(
+                    Finding(
+                        Severity.BLOCK,
+                        "blocked_import",
+                        f"禁止 from {root} import ...(第 {lineno} 行)",
+                        lineno,
+                    )
+                )
             elif root in RESTRICTED_MODULES:
-                problems.append(
-                    f"注意 from {root} import ...(第 {node.lineno} 行):"
-                    f"它能访问系统资源 —— "
-                    f"只需要读写文件的话用 open() 就行"
+                findings.append(
+                    Finding(
+                        Severity.WARN,
+                        "restricted_import",
+                        f"注意 from {root} import ...(第 {lineno} 行):"
+                        f"它能访问系统资源 —— "
+                        f"只需要读写文件的话用 open() 就行",
+                        lineno,
+                    )
                 )
 
         # --- 危险调用 ---
@@ -136,25 +208,49 @@ def static_check(code: str) -> List[str]:
 
             # 裸调用 eval/exec/compile/__import__ → 拦
             if isinstance(node.func, ast.Name) and dotted in DANGEROUS_BARE_CALLS:
-                problems.append(
-                    f"禁止调用 {dotted}()(第 {node.lineno} 行):"
-                    f"它是动态执行入口,静态检查无法保证安全"
+                findings.append(
+                    Finding(
+                        Severity.BLOCK,
+                        "dangerous_call",
+                        f"禁止调用 {dotted}()(第 {lineno} 行):"
+                        f"它是动态执行入口,静态检查无法保证安全",
+                        lineno,
+                    )
                 )
             # 带模块前缀的危险调用(os.system / builtins.compile …) → 拦
             elif dotted in DANGEROUS_QUALIFIED_CALLS:
-                problems.append(
-                    f"禁止调用 {dotted}()(第 {node.lineno} 行):"
-                    f"它能执行命令或动态代码,静态检查无法保证安全"
+                findings.append(
+                    Finding(
+                        Severity.BLOCK,
+                        "dangerous_call",
+                        f"禁止调用 {dotted}()(第 {lineno} 行):"
+                        f"它能执行命令或动态代码,静态检查无法保证安全",
+                        lineno,
+                    )
                 )
 
             # getattr/setattr 只在裸调用时提醒(减少误报)
             if isinstance(node.func, ast.Name) and dotted in ("getattr", "setattr"):
-                problems.append(
-                    f"不建议调用 {dotted}()(第 {node.lineno} 行):"
-                    f"常用它绕过静态检查"
+                findings.append(
+                    Finding(
+                        Severity.WARN,
+                        "getattr_bypass",
+                        f"不建议调用 {dotted}()(第 {lineno} 行):"
+                        f"常用它绕过静态检查",
+                        lineno,
+                    )
                 )
 
-    return problems
+    return findings
+
+
+def static_check(code: str) -> List[str]:
+    """**已弃用** —— 只返回提示文案的兼容壳。
+
+    新代码请用 `check_code()` 拿结构化结果；需要判断"是否拦截"时用
+    `blocking_findings()`，不要对中文文案做 `startswith`。
+    """
+    return [f.message for f in check_code(code)]
 
 
 def _call_name(func: ast.AST) -> str:
@@ -366,14 +462,17 @@ class PythonExecTool(Tool):
             timeout_s = self.timeout_s
 
         # --- 静态检查 ---
-        problems = static_check(code) if code else []
-        hard = [p for p in problems if p.startswith(("禁止", "语法错误"))]
+        #
+        # 拦截判断只看 severity。历史实现按中文文案前缀筛（"禁止"/"语法错误"），
+        # 改一句提示语就可能把硬拦截降级成提示。
+        findings = check_code(code) if code else []
+        hard = blocking_findings(findings)
         if hard:
             return ToolResult(
                 success=False,
                 error=(
                     "代码被安全检查拦截:\n"
-                    + "\n".join(hard)
+                    + format_findings(hard)
                     + "\n\n**这不是「什么都做不了」** —— 请改写成下面这些等价做法:\n"
                     "- 需要 HTTP 请求 → 用 `import requests` 或 `import httpx`(允许)\n"
                     "- 需要读写文件 → 用 `open()` / `pathlib`(允许)\n"
@@ -381,11 +480,15 @@ class PythonExecTool(Tool):
                     "- 需要装包/起子进程 → 做不到,改用已有工具或请用户提供\n"
                     "- 需要读密钥 → 密钥不在子进程环境里,请显式作为参数传入\n"
                 ),
-                meta={"blocked": True, "problems": problems},
+                meta={
+                    "blocked": True,
+                    "problems": [f.message for f in findings],
+                    "codes": [f.code for f in findings],
+                },
             )
-        if problems:
+        if findings:
             # 只是"不建议",放行但提示
-            self.logger.info("PythonExec", f"代码有建议项: {problems}")
+            self.logger.info("PythonExec", f"代码有建议项: {[f.message for f in findings]}")
 
         # --- 准备工作目录（**持久**，不是一次性的临时目录）---
         #

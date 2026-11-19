@@ -352,7 +352,7 @@ def _validate_script(proposal: ToolProposal, warnings: List[str]) -> List[str]:
     """
     errors: List[str] = []
 
-    from tools.python_exec import static_check
+    from tools.python_exec import Severity, blocking_findings, check_code
 
     if proposal.kind == "code":
         code = proposal.implementation or ""
@@ -362,13 +362,11 @@ def _validate_script(proposal: ToolProposal, warnings: List[str]) -> List[str]:
         if len(code) > MAX_CODE_CHARS:
             errors.append(f"implementation 太长（{len(code)} 字符，上限 {MAX_CODE_CHARS}）")
             return errors
-        problems = static_check(code)
-        hard = [p for p in problems if p.startswith(("禁止", "语法错误"))]
+        findings = check_code(code)
+        hard = blocking_findings(findings)
         if hard:
-            errors.append("代码没通过安全检查：" + "; ".join(hard))
-        for p in problems:
-            if not p.startswith(("禁止", "语法错误")):
-                warnings.append(p)
+            errors.append("代码没通过安全检查：" + "; ".join(f.message for f in hard))
+        warnings.extend(f.message for f in findings if f.severity is Severity.WARN)
         if "PARAMS" not in code and proposal.params:
             warnings.append(
                 "代码里没用到 PARAMS —— 参数会以全局变量 PARAMS(dict) 注入，"
@@ -403,13 +401,11 @@ def _validate_script(proposal: ToolProposal, warnings: List[str]) -> List[str]:
         errors.append(f"读取脚本失败：{exc}")
         return errors
 
-    problems = static_check(code)
-    hard = [p for p in problems if p.startswith(("禁止", "语法错误"))]
+    findings = check_code(code)
+    hard = blocking_findings(findings)
     if hard:
-        errors.append("脚本没通过安全检查：" + "; ".join(hard))
-    for p in problems:
-        if not p.startswith(("禁止", "语法错误")):
-            warnings.append(p)
+        errors.append("脚本没通过安全检查：" + "; ".join(f.message for f in hard))
+    warnings.extend(f.message for f in findings if f.severity is Severity.WARN)
 
     if "PARAMS" not in code and proposal.params:
         warnings.append(

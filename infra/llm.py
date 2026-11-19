@@ -28,14 +28,29 @@ class LLMClient:
         放到这里之后,任何入口都不可能"忘记"注册。
         """
         if self._provider is None:
-            manager = get_provider_manager()
-            if not manager.list_providers():
-                from infra.providers.registry import init_providers_from_config
-
-                init_providers_from_config()
+            manager = self._ensure_manager()
             name = self._provider_name or config.default_provider
             self._provider = manager.get(name)
         return self._provider
+
+    def _ensure_manager(self):
+        """拿到 provider 管理器,并保证至少注册过一个 provider。"""
+        manager = get_provider_manager()
+        if not manager.list_providers():
+            from infra.providers.registry import init_providers_from_config
+
+            init_providers_from_config()
+        return manager
+
+    def _resolve_provider(self, provider: Optional[str]) -> BaseProvider:
+        """解析本次调用要用的 Provider。
+
+        **只解析、不缓存** —— 见 `chat()` 里关于"为什么不能写回 self._provider"
+        的说明。provider 为空时返回实例的默认 provider。
+        """
+        if not provider:
+            return self.provider
+        return self._ensure_manager().get(provider)
 
     async def chat(
         self,
@@ -49,13 +64,23 @@ class LLMClient:
         """统一入口:
         - stream=False: 返回完整字符串
         - stream=True:  返回 async iterator,每个 yield 是一个 token 字符串
+
+        `provider` 是**本次调用**的选择,不会改变这个 client 的默认 provider。
+
+        为什么强调这点：过去这里写的是 `self._provider = manager.get(provider)`，
+        于是"这一次用便宜的小模型"会把单例的默认 provider 永久改掉。等真出现
+        "意图识别用小模型、画像抽取用另一家"时，两边会互相污染，而且症状是
+        "偶发答得差"，极难定位。要固定某个用途的 provider，请用
+        `LLMClient(provider_name=...)` 建独立实例。
         """
-        # 切换 Provider
-        if provider:
-            self._provider = get_provider_manager().get(provider)
-        
         temp = temperature if temperature is not None else config.temperature
-        
+
+        if provider:
+            client = self._resolve_provider(provider)
+            if stream:
+                return self._stream_with(client, messages, temp, model)
+            return await self._complete_with(client, messages, temp, model)
+
         if stream:
             return self._stream(messages, temp, model)
         return await self._complete(messages, temp, model)
@@ -66,7 +91,16 @@ class LLMClient:
         temperature: float,
         model: Optional[str] = None,
     ) -> str:
-        return await self.provider.chat(
+        return await self._complete_with(self.provider, messages, temperature, model)
+
+    async def _complete_with(
+        self,
+        client: BaseProvider,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        model: Optional[str] = None,
+    ) -> str:
+        return await client.chat(
             messages, 
             model=model, 
             temperature=temperature,
@@ -78,7 +112,17 @@ class LLMClient:
         temperature: float,
         model: Optional[str] = None,
     ) -> AsyncIterator[str]:
-        async for delta in self.provider.chat_stream(
+        async for chunk in self._stream_with(self.provider, messages, temperature, model):
+            yield chunk
+
+    async def _stream_with(
+        self,
+        client: BaseProvider,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        model: Optional[str] = None,
+    ) -> AsyncIterator[str]:
+        async for delta in client.chat_stream(
             messages,
             model=model,
             temperature=temperature,
@@ -140,7 +184,11 @@ class LLMClient:
             return sum(len(m.get("content") or "") for m in messages) // 2
 
     def switch_provider(self, name: str) -> None:
-        """切换 Provider"""
+        """切换**这个 client 的默认** Provider。
+
+        注意：这是显式改全局默认，与 `chat(provider=...)` 的一次性选择不同。
+        只应该在"用户主动切换模型"这类设置场景调用。
+        """
         self._provider = None  # 强制重新加载
         self._provider_name = name
 

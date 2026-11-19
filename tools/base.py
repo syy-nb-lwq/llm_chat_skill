@@ -97,17 +97,16 @@ class Tool(ABC):
     def execute(self, **kwargs) -> ToolResult: ...
 
     def validate_params(self, params: Dict[str, Any]) -> tuple:
-        """默认按 schema 做必填校验"""
-        s = self.schema()
-        required = {p.name for p in s.params if p.required}
-        missing = required - set(params.keys())
-        if missing:
-            return False, f"缺少必填参数: {', '.join(missing)}"
-        # enum 校验
-        for p in s.params:
-            if p.enum and p.name in params and params[p.name] not in p.enum:
-                return False, f"参数 {p.name} 取值非法: {params[p.name]}"
-        return True, ""
+        """按 schema 校验参数（必填 / 未知 / 类型 / enum）。
+
+        实现收在 `tools/validation.py`，与 ToolHub 执行前用的是同一套规则 ——
+        否则"注册表说合法、执行时说非法"会变成两个真相。
+        返回 `(ok, 错误信息)`；需要**转换后**的参数请直接用 `validate_params()`。
+        """
+        from tools.validation import validate_params as _validate
+
+        ok, _, err = _validate(self.schema(), params)
+        return ok, err
 
 
 class ToolRegistry:

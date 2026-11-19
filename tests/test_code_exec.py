@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from tools.python_exec import PythonExecTool, static_check
+from tools.python_exec import PythonExecTool, blocking_findings, check_code, static_check
 from tools.script_writer import ListScriptsTool, WriteScriptTool, safe_name
 
 
@@ -70,13 +70,49 @@ def test_static_check_allows_normal_code():
         "import csv\nwith open('a.csv') as f: list(csv.DictReader(f))",
         "import re\nre.findall(r'\\d+', 'a1')",
     ]:
-        hard = [p for p in static_check(code) if p.startswith(("禁止", "语法"))]
-        assert not hard, f"{code!r} 被误伤: {hard}"
+        hard = blocking_findings(check_code(code))
+        assert not hard, f"{code!r} 被误伤: {[f.message for f in hard]}"
 
 
 def test_static_check_reports_syntax_error():
     problems = static_check("def broken(:")
     assert any("语法错误" in p for p in problems)
+
+
+def test_findings_carry_severity_and_code():
+    """拦截依据必须是 severity/code，而不是提示文案。"""
+    from tools.python_exec import Severity
+
+    blocked = check_code("import subprocess")
+    assert blocked
+    assert blocked[0].severity is Severity.BLOCK
+    assert blocked[0].code == "blocked_import"
+
+    warned = check_code("import os\nprint(os.getcwd())")
+    assert warned
+    assert all(f.severity is Severity.WARN for f in warned)
+    assert blocking_findings(warned) == []
+
+
+@pytest.mark.asyncio
+async def test_exec_blocks_on_severity_not_message_text(monkeypatch, exec_tool):
+    """回归：把提示语改成任何文案，硬拦截都必须照旧生效。
+
+    旧实现用 `p.startswith(("禁止", "语法错误"))` 判断，改一句提示就能
+    让拦截静默失效。
+    """
+    import tools.python_exec as pe
+
+    def fake_check(code):
+        return [pe.Finding(pe.Severity.BLOCK, "blocked_import", "这条提示语随便改过")]
+
+    monkeypatch.setattr(pe, "check_code", fake_check)
+
+    result = await exec_tool.execute(code="print(1)")
+    assert result.success is False
+    assert "拦截" in result.error
+    assert "这条提示语随便改过" in result.error
+    assert result.meta.get("codes") == ["blocked_import"]
 
 
 # ============================================================
@@ -345,20 +381,20 @@ def test_re_compile_is_allowed():
     同样的坑还会拦 `pandas.DataFrame.eval()`。
     """
     code = "import re\np = re.compile(r'\\d+')\nprint(p.findall('a1b2'))"
-    hard = [p for p in static_check(code) if p.startswith("禁止")]
-    assert hard == [], f"re.compile 被误拦: {hard}"
+    hard = blocking_findings(check_code(code))
+    assert hard == [], f"re.compile 被误拦: {[f.message for f in hard]}"
 
 
 def test_attribute_named_eval_is_allowed():
     """对象上的 `.eval()`（pandas 有）也不是动态执行入口。"""
     code = "df = object()\nprint(df.eval('a + 1'))"
-    hard = [p for p in static_check(code) if p.startswith("禁止")]
+    hard = blocking_findings(check_code(code))
     assert hard == []
 
 
 def test_bare_eval_exec_compile_blocked():
     for code in ("eval('1+1')", "exec('x=1')", "compile('x=1', '<s>', 'exec')"):
-        hard = [p for p in static_check(code) if p.startswith("禁止")]
+        hard = blocking_findings(check_code(code))
         assert hard, f"该拦却没拦: {code}"
 
 
@@ -373,14 +409,14 @@ def test_qualified_dangerous_calls_blocked():
         "import importlib\nimportlib.import_module('os')",
     ]
     for code in cases:
-        hard = [p for p in static_check(code) if p.startswith("禁止")]
+        hard = blocking_findings(check_code(code))
         assert hard, f"漏拦了: {code}"
 
 
 def test_os_path_and_open_still_allowed():
     for code in ("import os\nprint(os.path.join('a', 'b'))",
                  "open('x.txt', 'w').write('hi')"):
-        hard = [p for p in static_check(code) if p.startswith("禁止")]
+        hard = blocking_findings(check_code(code))
         assert hard == []
 
 

@@ -185,18 +185,33 @@ async def dispatcher(subscription, data: Any):
             # 流式增量合并后再推 —— 一条长回答会产生上千个 delta,
             # 逐个 publish + 等 ACK 是纯浪费(实测 1594 次)。
             batcher = DeltaCoalescer(conn_id)
-            try:
-                await session.agent.handle(user_input, batcher.send)
-            finally:
-                # 必须收尾:最后一点没攒够的增量要发出去,
-                # 否则前端会永远缺一小段(通常正好是回答的最后一句)。
-                await batcher.flush()
-                if batcher.deltas_in:
-                    logger.info(
-                        "ws",
-                        f"增量合并: {batcher.deltas_in} 个 delta → "
-                        f"{batcher.pushes_out} 次推送",
-                    )
+
+            async def run_turn() -> None:
+                try:
+                    await session.agent.handle(user_input, batcher.send)
+                except Exception as exc:
+                    # 这一轮在 Session 的 worker 里跑，dispatcher 的 try/except
+                    # 已经兜不到了，必须就地报给前端
+                    logger.error("ws", f"处理 chat 失败: {exc}")
+                    await push_event(conn_id, "error", {"message": str(exc)})
+                finally:
+                    # 必须收尾:最后一点没攒够的增量要发出去,
+                    # 否则前端会永远缺一小段(通常正好是回答的最后一句)。
+                    await batcher.flush()
+                    if batcher.deltas_in:
+                        logger.info(
+                            "ws",
+                            f"增量合并: {batcher.deltas_in} 个 delta → "
+                            f"{batcher.pushes_out} 次推送",
+                        )
+
+            # **投递后立刻返回**：整轮在 Session 自己的队列里串行执行。
+            # 不能在这里 await —— dispatcher 是所有连接共用的一条回调，
+            # 一次 60s 的回答会把其他人的 ping/init 一起卡住。
+            if not session.submit(run_turn):
+                await push_event(
+                    conn_id, "error", {"message": "会话已回收，请刷新页面重试"}
+                )
             return
 
         if topic.startswith("reset/"):
@@ -211,8 +226,17 @@ async def dispatcher(subscription, data: Any):
                 identity.client_id,
                 session_id=identity.session_id,
             )
-            session.agent.reset()
-            await push_event(conn_id, "reset_ack", identity.to_payload())
+
+            async def run_reset() -> None:
+                # reset 也排队：不能在一轮回答跑到一半时清空 Context
+                async with session.lock:
+                    session.agent.reset()
+                await push_event(conn_id, "reset_ack", identity.to_payload())
+
+            if not session.submit(run_reset):
+                await push_event(
+                    conn_id, "error", {"message": "会话已回收，请刷新页面重试"}
+                )
             return
 
         if topic.startswith("ping/"):
@@ -236,14 +260,23 @@ async def dispatcher(subscription, data: Any):
             execution_id = (data or {}).get("execution_id", "")
             accepted = bool((data or {}).get("accepted", False))
             comment = (data or {}).get("comment", "")
-            ok = session.agent.apply_explicit_feedback(
-                execution_id, accepted, comment
-            )
-            await push_event(conn_id, "feedback_ack", {
-                "execution_id": execution_id,
-                "accepted": accepted,
-                "ok": ok,
-            })
+
+            async def run_feedback() -> None:
+                # 反馈会改 trace/记忆，和正在跑的一轮必须互斥
+                async with session.lock:
+                    ok = session.agent.apply_explicit_feedback(
+                        execution_id, accepted, comment
+                    )
+                await push_event(conn_id, "feedback_ack", {
+                    "execution_id": execution_id,
+                    "accepted": accepted,
+                    "ok": ok,
+                })
+
+            if not session.submit(run_feedback):
+                await push_event(
+                    conn_id, "error", {"message": "会话已回收，请刷新页面重试"}
+                )
             return
     except Exception as e:
         logger.error("ws", f"dispatcher 处理 {topic} 失败: {e}")

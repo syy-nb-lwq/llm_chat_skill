@@ -486,6 +486,10 @@ async def test_feedback_topic_slices_conn_id_correctly():
                     "comment": "不对",
                 },
             )
+            # 反馈会排队执行（和正在跑的一轮互斥）—— 等它跑完再断言
+            _session = sessions.get(identity.client_id)
+            assert _session is not None
+            await _session.drain()
         finally:
             ws_mod.push_event = original
 

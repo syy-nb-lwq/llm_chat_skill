@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from infra.logger import get_logger
 from tools.base import Tool, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
+from tools.validation import validate_params
 
 
 @dataclass
@@ -279,6 +280,35 @@ class ToolHub:
         tool_info = self._tools.get(tool_name)
         if not tool_info:
             return ToolResult(success=False, error=f"Unknown tool: {tool_name}")
+
+        # **参数校验是唯一收口点**（见 tools/validation.py）。
+        #
+        # 不校验时，`**kwargs` 派的工具会把拼错的 `file_path` 当成"没传 path"，
+        # 有些直接给默认值返回成功 —— 模型拿到"成功"会据此继续推理，
+        # 比报错危险得多。这里宁可让调用失败。
+        ok, clean_params, param_error = validate_params(tool_info.schema, params)
+        if not ok:
+            result = ToolResult(
+                success=False,
+                error=f"工具 {tool_name} 参数错误：{param_error}",
+                meta={"invalid_params": True, "tool": tool_name},
+            )
+            if on_event:
+                await on_event(
+                    "tool_call",
+                    {"tool": tool_name, "params": params, "source": tool_info.source_name},
+                )
+                await on_event(
+                    "tool_result",
+                    {
+                        "tool": tool_name,
+                        "result": None,
+                        "error": result.error,
+                        "meta": result.meta,
+                    },
+                )
+            return result
+        params = clean_params
 
         source = self._sources.get(tool_info.source_name)
 

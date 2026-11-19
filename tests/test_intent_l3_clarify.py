@@ -461,6 +461,10 @@ async def test_ws_clarification_event(monkeypatch):
         captured.clear()
         sub.topic = f"chat/{conn_id}"
         await dispatcher(sub, {"content": "那个事你懂的"})
+        # chat 现在是"投递即返回"，等 Session 队列跑空再看事件
+        session = sessions.get(issued_client_id)
+        assert session is not None
+        await session.drain()
 
         clarification = [
             e for e in captured if e["event"] == "clarification_request"
