@@ -83,9 +83,9 @@ async def test_chitchat_answer_sees_profile(monkeypatch):
 
     agent = Agent(persist_session=False)
     monkeypatch.setattr(
-        agent.manager,
+        agent.mem.long_term,
         "profile_block",
-        lambda: "[用户画像]\n- 偏好:不要用 emoji",
+        lambda *a, **k: "[用户画像]\n- 偏好:不要用 emoji",
     )
 
     async def _plan(*args, **kwargs):
@@ -117,9 +117,9 @@ async def test_task_answer_sees_profile(monkeypatch):
 
     agent = Agent(persist_session=False)
     monkeypatch.setattr(
-        agent.manager,
+        agent.mem.long_term,
         "profile_block",
-        lambda: "[用户画像]\n- 偏好:回答用中文",
+        lambda *a, **k: "[用户画像]\n- 偏好:回答用中文",
     )
 
     async def _plan(*args, **kwargs):
@@ -152,7 +152,8 @@ async def test_profile_read_failure_does_not_break_answer(monkeypatch):
     def _boom():
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(agent.manager, "profile_block", _boom)
+    # 画像的读入口是长期记忆门面（core/memorykit/long_term.py），不是 manager
+    monkeypatch.setattr(agent.mem.long_term, "profile_block", _boom)
 
     async def _plan(*args, **kwargs):
         return PlanResult(

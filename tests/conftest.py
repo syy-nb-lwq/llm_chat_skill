@@ -218,6 +218,7 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     from core import memory_writer as mw_mod
     from core import memory as mem_mod
     from core import skill_quality as sq_mod
+    from core.memorykit import reset_memory
     from core.llm_judge import reset_l1_classifier
     from core.clarifier import reset_clarifier
     from infra.config import config as config_mod
@@ -234,6 +235,9 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     monkeypatch.setattr(config_mod, "mcp_enabled", False, raising=False)
     monkeypatch.setattr(config_mod, "code_exec_enabled", True, raising=False)
     monkeypatch.setattr(config_mod, "owner_token", "", raising=False)
+
+    # 记忆三层门面：不重置的话,上一轮遗留的"当前轮工作记忆"会串到下一个测试
+    reset_memory()
 
     # 会话库指向临时目录 —— 后端测试会创建带持久化的 Agent,
     # 不能让它们写进真实的 memory/sessions.db

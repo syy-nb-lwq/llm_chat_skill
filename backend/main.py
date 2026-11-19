@@ -322,9 +322,9 @@ async def delete_user(user_id: str):
 @require_auth
 async def list_sessions():
     """列出全部会话（本地单用户）。"""
-    from core.session_memory import get_session_memory_store
+    from core.memorykit import get_memory
 
-    rows = get_session_memory_store().list_sessions()
+    rows = get_memory().short_term.list_sessions()
     return {
         "sessions": [
             {
@@ -348,7 +348,7 @@ async def get_my_session_messages(request: Request, limit: int = 200):
 
     session_id 从 query 参数取（本地单用户，无越权问题）。
     """
-    from core.session_memory import get_session_memory_store
+    from core.memorykit import get_memory
 
     identity = _resolve_user_and_session(request)
     session_id = identity["session_id"]
@@ -356,12 +356,12 @@ async def get_my_session_messages(request: Request, limit: int = 200):
         # 还没拿到 session_id（首轮连接）—— 空历史比 400 更合适
         return {"session_id": "", "messages": [], "count": 0}
 
-    store = get_session_memory_store()
-    if not store.session_exists(session_id):
+    short_term = get_memory().short_term
+    if not short_term.session_exists(session_id):
         # 会话还没落盘(全新会话)—— 空历史比 404 更合适,前端不用特殊处理
         return {"session_id": session_id, "messages": [], "count": 0}
 
-    msgs = store.get_messages(session_id, limit=max(0, min(limit, 1000)))
+    msgs = short_term.messages(session_id, limit=max(0, min(limit, 1000)))
     return {
         "session_id": session_id,
         "count": len(msgs),
@@ -376,12 +376,12 @@ async def get_my_session_messages(request: Request, limit: int = 200):
 @require_auth
 async def get_session_messages(session_id: str, limit: int = 100):
     """取某个会话的消息(短期记忆内容全量保留)。"""
-    from core.session_memory import get_session_memory_store
+    from core.memorykit import get_memory
 
-    store = get_session_memory_store()
-    if not store.session_exists(session_id):
+    short_term = get_memory().short_term
+    if not short_term.session_exists(session_id):
         raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
-    msgs = store.get_messages(session_id, limit=limit or 0)
+    msgs = short_term.messages(session_id, limit=limit or 0)
     return {
         "session_id": session_id,
         "messages": [m.to_dict() for m in msgs],
@@ -392,9 +392,9 @@ async def get_session_messages(session_id: str, limit: int = 100):
 @require_auth
 async def delete_session(session_id: str):
     """删除会话及其全部内容(用户主动要求清除时使用)。"""
-    from core.session_memory import get_session_memory_store
+    from core.memorykit import get_memory
 
-    ok = get_session_memory_store().delete_session(session_id)
+    ok = get_memory().short_term.delete_session(session_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
     return {"deleted": session_id}
@@ -408,13 +408,9 @@ async def delete_session(session_id: str):
 async def list_memories(limit: int = 50):
     """「你记住了我什么」：列出画像条目（本地单用户）。"""
 
-    from core.memory_db import PROFILE_MEMORY_TYPES
-    from core.semantic_memory import get_semantic_memory
+    from core.memorykit import get_memory
 
-    entries = get_semantic_memory().get_recent(
-        types=list(PROFILE_MEMORY_TYPES),
-        limit=limit,
-    )
+    entries = get_memory().long_term.profile_entries(limit=limit)
     return {
         "count": len(entries),
         "memories": [
@@ -439,13 +435,13 @@ async def list_memories(limit: int = 50):
 @require_auth
 async def forget_memory(memory_id: str):
     """「忘掉这件事」:软删除 + 同步清索引(删完不再被召回)。"""
-    from core.semantic_memory import get_semantic_memory
+    from core.memorykit import get_memory
 
-    store = get_semantic_memory()
-    entry = store.memory_db.get(memory_id)
+    long_term = get_memory().long_term
+    entry = long_term.get_profile_entry(memory_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"memory not found: {memory_id}")
-    ok = store.forget(memory_id)
+    ok = long_term.forget(memory_id)
     if not ok:
         raise HTTPException(status_code=500, detail="forget failed")
     return {"forgotten": memory_id, "type": entry.type}

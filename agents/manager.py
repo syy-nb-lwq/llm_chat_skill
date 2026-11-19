@@ -1145,15 +1145,14 @@ class ManagerAgent(BaseAgent):
     def profile_block(self) -> str:
         """取用户画像文本块(长期记忆常驻注入)。
 
-        公开方法 —— `Agent` 用它每轮取一次,同时喂给规划器和回答生成器,
-        避免两处各读一次库、拿到不一致的内容。
-
-        失败一律返回空串 —— 画像读不到不能影响正常回答。
+        **只是兼容转发** —— 画像的唯一读入口是 `core/memorykit/long_term.py`,
+        主链已经直接走那里。保留这个方法是为了不打断既有调用方，
+        不要再在它里面加逻辑（否则又多一条读路径）。
         """
-        if not self.semantic_memory:
-            return ""
         try:
-            return self.semantic_memory.build_profile_block()
+            from core.memorykit import get_memory
+
+            return get_memory().long_term.profile_block()
         except Exception as exc:
             self.logger.warning("Manager", f"读取用户画像失败: {exc}")
             return ""

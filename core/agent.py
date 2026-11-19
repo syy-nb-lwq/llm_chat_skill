@@ -15,6 +15,7 @@ from core.critic import ExecutionCritic, build_execution_context
 from core.dag import DAGExecutor
 from core.identity import IdentityContext
 from core.memory import get_memory_store
+from core.memorykit import get_memory
 from core.session_config import session_restore_limit
 from infra.config import config
 from infra.logger import get_logger
@@ -90,6 +91,12 @@ class Agent:
 
         self.context = Context()
         self.dag_enabled = bool(config.skill_dag_enabled)
+
+        # 记忆三层门面：工作 / 短期 / 长期（见 core/memorykit/__init__.py 的职责表）
+        # 主链只认这三张脸，不再直接摸底层 store。
+        self.mem = get_memory()
+        #: 本轮的工作记忆，在 handle() 里 begin_turn 创建
+        self.working = None
 
         # 会话持久化(短期记忆):仅在服务端会话里开启
         self.persist_session = bool(persist_session)
@@ -306,7 +313,8 @@ class Agent:
         block = ""
         if self.persist_memory:
             try:
-                block = self.manager.profile_block()
+                # 长期记忆的唯一读入口（画像 ≤400 字，常驻注入）
+                block = self.mem.long_term.profile_block()
             except Exception as exc:
                 self.logger.warning("Agent", f"读取用户画像失败: {exc}")
         self._profile_cache = block
@@ -476,10 +484,9 @@ class Agent:
         if not self.persist_memory or not user_input:
             return
         try:
-            from core.memory_writer import get_memory_writer
-
             task = asyncio.create_task(
-                get_memory_writer().record_turn(
+                # 长期记忆的唯一写入口（LLM 抽取 + 证据校验，在后台跑）
+                self.mem.long_term.record_turn(
                     user_input,
                     session_id=self.session_id,
                     turn_id=self.turn_id,
@@ -511,21 +518,19 @@ class Agent:
         否则会把旧消息重复写回库里。
         """
         try:
-            from core.session_memory import get_session_memory_store
-
-            self._session_store = get_session_memory_store()
-            store = self._session_store
+            store = self.mem.short_term
+            self._session_store = store
             store.ensure_session(self.session_id)
             self.context.sink = self._persist_message
 
             # reset 之前的内容不装回工作上下文(但仍保留在库里、可检索)
-            reset_at = store.get_reset_at_seq(self.session_id)
+            reset_at = store.reset_at_seq(self.session_id)
 
             # 摘要只装回**覆盖到 reset 之后**的那一份。
             # 整份摘要都在 reset 之前 → 它讲的是"被用户主动清掉的旧话题",
             # 再塞回工作上下文等于 reset 没生效。
             cover = 0
-            summary = store.get_latest_summary(self.session_id)
+            summary = store.latest_summary(self.session_id)
             if summary is not None:
                 summary_cover = int(summary.cover_until_seq)
                 if summary_cover > reset_at:
@@ -542,7 +547,7 @@ class Agent:
             skip_before = max(cover, reset_at)
 
             # 只恢复"尚未被摘要覆盖"的消息,取最近若干条
-            restored = store.get_recent_messages(
+            restored = store.recent_messages(
                 self.session_id, limit=session_restore_limit()
             )
             for msg in restored:
@@ -602,11 +607,8 @@ class Agent:
         if self._session_store is None:
             return
         try:
-            from core.session_rollup import maybe_rollup
-
-            await maybe_rollup(
+            await self.mem.short_term.rollup(
                 self.context,
-                self._session_store,
                 session_id=self.session_id,
                 logger=self.logger,
             )
@@ -643,6 +645,13 @@ class Agent:
             )
         except Exception:
             _exec_tokens = ()
+
+        # 工作记忆：这一轮的工作台（计划 / 工具结果 / 结论）。
+        # 一轮一个，轮末在 finally 里 end_turn —— 不清就是内存泄漏。
+        self.working = self.mem.begin_turn(
+            execution_id=self.execution_id,
+            session_id=self.session_id,
+        )
 
         # 会话过长时先滚动一次摘要(原文不删除,只是给 LLM 一个压缩视图)
         await self._maybe_rollup()
@@ -796,6 +805,10 @@ class Agent:
                 trace.intent = str(getattr(plan.intent, "value", plan.intent))
                 trace.intent_confidence = float(plan.intent_confidence or 0.0)
 
+            # 工作记忆：计划进工作台，供重规划 / 回答 / 重试读取
+            if self.working is not None:
+                self.working.set_plan(plan)
+
             # 根据意图类型决定后续流程
             intent_type = plan.intent
 
@@ -946,6 +959,11 @@ class Agent:
             active = {"plan": plan}
 
             async def _replan(prior_findings: str):
+                # 上一轮的结论进工作记忆，重规划时回灌（goal_runner 没给就用已记的）
+                if self.working is not None:
+                    if prior_findings:
+                        self.working.add_finding(prior_findings)
+                    prior_findings = prior_findings or self.working.findings_text()
                 new_plan = await self.manager.plan(
                     user_input,
                     self.context,
@@ -981,6 +999,10 @@ class Agent:
             )
             tool_results = goal.tool_results
             plan = active["plan"]
+            # 工作记忆：本轮工具返回 + 最终计划（回答/重试都从这里取，不再靠局部变量传递）
+            if self.working is not None:
+                self.working.set_tool_results(tool_results)
+                self.working.set_plan(plan)
             emit("thinking", {"stage": "goal_loop_done", **goal.to_dict()})
 
             # 存储本次 tool_tasks 用于重试
@@ -1109,6 +1131,21 @@ class Agent:
                 trace.reply_chars = len(ans)
                 self._finish_trace(trace, turn_start, error=trace_error)
 
+            # 工作记忆收尾：失败先落盘取证，然后清空。
+            # **必须在这里做** —— 它是一轮的生命周期边界，而不是 GC 的事。
+            try:
+                dumped = self.mem.end_turn(
+                    self.working,
+                    failed=bool(trace_error),
+                    reason=(trace_error or "")[:200],
+                )
+                if dumped:
+                    self.logger.info("Agent", f"本轮失败，工作记忆已落盘: {dumped}")
+            except Exception as exc:
+                self.logger.warning("Agent", f"工作记忆收尾失败: {exc}")
+            finally:
+                self.working = None
+
     async def _handle_clarification(
         self,
         user_input: str,
@@ -1183,9 +1220,16 @@ class Agent:
         只是把"工作上下文"的起点挪到当前位置,恢复会话时不再装回旧内容。
         """
         self.context.clear()
+        # 工作记忆跟着一起清 —— reset 的语义是"忘掉这一轮在做什么"
+        if self.working is not None:
+            try:
+                self.mem.end_turn(self.working)
+            except Exception:
+                pass
+            self.working = None
         if self._session_store is not None:
             try:
-                self._session_store.mark_reset(self.session_id)
+                self.mem.short_term.reset(self.session_id)
             except Exception as exc:
                 self.logger.warning("Agent", f"标记会话重置失败: {exc}")
         self.logger.info("Agent", "RESET")
