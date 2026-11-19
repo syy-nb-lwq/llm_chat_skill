@@ -9,8 +9,8 @@ agent 回答：
 > 不能直接发起网络请求、不能直接读写文件。
 
 **这全是错的。** 系统里明明有 `python_exec`（子进程执行，能发 HTTP、能读写
-工作区文件）、`web_search` / `web_fetch`（联网）、`read_document`（读文档）、
-`create_tool`（自己造工具）。
+工作区文件）、`web_search` / `web_fetch`（联网）、`read_file`（读文件）、
+`read_document`（读文档）、`create_tool`（自己造工具）。
 
 ## 根因
 
@@ -59,6 +59,11 @@ _CAPABILITY_RULES: List[Dict[str, Any]] = [
     {
         "tools": ("web_search", "web_fetch"),
         "text": "联网：搜索公开信息、抓取网页正文",
+    },
+    {
+        "tools": ("read_file",),
+        "text": "读文件：能直接读本机/工作区里的文本文件（源码、配置、日志），"
+                "单个文件 10MB 以内",
     },
     {
         "tools": ("read_document", "locate_document"),

@@ -198,7 +198,8 @@ def build_workspace_block(
 
     tail = (
         "\n\n**这些文件已经存在，不要再假设它们不存在。**"
-        "需要内容就直接 `open()` 读（`read_document` 也能读 pdf/docx/xlsx）；"
+        "需要内容就用 `read_file` 读（10MB 以内的文本文件）；"
+        "PDF/Word/Excel 用 `read_document`。"
         "找文件先看上面这份清单，不要凭印象猜路径。"
         "清单里没有的，才需要新建。"
     )

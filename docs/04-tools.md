@@ -49,10 +49,17 @@
 
 ## 3. 内置工具
 
-当前默认注册两个内置 Python 工具：
+内置工具都在 `ToolHub.get_tool_hub()` 里注册（见 `tools/hub.py`）。
+目前包括：
 
 - `weather_query`
-- `web_search`
+- `web_search` / `web_fetch`
+- `read_file`
+- `read_document` / `locate_document`
+- `python_exec` / `write_script` / `list_scripts`（受 `CODE_EXEC_ENABLED` 控制）
+- `create_tool` / `list_created_tools` / `report_capability_gap`（受 `TOOL_CREATION_ENABLED` 控制）
+- `run_subagents` / `subagent_status`（受 `SUBAGENTS_ENABLED` 控制）
+- `video_probe` / `video_concat`、`publish_artifact`、`tool_health`
 
 ### 3.1 weather_query
 
@@ -77,6 +84,27 @@
   - `SearXNG`
   - `Wikipedia`
 - 成功时会在 `meta.source` 中标明后端来源
+
+### 3.3 read_file
+
+文件：`tools/file_read.py`
+
+**读任意文本文件**（源码/配置/日志/数据），和 `read_document` 分开：
+`read_document` 做的是"解析成带锚点的结构"，`read_file` 做的是"把文件原样读出来"。
+
+特点：
+
+- **单文件上限 10MB**（`MAX_FILE_BYTES`）——超了**明确报错**，
+  不做"只读前 10MB"。截断读取最坏的情况是模型以为看到了全文，然后据此下结论。
+- 返回**带行号**的内容，方便模型引用具体行
+- 大文件分段读：`start_line` / `end_line`；超出 `max_chars` 时返回
+  `next_start_line`，告诉模型从哪一行续
+- 编码识别：BOM → utf-8 → gb18030 → utf-8(replace)
+- 二进制/文档文件**指对工具**：图片/压缩包直接报错，PDF/Word/Excel 提示改用 `read_document`
+- 凭据类文件（`.env` / `*.pem` / `*.key` …）里的密钥值**打码后再返回**
+  —— 工具结果会进对话、进会话库、进日志
+- 相对路径依次尝试：**当前目录 → 工作区执行目录(`memory/workspace/_run`)
+  → 工作区根目录**；找不到时报错会列出试过的位置
 
 ## 4. 工具调用流程
 

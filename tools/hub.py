@@ -437,6 +437,17 @@ def get_tool_hub() -> ToolHub:
         except Exception:
             pass
 
+        # 文件工具 —— 读任意文本文件(源码/配置/日志),上限 10MB
+        #
+        # 和 `read_document` 分开:文档工具做的是"解析成带锚点的结构",
+        # 这里做的是"把文件原样读出来",两者的失败原因和用法都不一样。
+        try:
+            from tools.file_read import ReadFileTool
+
+            _hub.register_python_tool(ReadFileTool())
+        except Exception:
+            pass
+
         # 元工具:让 agent 自己造工具(受 TOOL_CREATION_ENABLED 控制)
         try:
             from infra.config import config
