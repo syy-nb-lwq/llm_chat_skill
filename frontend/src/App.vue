@@ -119,11 +119,10 @@ export default {
     // 所以这里只是“把已有的读回来”，不是重新生成。
     async loadHistory() {
       const session = wsService.session
-      if (!session || !session.token) return
+      if (!session || !session.session_id) return
       try {
-        const res = await fetch(`${API_BASE}/api/session/messages`, {
-          headers: { Authorization: `Bearer ${session.token}` },
-        })
+        const sid = encodeURIComponent(session.session_id)
+        const res = await fetch(`${API_BASE}/api/session/messages?session_id=${sid}`)
         if (!res.ok) {
           // 404/400 都只是“还没历史”，不打扰用户
           return

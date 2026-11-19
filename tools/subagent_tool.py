@@ -55,9 +55,14 @@ class RunSubAgentsTool(Tool):
         self.logger = get_logger()
 
     def schema(self) -> ToolSchema:
+        catalog = self._role_catalog()
+        role_hint = (
+            f"\n可选岗位（写在子任务的 role 字段里，不写则用通才）：\n{catalog}"
+            if catalog else ""
+        )
         return ToolSchema(
             name=self.name,
-            description=self.description,
+            description=self.description + role_hint,
             params=[
                 ToolParam(
                     name="tasks",
@@ -65,15 +70,34 @@ class RunSubAgentsTool(Tool):
                     required=True,
                     description=(
                         '子任务列表：[{"name": "短名", "goal": "具体要做什么、'
-                        '要产出什么"}]。goal 要写成能独立执行的一句话。'
+                        '要产出什么", "role": "岗位(可选)"}]。'
+                        'goal 要写成能独立执行的一句话。'
                     ),
                 ),
             ],
             returns={
                 "summary": "成功/失败/超时计数",
-                "tasks": "[{name, status, result, error, duration_ms}]",
+                "tasks": "[{name, role, status, result, error, duration_ms}]",
             },
         )
+
+    @staticmethod
+    def _role_catalog() -> str:
+        """岗位一览（给 planner 选岗用）。"""
+        try:
+            from core.agentkit.roles import default_roles
+
+            lines = []
+            for role in default_roles():
+                if role.role_id == "generalist":
+                    continue    # 通才是兜底，不必推荐
+                lines.append(
+                    f"  - {role.role_id}: {role.purpose}"
+                    f"（工具: {', '.join(role.tools.allow) or '无'}）"
+                )
+            return "\n".join(lines)
+        except Exception:
+            return ""
 
     async def execute(self, tasks: Optional[List[Dict[str, Any]]] = None) -> ToolResult:
         from core.event_bus import emit

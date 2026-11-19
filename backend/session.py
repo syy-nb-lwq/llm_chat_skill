@@ -1,4 +1,9 @@
-"""Session management keyed by a server-issued client_id (C-01)."""
+"""Session management keyed by a server-issued client_id.
+
+本地单用户：没有 user_id / 令牌 / 假用户服务。client_id 仍由服务端签发，
+只作为一条 websocket 连接的会话键；session_id 从客户端恢复，用于跨重启
+续聊。没有跨用户隔离问题。
+"""
 import asyncio
 import inspect
 import time
@@ -6,12 +11,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from core.agent import Agent
-from infra.auth import (
-    gen_client_id,
-    gen_session_id,
-    issue_session_token,
-    verify_session_token,
-)
+from infra.auth import gen_client_id, gen_session_id
 from infra.logger import get_logger
 
 
@@ -20,21 +20,16 @@ DisposeCallback = Callable[[], Optional[Awaitable[None]]]
 
 @dataclass
 class ClientIdentity:
-    """服务端签发的客户端身份(C-01)。
+    """服务端签发的连接身份（本地单用户，无令牌、无 user_id）。
 
-    - ``client_id``: 服务端签发的会话键,不再信任客户端提交的 id
-    - ``conn_id``: 客户端自带的 topic 句柄,只用于消息路由
-    - ``token``: 绑定三者的签名令牌,后续请求必须携带
-    - ``user_token``: 长期用户凭证(假用户服务签发),客户端持久化后跨连接复用
+    - ``client_id``: 服务端签发的会话键，只用于 topic 路由与会话复用
+    - ``conn_id``: 客户端自带的 topic 句柄
+    - ``session_id``: 会话 id，客户端可带回以恢复历史
     """
 
-    user_id: str
     session_id: str
     client_id: str
     conn_id: str
-    token: str
-    user_token: str = ""
-    tenant_id: str = "default"
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
 
@@ -44,11 +39,7 @@ class ClientIdentity:
     def to_payload(self) -> Dict:
         return {
             "client_id": self.client_id,
-            "user_id": self.user_id,
             "session_id": self.session_id,
-            "token": self.token,
-            "user_token": self.user_token,
-            "tenant_id": self.tenant_id,
         }
 
 
@@ -79,88 +70,38 @@ class SessionManager:
         self.ttl_s = ttl_s
         self.logger = get_logger()
 
-    # ===== 身份(C-01) =====
+    # ===== 身份（本地单用户，无令牌） =====
 
     async def issue_identity(
-        self, conn_id: str, user_token: str = "", resume_session_id: str = ""
+        self, conn_id: str, resume_session_id: str = ""
     ) -> ClientIdentity:
         """为一条连接签发服务端身份。
 
-        客户端自带的 conn_id 只用于 topic 路由;身份(user_id / session_id /
-        client_id)全部由服务端生成。
-
-        user_token 是"假用户服务"签发的长期凭证:带了它就认出同一个用户
-        (长期记忆因此能跨重启/跨连接连续);没带或无效则新建一个用户。
-
-        resume_session_id:客户端希望恢复的会话。**必须属于该用户**才复用,
-        否则一律新建 —— 防止越权读取他人会话内容。
+        client_id 由服务端生成，只用于 topic 路由；session_id 可由客户端
+        带回以恢复历史（本地单用户，无需校验归属）。
         """
-        from core.user_service import get_user_service
-
-        service = get_user_service()
-        user = service.get_or_create(user_token)
-        user_token = service.issue_token(user.id, user.tenant_id)
-
-        session_id = gen_session_id()
+        session_id = resume_session_id or gen_session_id()
         if resume_session_id:
-            if self._session_belongs_to(resume_session_id, user.id):
-                session_id = resume_session_id
-                self.logger.info(
-                    "Session", f"恢复会话: {resume_session_id} (user={user.id})"
-                )
-            else:
-                self.logger.info(
-                    "Session",
-                    f"会话 {resume_session_id} 不属于该用户,新建会话",
-                )
+            self.logger.info("Session", f"恢复会话: {resume_session_id}")
 
         identity = ClientIdentity(
-            user_id=user.id,
             session_id=session_id,
             client_id=gen_client_id(),
             conn_id=conn_id,
-            token="",
-            user_token=user_token,
-            tenant_id=user.tenant_id,
-        )
-        identity.token = issue_session_token(
-            identity.user_id, identity.session_id, identity.client_id
         )
         async with self._lock:
             self._identities[identity.client_id] = identity
             self._by_conn[conn_id] = identity.client_id
-        self.logger.info(
-            "Session", f"identity issued: {identity.client_id} (user={identity.user_id})"
-        )
+        self.logger.info("Session", f"identity issued: {identity.client_id}")
         return identity
 
-    @staticmethod
-    def _session_belongs_to(session_id: str, user_id: str) -> bool:
-        """会话是否存在且属于该用户。"""
-        try:
-            from core.session_memory import get_session_memory_store
-
-            return get_session_memory_store().session_exists(session_id, user_id)
-        except Exception:
-            return False
-
-    def resolve_identity(
-        self, conn_id: str, token: str = ""
-    ) -> Optional[ClientIdentity]:
-        """conn_id → 服务端身份。
-
-        令牌是必需的:必须校验通过、且其中的 client_id 与绑定一致。
-        缺失或伪造的令牌一律拒绝(conn_id 只是路由句柄,不是凭证)。
-        """
+    def resolve_identity(self, conn_id: str) -> Optional[ClientIdentity]:
+        """conn_id → 服务端身份。没有令牌校验（本地单用户）。"""
         client_id = self._by_conn.get(conn_id)
         if not client_id:
             return None
         identity = self._identities.get(client_id)
         if identity is None:
-            return None
-        payload = verify_session_token(token)
-        if not payload or payload.get("client_id") != identity.client_id:
-            self.logger.warning("Session", f"token 校验失败: {conn_id[:8]}")
             return None
         identity.touch()
         return identity
@@ -174,7 +115,6 @@ class SessionManager:
         self,
         client_id: str,
         *,
-        user_id: str = "default",
         session_id: str = "",
     ) -> Session:
         async with self._lock:
@@ -184,7 +124,6 @@ class SessionManager:
                     client_id=client_id,
                     agent=Agent(
                         session_id=session_id or client_id,
-                        user_id=user_id,
                         persist_session=True,
                     ),
                 )

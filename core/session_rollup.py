@@ -101,7 +101,6 @@ async def maybe_rollup(
     store,
     *,
     session_id: str,
-    user_id: str,
     logger=None,
     threshold: Optional[int] = None,
     keep_recent: Optional[int] = None,
@@ -149,7 +148,6 @@ async def maybe_rollup(
     try:
         store.save_summary(
             session_id=session_id,
-            user_id=user_id,
             cover_until_seq=last_seq,
             summary=stored,
         )

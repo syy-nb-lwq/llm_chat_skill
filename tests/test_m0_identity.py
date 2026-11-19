@@ -26,14 +26,14 @@ def test_new_id_format():
 
 
 def test_identity_context_unique_per_construction():
-    a = IdentityContext(user_id="u", session_id="s")
-    b = IdentityContext(user_id="u", session_id="s")
+    a = IdentityContext(session_id="s")
+    b = IdentityContext(session_id="s")
     assert a.turn_id != b.turn_id
     assert a.execution_id != b.execution_id
 
 
 def test_identity_child_preserves_turn():
-    parent = IdentityContext(user_id="u", session_id="s")
+    parent = IdentityContext(session_id="s")
     child = parent.child()
     assert child.turn_id == parent.turn_id
     assert child.execution_id != parent.execution_id
@@ -55,7 +55,6 @@ def test_build_execution_context_uses_task_specs():
         task_specs=spec,
         execution_id="exec_1",
         turn_id="turn_1",
-        user_id="u",
         session_id="s",
     )
     assert ctx.execution_id == "exec_1"

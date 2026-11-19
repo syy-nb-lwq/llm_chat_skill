@@ -85,7 +85,7 @@ async def test_chitchat_answer_sees_profile(monkeypatch):
     monkeypatch.setattr(
         agent.manager,
         "profile_block",
-        lambda user_id: "[用户画像]\n- 偏好:不要用 emoji",
+        lambda: "[用户画像]\n- 偏好:不要用 emoji",
     )
 
     async def _plan(*args, **kwargs):
@@ -119,7 +119,7 @@ async def test_task_answer_sees_profile(monkeypatch):
     monkeypatch.setattr(
         agent.manager,
         "profile_block",
-        lambda user_id: "[用户画像]\n- 偏好:回答用中文",
+        lambda: "[用户画像]\n- 偏好:回答用中文",
     )
 
     async def _plan(*args, **kwargs):
@@ -149,7 +149,7 @@ async def test_profile_read_failure_does_not_break_answer(monkeypatch):
 
     agent = Agent(persist_session=False)
 
-    def _boom(user_id):
+    def _boom():
         raise RuntimeError("db down")
 
     monkeypatch.setattr(agent.manager, "profile_block", _boom)
@@ -168,12 +168,12 @@ async def test_profile_read_failure_does_not_break_answer(monkeypatch):
     assert ans  # 没因为画像读取失败而炸
 
 
-def test_manager_profile_block_empty_when_no_user():
-    """没有 user_id → 画像为空,不报错"""
+def test_manager_profile_block_empty_when_no_memory():
+    """长期记忆没数据 → 画像为空,不报错"""
     from agents.manager import ManagerAgent
 
     mgr = ManagerAgent()
-    assert mgr.profile_block("") == ""
+    assert mgr.profile_block() == ""
 
 
 # ============================================================
@@ -294,12 +294,11 @@ async def test_synthetic_vectors_do_not_corrupt_ranking():
         db.add(
             type="preference",
             content=text,
-            user_id="u1",
             embedding=vec,
             confidence=0.9,
         )
 
-    res = await store.search("北京天气", user_id="u1", limit=5)
+    res = await store.search("北京天气", limit=5)
     contents = [e.content for e, _ in res]
     # 相关条目必须能被全文检索命中,且排在前面
     assert contents, "检索结果为空"
@@ -315,14 +314,13 @@ async def test_synthetic_vectors_do_not_corrupt_ranking():
 def test_turn_trace_marks_stages():
     from core.trace import STAGE_PLAN, STAGE_TOTAL, TurnTrace
 
-    tr = TurnTrace(trace_id="t1", user_id="u1")
+    tr = TurnTrace(trace_id="t1")
     tr.mark(STAGE_PLAN, 12.34)
     tr.mark(STAGE_PLAN, 1.0)
     assert tr.stage_ms[STAGE_PLAN] == 13.3
     tr.mark(STAGE_TOTAL, 99.0)
     d = tr.to_dict()
     assert d["trace_id"] == "t1"
-    assert d["user_id"] == "u1"
     assert d["stage_ms"][STAGE_TOTAL] == 99.0
 
 
@@ -333,7 +331,7 @@ def test_trace_recorder_roundtrip():
     path = tmp / "sub" / "traces.jsonl"
     rec = TraceRecorder(path=path, enabled=True)
 
-    tr = TurnTrace(trace_id="t1", user_id="u1")
+    tr = TurnTrace(trace_id="t1")
     tr.mark("plan", 5.0)
     rec.record(tr)
 
@@ -482,7 +480,6 @@ def test_concurrent_writes_do_not_fail():
                 db.add(
                     type="preference",
                     content=f"u{w}-m{i}",
-                    user_id="u1",
                     confidence=0.9,
                 )
         except Exception as exc:  # pragma: no cover - 失败则测试红
@@ -495,7 +492,7 @@ def test_concurrent_writes_do_not_fail():
         t.join()
 
     assert not errors, f"并发写失败: {errors[:3]}"
-    assert len(db.list_memories(user_id="u1", limit=1000)) == 200
+    assert len(db.list_memories(limit=1000)) == 200
 
 
 def test_session_memory_uses_wal():

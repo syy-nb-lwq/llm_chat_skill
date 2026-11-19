@@ -32,9 +32,12 @@ class TurnTrace:
     """一轮对话的耗时与规模"""
 
     trace_id: str
-    user_id: str = ""
     session_id: str = ""
     turn_id: str = ""
+    #: 执行隔离作用域（user+session 的哈希目录名，docs/18 F0-1）
+    scope: str = ""
+    #: 执行者：主智能体是 `main`，子智能体是自己的 id
+    agent_id: str = ""
     intent_layer: str = ""       # L0 / L1 / L2
     intent: str = ""
     intent_confidence: float = 0.0
@@ -60,9 +63,10 @@ class TurnTrace:
         return {
             "trace_id": self.trace_id,
             "started_at": self.started_at,
-            "user_id": self.user_id,
             "session_id": self.session_id,
             "turn_id": self.turn_id,
+            "scope": self.scope,
+            "agent_id": self.agent_id,
             "intent_layer": self.intent_layer,
             "intent": self.intent,
             "intent_confidence": round(self.intent_confidence, 3),

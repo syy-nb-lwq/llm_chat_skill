@@ -4,7 +4,7 @@
 - 每个教学会话用 ``teaching_session_id`` 标识
 - 状态:Collecting → Draft → Testing → AwaitingApproval → Active
 - 持久化:使用 ``teachings/{teaching_session_id}.json`` 保存
-- 字段:teaching_session_id, user_id, session_id, draft_skill, evidence_turns,
+- 字段:teaching_session_id, session_id, draft_skill, evidence_turns,
        missing_fields, current_question, user_choice, status, created_at, updated_at
 """
 from __future__ import annotations
@@ -35,7 +35,6 @@ REQUIRED_FIELDS = ("name", "method", "capability")
 @dataclass
 class TeachingSession:
     teaching_session_id: str
-    user_id: str
     session_id: str
     status: str = TeachingStatus.COLLECTING
     partial_skill: Dict[str, Any] = field(default_factory=dict)
@@ -58,10 +57,9 @@ class TeachingSession:
         return asdict(self)
 
     @classmethod
-    def new(cls, user_id: str, session_id: str) -> "TeachingSession":
+    def new(cls, session_id: str) -> "TeachingSession":
         return cls(
             teaching_session_id=f"teach-{uuid.uuid4().hex[:10]}",
-            user_id=user_id,
             session_id=session_id,
         )
 
@@ -70,7 +68,6 @@ class TeachingSession:
         # 兼容旧缺省字段
         return cls(
             teaching_session_id=data.get("teaching_session_id", ""),
-            user_id=data.get("user_id", "default"),
             session_id=data.get("session_id", "default"),
             status=data.get("status", TeachingStatus.COLLECTING),
             partial_skill=data.get("partial_skill", {}) or {},
@@ -117,7 +114,7 @@ class TeachingSessionStore:
             self.logger.warning("TeachingSessionStore", f"读取失败 {teaching_session_id}: {e}")
             return None
 
-    def find_active_for(self, user_id: str, session_id: str) -> Optional[TeachingSession]:
+    def find_active_for(self, session_id: str) -> Optional[TeachingSession]:
         """找到当前 session 上尚未结束的最近一个教学会话。"""
         candidates: List[TeachingSession] = []
         for path in self.base.glob("*.json"):
@@ -126,7 +123,7 @@ class TeachingSessionStore:
             except Exception:
                 continue
             ts = TeachingSession.from_dict(data)
-            if ts.user_id == user_id and ts.session_id == session_id and not ts.is_terminal():
+            if ts.session_id == session_id and not ts.is_terminal():
                 candidates.append(ts)
         candidates.sort(key=lambda x: x.updated_at, reverse=True)
         return candidates[0] if candidates else None

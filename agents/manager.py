@@ -12,6 +12,7 @@
 """
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+from contextvars import ContextVar
 import re
 
 from core.agent_base import BaseAgent
@@ -25,6 +26,34 @@ from core.intent_detector import (
     get_intent_detector, is_chitchat,
 )
 from skills.manager import Skill, get_skill_store
+
+#: 当前这一轮正在规划的输入（用于技能召回）。
+#:
+#: 为什么用 contextvar 而不是实例属性：`system_prompt()` 是基类 `think()`
+#: 回调的，拿不到入参；而 `ManagerAgent` 是**每个 session 一个实例**，
+#: 同一 session 并发两个请求时实例属性会串。
+_current_planning_input: ContextVar[str] = ContextVar(
+    "dsh_manager_planning_input", default=""
+)
+
+#: 本次规划的**工具白名单**（None = 不限制）。
+#:
+#: 子智能体按角色裁剪工具后传进来 —— planner 的 schema 枚举、
+#: 工具签名清单、未知工具过滤都要跟着变。
+#:
+#: 用 contextvar 而不是实例属性：ManagerAgent 是每 session 一个实例，
+#: 同 session 并发两个请求时实例属性会串。
+_plan_allowed_tools: ContextVar[Optional[List[str]]] = ContextVar(
+    "dsh_manager_allowed_tools", default=None
+)
+_plan_allowed_skills: ContextVar[Optional[List[str]]] = ContextVar(
+    "dsh_manager_allowed_skills", default=None
+)
+#: 本次规划使用的**上下文块**（来自 ContextBundle）。
+#: 给了就用它替代"主对话全量历史"。
+_plan_context_blocks: ContextVar[Optional[List[Dict[str, Any]]]] = ContextVar(
+    "dsh_manager_context_blocks", default=None
+)
 
 # Feature Flag
 def _semantic_memory_enabled() -> bool:
@@ -133,15 +162,33 @@ class ManagerAgent(BaseAgent):
     # ToolHub 不可用时的兜底工具列表
     FALLBACK_TOOLS = ["weather_query", "web_search"]
 
+    # --- 技能注入的两阶段召回（docs/18 F0-3）---
+    #: 目录里最多列多少个技能（名字 + 一句话能力）
+    SKILL_CATALOG_LIMIT = 40
+    #: 召回多少个技能的完整方法（详情）
+    SKILL_DETAIL_TOP_K = 5
+
     def _available_tool_names(self) -> List[str]:
-        """当前可用工具名(来自 ToolHub,含 MCP / 用户注册的工具)。"""
+        """当前可用工具名(来自 ToolHub,含 MCP / 用户注册的工具)。
+
+        有白名单时**只返回白名单内的** —— 子智能体的 planner 不该看到
+        它没有权限的工具（docs/18 §4.2：授权靠裁剪，不靠提示词）。
+        """
         try:
             from tools.hub import get_tool_hub
 
             names = list(get_tool_hub().names() or [])
         except Exception:
             names = []
-        return names or list(self.FALLBACK_TOOLS)
+        allow = _plan_allowed_tools.get()
+        if allow is not None:
+            allowed = set(allow)
+            names = [n for n in names if n in allowed]
+        return names or (
+            list(self.FALLBACK_TOOLS)
+            if allow is None
+            else []
+        )
 
     def _tool_signatures(self) -> str:
         """工具签名清单(名字 + 参数 + 一句说明)。
@@ -161,6 +208,11 @@ class ManagerAgent(BaseAgent):
             schemas = get_tool_hub().schemas()
         except Exception:
             return ", ".join(self._available_tool_names())
+
+        allow = _plan_allowed_tools.get()
+        if allow is not None:
+            allowed = set(allow)
+            schemas = [s for s in schemas if s.name in allowed]
 
         lines = []
         for sch in schemas:
@@ -217,7 +269,16 @@ class ManagerAgent(BaseAgent):
 
     def system_prompt(self) -> str:
         skills = self.skill_store.list_all()
-        skills_list = self._format_skills(skills)
+        allow_skills = _plan_allowed_skills.get()
+        if allow_skills is not None:
+            allowed = set(allow_skills)
+            skills = [
+                s for s in skills
+                if s.name in allowed or f"{s.name}@{s.version}" in allowed
+            ]
+        skills_list = self._format_skills(
+            skills, query=_current_planning_input.get() or ""
+        )
 
         # 工作区现状：让规划层知道"手上已经有什么"
         # （实机踩过：agent 把 key 存进文件后，下一轮却说自己"拿不到 key"）
@@ -348,9 +409,11 @@ class ManagerAgent(BaseAgent):
         user_input: str,
         context: Optional[Context] = None,
         session_id: str = "",
-        user_id: str = "",
         profile_block: str = "",
         prior_findings: str = "",
+        allowed_tools: Optional[List[str]] = None,
+        allowed_skills: Optional[List[str]] = None,
+        context_blocks: Optional[List[Dict[str, Any]]] = None,
     ) -> PlanResult:
         """分析用户输入,产出 PlanResult(三层编排)。
 
@@ -429,10 +492,12 @@ class ManagerAgent(BaseAgent):
             user_input,
             context,
             session_id=session_id,
-            user_id=user_id,
             intent_hint=decision,
             profile_block=profile_block,
             prior_findings=prior_findings,
+            allowed_tools=allowed_tools,
+            allowed_skills=allowed_skills,
+            context_blocks=context_blocks,
         )
         if plan is not None:
             return plan
@@ -572,7 +637,45 @@ class ManagerAgent(BaseAgent):
         user_input: str,
         context: Optional[Context],
         session_id: str = "",
-        user_id: str = "",
+        intent_hint: Optional[IntentDecision] = None,
+        profile_block: str = "",
+        prior_findings: str = "",
+        allowed_tools: Optional[List[str]] = None,
+        allowed_skills: Optional[List[str]] = None,
+        context_blocks: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[PlanResult]:
+        """L2 规划层（受限版入口）。
+
+        受限参数通过 contextvar 传下去，作用域仅限本次规划：
+        - `allowed_tools`  —— planner 只能看到这些工具（schema 枚举也变）
+        - `allowed_skills` —— 只注入这些技能
+        - `context_blocks` —— 用装配好的上下文块替代主对话全量历史
+        """
+        tokens = []
+        try:
+            tokens.append(_plan_allowed_tools.set(allowed_tools))
+            tokens.append(_plan_allowed_skills.set(allowed_skills))
+            tokens.append(_plan_context_blocks.set(context_blocks))
+            return await self._llm_plan_inner(
+                user_input,
+                context,
+                session_id=session_id,
+                intent_hint=intent_hint,
+                profile_block=profile_block,
+                prior_findings=prior_findings,
+            )
+        finally:
+            for token in reversed(tokens):
+                try:
+                    token.var.reset(token)
+                except Exception:
+                    pass
+
+    async def _llm_plan_inner(
+        self,
+        user_input: str,
+        context: Optional[Context],
+        session_id: str = "",
         intent_hint: Optional[IntentDecision] = None,
         profile_block: str = "",
         prior_findings: str = "",
@@ -587,21 +690,28 @@ class ManagerAgent(BaseAgent):
 
         # 读取历史教训 hints,拼到 user_input 前面
         enriched_input = await self._enrich_with_hints(
-            user_input, session_id=session_id, user_id=user_id
+            user_input, session_id=session_id
         )
 
         # 用户画像(长期记忆):**常驻注入**,不依赖 query 命中
         if not profile_block:
-            profile_block = self.profile_block(user_id)
+            profile_block = self.profile_block()
 
         try:
-            llm_plan = await self.think_json(
-                self._build_user_prompt(
-                    enriched_input, context, intent_hint, profile_block,
-                    prior_findings=prior_findings,
-                ),
-                self.plan_schema,
-            )
+            # 让 system_prompt() 知道"这一轮在规划什么" —— 技能召回要用。
+            # 用 contextvar 而不是实例属性：ManagerAgent 是每 session 一个实例，
+            # 同 session 并发两个请求时实例属性会串。
+            _plan_token = _current_planning_input.set(enriched_input)
+            try:
+                llm_plan = await self.think_json(
+                    self._build_user_prompt(
+                        enriched_input, context, intent_hint, profile_block,
+                        prior_findings=prior_findings,
+                    ),
+                    self.plan_schema,
+                )
+            finally:
+                _current_planning_input.reset(_plan_token)
         except Exception as e:
             self.logger.error("Manager", f"LLM 规划失败: {e}")
             return PlanResult(
@@ -620,6 +730,28 @@ class ManagerAgent(BaseAgent):
                 if s.name == skill_name:
                     selected_skill = s
                     break
+            if selected_skill is None:
+                self.logger.warning(
+                    "Manager", f"选了不存在的技能: {skill_name}"
+                )
+            else:
+                # 选了但**不在召回详情里** → 它只有名字，没有方法细节。
+                # 记一笔，用来量"召回准不准"（docs/18 F0-3 的观测点）。
+                try:
+                    recalled = {
+                        s.name
+                        for s in self.skill_store.match(
+                            enriched_input, self.SKILL_DETAIL_TOP_K
+                        )
+                    }
+                except Exception:
+                    recalled = set()
+                if skill_name not in recalled:
+                    self.logger.info(
+                        "Manager",
+                        f"选中的技能未进入召回 top-{self.SKILL_DETAIL_TOP_K}: {skill_name}"
+                        f"(只有目录信息,没有方法细节)",
+                    )
 
         plan_detail = llm_plan.get("plan_detail", "") or ""
         if selected_skill:
@@ -749,6 +881,18 @@ class ManagerAgent(BaseAgent):
                 "## 前几轮已经拿到的结果(不要重复查这些,继续往下做)\n"
                 + prior_findings.strip()
             )
+
+        # --- 已装配的上下文块（子智能体路径）---
+        #
+        # 有了它就用它**替代**主对话全量历史 —— 这就是"上下文按需投喂"
+        # (docs/18 §4.3)。每个块都带来源与理由。
+        blocks = _plan_context_blocks.get()
+        if blocks:
+            return self._build_from_blocks(
+                user_input, blocks, intent_hint=hint_block,
+                findings_block=findings_block,
+            )
+
         prefix = "\n\n".join(
             x for x in (
                 system_block, hint_block, summary_block, profile_block, findings_block
@@ -785,6 +929,40 @@ class ManagerAgent(BaseAgent):
         lines.append(f"本次用户输入: {user_input}")
         lines.append("请结合对话历史与已判定的意图,规划需要调用的工具。")
         return "\n".join(lines)
+
+    def _build_from_blocks(
+        self,
+        user_input: str,
+        blocks: List[Dict[str, Any]],
+        *,
+        intent_hint: str = "",
+        findings_block: str = "",
+    ) -> str:
+        """用**已装配的上下文块**拼提示词（替代主对话全量历史）。
+
+        每块带「来源 + 为什么给你」—— 子智能体能看出哪些是必须遵守的
+        （目标与验收）、哪些只是参考（工作区清单）。
+        """
+        parts: List[str] = []
+        for block in blocks or []:
+            source = str(block.get("source") or "context")
+            why = str(block.get("why") or "")
+            content = str(block.get("content") or "").strip()
+            if not content:
+                continue
+            head = f"### [{source}]"
+            if why:
+                head += f"（{why}）"
+            parts.append(f"{head}\n{content}")
+
+        if intent_hint:
+            parts.insert(0, intent_hint)
+        if findings_block:
+            parts.append(findings_block)
+
+        parts.append(f"本次任务：{user_input}")
+        parts.append("请只使用上面列出的工具完成任务，不要调用没有授权的工具。")
+        return "\n\n".join(p for p in parts if p)
 
     @staticmethod
     def _build_intent_hint_block(intent_hint: Optional[IntentDecision]) -> str:
@@ -850,19 +1028,87 @@ class ManagerAgent(BaseAgent):
     # 它对 LLM 自己写的自由文本做关键词二次分类 —— 意图已由 L0/L1 闭集判定,
     # 再用关键词解析一遍等于把两套枚举又混到一起(见 docs/12 §3)。
 
-    def _format_skills(self, skills: List[Skill]) -> str:
+    def _format_skills(self, skills: List[Skill], query: str = "") -> str:
+        """技能注入：**两阶段召回**（目录 + 详情），不再全量倾倒。
+
+        ## 为什么要改
+
+        之前是把**所有** active 技能的 name + capability + method 全塞进
+        system prompt（`docs/17` P1-4 点了名：技能库养到 10 个就装不下，
+        而且 `SkillRegistry.match()` 这个带 top_k 的召回接口**从来没被
+        生产代码调用过** —— 是个死接口）。
+
+        全量注入的三个后果：
+        1. 提示词随技能数**线性膨胀**；
+        2. planner 在几十个技能里挑，选择成本线性上升；
+        3. 与"上下文按需投喂"的目标直接冲突。
+
+        ## 现在怎么做
+
+        - **阶段一 · 目录**：所有技能各一行「名字 + 一句话能力」，有上限
+          （`SKILL_CATALOG_LIMIT`）。planner 知道"有什么可用"，但看不到细节。
+        - **阶段二 · 详情**：按当前输入召回 top-k（`SKILL_DETAIL_TOP_K`），
+          给出完整方法与步骤 —— 这才是真正影响执行的细节。
+
+        召回用现成的 `SkillStore.match()`（会过滤被降级的技能）。
+        """
         if not skills:
             return "(暂无技能)"
-        lines = []
-        for s in skills:
-            lines.append(f"- {s.name}")
-            lines.append(f"  能力: {s.capability}")
-            lines.append(f"  方法: {s.method}")
-            lines.append("")
-        return "\n".join(lines)
+
+        # --- 阶段一：目录 ---
+        matched: List[Skill] = []
+        if query:
+            try:
+                matched = self.skill_store.match(query, self.SKILL_DETAIL_TOP_K)
+            except Exception as exc:
+                self.logger.warning("Manager", f"技能召回失败: {exc}")
+                matched = []
+
+        matched_names = {s.name for s in matched}
+        # 召回命中的排前面，其余按原顺序
+        ordered = matched + [s for s in skills if s.name not in matched_names]
+
+        catalog: List[str] = []
+        for s in ordered[: self.SKILL_CATALOG_LIMIT]:
+            cap = (s.capability or "").strip().replace("\n", " ")[:80]
+            catalog.append(f"- {s.name}" + (f": {cap}" if cap else ""))
+        if len(ordered) > self.SKILL_CATALOG_LIMIT:
+            catalog.append(
+                f"- …（另有 {len(ordered) - self.SKILL_CATALOG_LIMIT} 个技能未列出，"
+                f"需要的话说出技能名）"
+            )
+
+        parts = [
+            "可用技能目录（只有名字和一句话能力；下面是**与本次任务相关**的技能详情）：",
+            *catalog,
+        ]
+
+        # --- 阶段二：详情 ---
+        if matched:
+            parts.append("")
+            parts.append("与本次任务相关的技能详情（按方法执行）：")
+            for s in matched:
+                parts.append(f"### {s.name}")
+                if s.capability:
+                    parts.append(f"能力: {s.capability}")
+                if s.method:
+                    parts.append(f"方法: {s.method}")
+                steps = getattr(s, "steps", None) or []
+                if steps:
+                    for st in steps[:8]:
+                        tool = f" → {st.tool}" if getattr(st, "tool", "") else ""
+                        desc = (getattr(st, "description", "") or "").strip()
+                        parts.append(f"  {getattr(st, 'id', '')}.{desc}{tool}")
+                parts.append("")
+        else:
+            parts.append("")
+            parts.append("（本次没有匹配到特别相关的技能，按通用方式规划即可。）")
+
+        return "\n".join(parts)
+
 
     async def _enrich_with_hints(
-        self, user_input: str, session_id: str = "", user_id: str = ""
+        self, user_input: str, session_id: str = ""
     ) -> str:
         """读取历史教训 hints,拼到 user_input 前面
 
@@ -873,10 +1119,10 @@ class ManagerAgent(BaseAgent):
         hints: List[str] = []
 
         # 尝试语义记忆(执行经验类);画像走常驻注入,不在这里按需召回
-        if self.semantic_memory and user_id:
+        if self.semantic_memory:
             try:
                 results = await self.semantic_memory.search_context(
-                    user_input, user_id=user_id, limit=3
+                    user_input, limit=3
                 )
                 hints.extend(results)
             except Exception:
@@ -887,7 +1133,7 @@ class ManagerAgent(BaseAgent):
             hints = self.memory_store.get_skill_hints(user_input)
 
         # 会话内检索(短期记忆):只对指代型提问触发,避免噪声
-        session_hints = self._search_session_history(user_input, session_id, user_id)
+        session_hints = self._search_session_history(user_input, session_id)
         hints.extend(session_hints)
 
         if not hints:
@@ -896,7 +1142,7 @@ class ManagerAgent(BaseAgent):
         hints_text = "\n".join(f"- {h}" for h in hints)
         return f"{user_input}\n\n[历史经验提示]:\n{hints_text}"
 
-    def profile_block(self, user_id: str) -> str:
+    def profile_block(self) -> str:
         """取用户画像文本块(长期记忆常驻注入)。
 
         公开方法 —— `Agent` 用它每轮取一次,同时喂给规划器和回答生成器,
@@ -904,21 +1150,21 @@ class ManagerAgent(BaseAgent):
 
         失败一律返回空串 —— 画像读不到不能影响正常回答。
         """
-        if not user_id or not self.semantic_memory:
+        if not self.semantic_memory:
             return ""
         try:
-            return self.semantic_memory.build_profile_block(user_id)
+            return self.semantic_memory.build_profile_block()
         except Exception as exc:
             self.logger.warning("Manager", f"读取用户画像失败: {exc}")
             return ""
 
     #: 兼容旧调用名
-    def _build_profile_block(self, user_id: str) -> str:
-        return self.profile_block(user_id)
+    def _build_profile_block(self) -> str:
+        return self.profile_block()
 
     @staticmethod
     def _search_session_history(
-        user_input: str, session_id: str, user_id: str
+        user_input: str, session_id: str
     ) -> List[str]:
         """在当前会话历史里检索与本轮相关的片段。
 
@@ -930,7 +1176,7 @@ class ManagerAgent(BaseAgent):
             from core.session_memory import get_session_memory_store
 
             store = get_session_memory_store()
-            hits = store.search(session_id, user_input, limit=3, user_id=user_id or None)
+            hits = store.search(session_id, user_input, limit=3)
         except Exception:
             return []
         out: List[str] = []

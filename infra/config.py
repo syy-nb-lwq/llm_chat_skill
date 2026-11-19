@@ -143,10 +143,9 @@ class Config(BaseSettings):
     intent_l1_threshold: float = Field(0.75, description="Confidence threshold to decide at L1")
     intent_model: str = Field("", description="Optional model override for L1 (empty = main model)")
 
-    # 认证(C-01):留空表示不启用管理接口鉴权(单机个人环境默认行为)
-    owner_token: str = Field("", description="Owner token for admin APIs")
-    # 会话令牌签名密钥:留空则使用进程级随机密钥(重启后旧令牌失效)
-    session_secret: str = Field("", description="Session token signing secret")
+    # 认证：本地单用户，已无鉴权。以下两个字段仅为兼容旧 .env 保留，不再生效。
+    owner_token: str = Field("", description="[已废弃] Owner token for admin APIs")
+    session_secret: str = Field("", description="[已废弃] Session token signing secret")
 
     def validate(self) -> None:
         """Validate startup configuration."""

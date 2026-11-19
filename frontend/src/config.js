@@ -12,39 +12,22 @@ export const WS_BASE = _env.VITE_WS_BASE
   || import.meta?.env?.VITE_WS_BASE
   || 'ws://localhost:8000';
 
-// C-01: owner token(localStorage 保存,与管理接口的 OWNER_TOKEN 对应)
-const OWNER_TOKEN_KEY = 'skill_agent_owner_token';
-
+// 本地单用户：没有鉴权。以下函数保留只为兼容旧 import，均为 no-op。
 export function getOwnerToken() {
-  try {
-    return localStorage.getItem(OWNER_TOKEN_KEY) || '';
-  } catch (e) {
-    return '';
-  }
+  return '';
 }
 
 export function setOwnerToken(token) {
-  try {
-    const value = (token || '').trim();
-    if (value) {
-      localStorage.setItem(OWNER_TOKEN_KEY, value);
-    } else {
-      localStorage.removeItem(OWNER_TOKEN_KEY);
-    }
-  } catch (e) {
-    console.warn('[Auth] 无法保存 owner token', e);
-  }
+  // no-op：本地单用户无需管理令牌
 }
 
 export function authHeaders() {
-  const token = getOwnerToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return {};
 }
 
-// 统一的后端请求入口:自动附带 owner token
+// 统一的后端请求入口
 export function apiFetch(url, options = {}) {
-  const headers = { ...(options.headers || {}), ...authHeaders() };
-  return fetch(url, { ...options, headers });
+  return fetch(url, options);
 }
 
 // 兼容 .env 文件写法(即使项目当前不使用 vite)

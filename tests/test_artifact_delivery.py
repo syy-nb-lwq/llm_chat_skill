@@ -12,7 +12,6 @@ import time
 
 import pytest
 
-from infra.auth import issue_session_token
 
 
 # ============================================================
@@ -33,29 +32,25 @@ def artifact_client(tmp_path, monkeypatch):
         yield c, ws
 
 
-def _tok(user="u1"):
-    return issue_session_token(user, "s1", "c1")
-
-
-def test_download_requires_token(artifact_client):
+def test_download_needs_no_token(artifact_client):
+    """本地单用户：产物下载无需令牌。"""
     c, ws = artifact_client
     (ws / "a.txt").write_text("hi", encoding="utf-8")
-    assert c.get("/api/artifacts/a.txt").status_code == 401
+    assert c.get("/api/artifacts/a.txt").status_code == 200
 
 
-def test_download_with_header_token(artifact_client):
+def test_download_plain_path(artifact_client):
     c, ws = artifact_client
     (ws / "a.txt").write_text("hello", encoding="utf-8")
-    r = c.get("/api/artifacts/a.txt", headers={"Authorization": f"Bearer {_tok()}"})
+    r = c.get("/api/artifacts/a.txt")
     assert r.status_code == 200
     assert r.text == "hello"
 
 
-def test_download_with_query_token(artifact_client):
-    """`<a href>` 带不了 header,所以支持 `?token=`。"""
+def test_download_from_subdirectory(artifact_client):
     c, ws = artifact_client
     (ws / "b.txt").write_text("via query", encoding="utf-8")
-    r = c.get("/api/artifacts/b.txt", params={"token": _tok()})
+    r = c.get("/api/artifacts/b.txt")
     assert r.status_code == 200
     assert r.text == "via query"
 
@@ -63,7 +58,7 @@ def test_download_with_query_token(artifact_client):
 def test_download_inline_by_default(artifact_client):
     c, ws = artifact_client
     (ws / "v.mp4").write_bytes(b"\x00" * 16)
-    r = c.get("/api/artifacts/v.mp4", params={"token": _tok()})
+    r = c.get("/api/artifacts/v.mp4")
     assert r.status_code == 200
     assert r.headers["content-disposition"] == "inline"
     assert r.headers["content-type"].startswith("video/mp4")
@@ -72,7 +67,7 @@ def test_download_inline_by_default(artifact_client):
 def test_download_forced_attachment(artifact_client):
     c, ws = artifact_client
     (ws / "r.csv").write_text("a,b\n1,2\n", encoding="utf-8")
-    r = c.get("/api/artifacts/r.csv", params={"token": _tok(), "download": "true"})
+    r = c.get("/api/artifacts/r.csv", params={"download": "true"})
     assert r.status_code == 200
     assert r.headers["content-disposition"].startswith("attachment")
 
@@ -83,7 +78,7 @@ def test_download_nested_path(artifact_client):
     sub = ws / "run1"
     sub.mkdir()
     (sub / "out.txt").write_text("nested", encoding="utf-8")
-    r = c.get("/api/artifacts/run1/out.txt", params={"token": _tok()})
+    r = c.get("/api/artifacts/run1/out.txt")
     assert r.status_code == 200
     assert r.text == "nested"
 
@@ -110,7 +105,7 @@ def test_traversal_is_blocked(artifact_client, bad):
 
 def test_missing_artifact_404(artifact_client):
     c, ws = artifact_client
-    r = c.get("/api/artifacts/nope.txt", params={"token": _tok()})
+    r = c.get("/api/artifacts/nope.txt")
     assert r.status_code == 404
 
 
@@ -121,7 +116,7 @@ def test_list_artifacts(artifact_client):
     sub.mkdir()
     (sub / "two.txt").write_text("22", encoding="utf-8")
 
-    r = c.get("/api/artifacts", params={"token": _tok()})
+    r = c.get("/api/artifacts")
     assert r.status_code == 200
     data = r.json()
     names = {a["name"] for a in data["artifacts"]}

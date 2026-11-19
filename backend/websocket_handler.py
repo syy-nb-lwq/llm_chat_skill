@@ -154,14 +154,11 @@ async def dispatcher(subscription, data: Any):
     try:
         if topic.startswith("init/"):
             conn_id = topic[5:]
-            # C-01:身份由服务端签发,不再信任客户端提交的 id
-            # 假用户服务:带 user_token 则认出同一个用户,否则新建
-            # 会话恢复:带 session_id 则恢复该会话(必须属于该用户)
+            # 身份由服务端签发；会话恢复靠客户端带回的 session_id
             from backend.session import sessions
 
             identity = await sessions.issue_identity(
                 conn_id,
-                (data or {}).get("user_token", ""),
                 (data or {}).get("session_id", ""),
             )
             await push_event(conn_id, "connected", identity.to_payload())
@@ -172,13 +169,12 @@ async def dispatcher(subscription, data: Any):
             conn_id = topic[5:]
             from backend.session import sessions
 
-            identity = sessions.resolve_identity(conn_id, (data or {}).get("token", ""))
+            identity = sessions.resolve_identity(conn_id)
             if identity is None:
-                await push_event(conn_id, "error", {"message": "连接未初始化或令牌无效"})
+                await push_event(conn_id, "error", {"message": "连接未初始化"})
                 return
             session = await sessions.get_or_create(
                 identity.client_id,
-                user_id=identity.user_id,
                 session_id=identity.session_id,
             )
             user_input = (data or {}).get("content", "")
@@ -207,13 +203,12 @@ async def dispatcher(subscription, data: Any):
             conn_id = topic[6:]
             from backend.session import sessions
 
-            identity = sessions.resolve_identity(conn_id, (data or {}).get("token", ""))
+            identity = sessions.resolve_identity(conn_id)
             if identity is None:
-                await push_event(conn_id, "error", {"message": "连接未初始化或令牌无效"})
+                await push_event(conn_id, "error", {"message": "连接未初始化"})
                 return
             session = await sessions.get_or_create(
                 identity.client_id,
-                user_id=identity.user_id,
                 session_id=identity.session_id,
             )
             session.agent.reset()
@@ -230,13 +225,12 @@ async def dispatcher(subscription, data: Any):
             conn_id = topic[9:]          # "feedback/" 是 9 个字符
             from backend.session import sessions
 
-            identity = sessions.resolve_identity(conn_id, (data or {}).get("token", ""))
+            identity = sessions.resolve_identity(conn_id)
             if identity is None:
-                await push_event(conn_id, "error", {"message": "连接未初始化或令牌无效"})
+                await push_event(conn_id, "error", {"message": "连接未初始化"})
                 return
             session = await sessions.get_or_create(
                 identity.client_id,
-                user_id=identity.user_id,
                 session_id=identity.session_id,
             )
             execution_id = (data or {}).get("execution_id", "")

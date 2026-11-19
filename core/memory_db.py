@@ -30,9 +30,7 @@ class MemoryEntry:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     tags: List[str] = field(default_factory=list)
-    user_id: Optional[str] = None  # 多用户支持
     # ---- 记忆分层方案(memory_db 扩展) ----
-    tenant_id: str = "default"
     scope: str = "user"  # session | user | project | global
     confidence: float = 0.5
     importance: float = 0.5
@@ -41,6 +39,8 @@ class MemoryEntry:
     source_session_id: str = ""
     source_turn_id: str = ""
     normalized_key: str = ""
+    #: 拥有这条记忆的智能体（scope=agent 时有意义）
+    agent_id: str = ""
 
 
 #: 画像类记忆的类型集合(常驻注入只取这些)
@@ -49,9 +49,23 @@ PROFILE_MEMORY_TYPES = ("preference", "habit", "method", "constraint", "fact")
 #: `memories` 表的列顺序 —— 必须与建表语句一致(`_row_to_entry` 依赖它)
 _COLUMNS = (
     "id", "type", "content", "metadata", "embedding", "created_at", "updated_at",
-    "tags", "user_id", "tenant_id", "scope", "confidence", "importance", "status",
+    "tags", "scope", "confidence", "importance", "status",
     "supersedes_id", "source_session_id", "source_turn_id", "normalized_key",
+    "agent_id",
 )
+
+
+#: `memory_proposals` 表的列顺序（`SELECT *` 用）
+_PROPOSAL_COLUMNS = (
+    "id", "agent_id", "type", "content", "reason", "source",
+    "status", "created_at", "decided_by", "decided_at",
+)
+
+
+def _proposal_row_to_dict(row: Any) -> Dict[str, Any]:
+    """提案行 → dict（连接没开 Row factory，所以按列名顺序取）。"""
+    values = dict(zip(_PROPOSAL_COLUMNS, row))
+    return {k: ("" if v is None else v) for k, v in values.items()}
 
 
 def _fts_query(text: str) -> str:
@@ -107,8 +121,6 @@ class MemoryDB:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 tags TEXT DEFAULT '[]',
-                user_id TEXT,
-                tenant_id TEXT DEFAULT 'default',
                 scope TEXT DEFAULT 'user',
                 confidence REAL DEFAULT 0.5,
                 importance REAL DEFAULT 0.5,
@@ -116,12 +128,35 @@ class MemoryDB:
                 supersedes_id TEXT DEFAULT '',
                 source_session_id TEXT DEFAULT '',
                 source_turn_id TEXT DEFAULT '',
-                normalized_key TEXT DEFAULT ''
+                normalized_key TEXT DEFAULT '',
+                agent_id TEXT DEFAULT ''
             )
         """)
 
-        # 老库补列:ALTER TABLE ADD COLUMN 幂等
-        self._migrate_columns(cursor)
+        # 老库迁移:去掉 user_id / tenant_id 列（本地单用户化）
+        self._migrate_drop_user_columns(cursor)
+
+        # 记忆提案表:子智能体不能直接写长期记忆,只能"提议"
+        # (docs/18 §4.4)。主智能体审完才 commit。
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_proposals (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT DEFAULT '',
+                type TEXT DEFAULT 'context',
+                content TEXT NOT NULL,
+                reason TEXT DEFAULT '',
+                source TEXT DEFAULT 'agent',
+                status TEXT DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                decided_by TEXT DEFAULT '',
+                decided_at TEXT DEFAULT ''
+            )
+        """)
+        # 老库提案表迁移：去掉 user_id 列
+        self._migrate_proposals_drop_user_column(cursor)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proposals_status ON memory_proposals(status)"
+        )
 
         # FTS5 虚拟表用于全文搜索
         cursor.execute("""
@@ -146,29 +181,38 @@ class MemoryDB:
             )
         """)
 
-        # 索引
+        # 索引（去掉 user 索引）
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_memories_user_status "
-            "ON memories(user_id, status, type)"
-        )
 
         conn.commit()
         conn.close()
 
     @staticmethod
-    def _migrate_columns(cursor) -> None:
-        """给历史库补新增列。
+    def _migrate_drop_user_columns(cursor) -> None:
+        """本地单用户化：从历史库移除 user_id / tenant_id 列。
 
-        老库是 P0 之前建的,没有 tenant_id/scope/confidence 等列;
-        直接 SELECT * 会少列、_row_to_entry 会错位,所以必须先补。
+        老库这两列存在且可能有索引。SQLite 3.35+ 支持 DROP COLUMN，
+        但列上有索引时不能删，所以先删相关索引再删列。幂等：列不存在就跳过。
         """
+        cursor.execute("PRAGMA table_info(memories)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "user_id" in cols or "tenant_id" in cols:
+            for idx in ("idx_memories_user", "idx_memories_user_status"):
+                try:
+                    cursor.execute(f"DROP INDEX IF EXISTS {idx}")
+                except Exception:
+                    pass
+            for col in ("user_id", "tenant_id"):
+                if col in cols:
+                    try:
+                        cursor.execute(f"ALTER TABLE memories DROP COLUMN {col}")
+                    except Exception:
+                        pass  # 老版本 SQLite 不支持时保留列，不影响读写
+        # 补齐其余新增列（老库可能缺 agent_id 等），保证 _row_to_entry 不错位
         cursor.execute("PRAGMA table_info(memories)")
         existing = {row[1] for row in cursor.fetchall()}
         additions = {
-            "tenant_id": "TEXT DEFAULT 'default'",
             "scope": "TEXT DEFAULT 'user'",
             "confidence": "REAL DEFAULT 0.5",
             "importance": "REAL DEFAULT 0.5",
@@ -177,10 +221,24 @@ class MemoryDB:
             "source_session_id": "TEXT DEFAULT ''",
             "source_turn_id": "TEXT DEFAULT ''",
             "normalized_key": "TEXT DEFAULT ''",
+            "agent_id": "TEXT DEFAULT ''",
         }
         for column, ddl in additions.items():
             if column not in existing:
                 cursor.execute(f"ALTER TABLE memories ADD COLUMN {column} {ddl}")
+    def _migrate_proposals_drop_user_column(self, cursor) -> None:
+        """提案表去掉 user_id 列（在 CREATE 之后调用）。"""
+        cursor.execute("PRAGMA table_info(memory_proposals)")
+        pcols = {row[1] for row in cursor.fetchall()}
+        if "user_id" in pcols:
+            try:
+                cursor.execute("DROP INDEX IF EXISTS idx_proposals_user")
+            except Exception:
+                pass
+            try:
+                cursor.execute("ALTER TABLE memory_proposals DROP COLUMN user_id")
+            except Exception:
+                pass
 
     def _row_to_entry(self, row: tuple) -> MemoryEntry:
         """将数据库行转换为 MemoryEntry
@@ -197,8 +255,6 @@ class MemoryDB:
             created_at=values["created_at"],
             updated_at=values["updated_at"],
             tags=json.loads(values["tags"] or "[]"),
-            user_id=values["user_id"],
-            tenant_id=values["tenant_id"] or "default",
             scope=values["scope"] or "user",
             confidence=float(values["confidence"] if values["confidence"] is not None else 0.5),
             importance=float(values["importance"] if values["importance"] is not None else 0.5),
@@ -207,6 +263,7 @@ class MemoryDB:
             source_session_id=values["source_session_id"] or "",
             source_turn_id=values["source_turn_id"] or "",
             normalized_key=values["normalized_key"] or "",
+            agent_id=values["agent_id"] or "",
         )
 
     def add(
@@ -216,8 +273,6 @@ class MemoryDB:
         metadata: Optional[Dict[str, Any]] = None,
         embedding: Optional[List[float]] = None,
         tags: Optional[List[str]] = None,
-        user_id: Optional[str] = None,
-        tenant_id: str = "default",
         scope: str = "user",
         confidence: float = 0.5,
         importance: float = 0.5,
@@ -225,6 +280,7 @@ class MemoryDB:
         source_session_id: str = "",
         source_turn_id: str = "",
         normalized_key: str = "",
+        agent_id: str = "",
     ) -> MemoryEntry:
         """添加记忆"""
         entry = MemoryEntry(
@@ -236,8 +292,6 @@ class MemoryDB:
             created_at=datetime.now().isoformat(),
             updated_at=datetime.now().isoformat(),
             tags=tags or [],
-            user_id=user_id,
-            tenant_id=tenant_id,
             scope=scope,
             confidence=confidence,
             importance=importance,
@@ -245,6 +299,7 @@ class MemoryDB:
             source_session_id=source_session_id,
             source_turn_id=source_turn_id,
             normalized_key=normalized_key,
+            agent_id=agent_id,
         )
         
         conn = self._connect()
@@ -253,9 +308,10 @@ class MemoryDB:
         cursor.execute("""
             INSERT INTO memories (
                 id, type, content, metadata, embedding, created_at, updated_at,
-                tags, user_id, tenant_id, scope, confidence, importance, status,
-                supersedes_id, source_session_id, source_turn_id, normalized_key
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tags, scope, confidence, importance, status,
+                supersedes_id, source_session_id, source_turn_id, normalized_key,
+                agent_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             entry.id,
             entry.type,
@@ -265,8 +321,6 @@ class MemoryDB:
             entry.created_at,
             entry.updated_at,
             json.dumps(entry.tags, ensure_ascii=False),
-            entry.user_id,
-            entry.tenant_id,
             entry.scope,
             entry.confidence,
             entry.importance,
@@ -275,6 +329,7 @@ class MemoryDB:
             entry.source_session_id,
             entry.source_turn_id,
             entry.normalized_key,
+            entry.agent_id,
         ))
         
         # 更新 FTS 表
@@ -304,13 +359,16 @@ class MemoryDB:
         query: str,
         type: Optional[str] = None,
         limit: int = 10,
-        user_id: Optional[str] = None,
         types: Optional[List[str]] = None,
+        scopes: Optional[List[str]] = None,
+        agent_id: Optional[str] = None,
     ) -> List[tuple[MemoryEntry, float]]:
         """全文搜索(FTS5 MATCH + BM25 排名)
 
-        **必须传 user_id**(除非显式查全局记忆):长期记忆是用户数据,
-        不带 user_id 过滤 = 跨用户泄漏(见 docs/13 §1.2 R5)。
+        `scopes` 按作用域过滤(`session|user|project|global`)。
+        **之前 scope 是个死字段** —— 写进去没人读,检索一律不过滤
+        (docs/18 F0-4)。现在把它接上,为"智能体私有记忆"腾出位置:
+        子智能体的经验存在 `agent` 作用域,检索时按需排除。
 
         Returns:
             List of (MemoryEntry, bm25_score) —— BM25 是负值,越小越相关。
@@ -336,9 +394,13 @@ class MemoryDB:
             placeholders = ",".join("?" * len(types))
             sql += f" AND m.type IN ({placeholders})"
             params.extend(types)
-        if user_id is not None:
-            sql += " AND m.user_id = ?"
-            params.append(user_id)
+        if scopes:
+            placeholders = ",".join("?" * len(scopes))
+            sql += f" AND m.scope IN ({placeholders})"
+            params.extend(scopes)
+        if agent_id is not None:
+            sql += " AND m.agent_id = ?"
+            params.append(agent_id)
         sql += " AND m.status = 'active'"
         sql += " ORDER BY bm25_score LIMIT ?"
         params.append(limit)
@@ -364,8 +426,9 @@ class MemoryDB:
         query: str,
         type: Optional[str] = None,
         limit: int = 10,
-        user_id: Optional[str] = None,
         types: Optional[List[str]] = None,
+        scopes: Optional[List[str]] = None,
+        agent_id: Optional[str] = None,
         min_score: float = 0.2,
         candidate_limit: int = 500,
     ) -> List[tuple[MemoryEntry, float]]:
@@ -376,8 +439,7 @@ class MemoryDB:
         (trigram 分词器要求 ≥3 字符,两字中文同样无解)。
         对一个中文产品来说,只留 FTS5 等于**没有检索**。
 
-        代价是要在 Python 侧扫一遍候选行 —— 但候选只限当前用户,
-        且画像量级在百~千条,可接受。
+        代价是要在 Python 侧扫一遍候选行 —— 画像量级在百~千条,可接受。
 
         Returns:
             List of (MemoryEntry, score),score 越大越相关(0~1)
@@ -397,9 +459,13 @@ class MemoryDB:
             placeholders = ",".join("?" * len(types))
             sql += f" AND type IN ({placeholders})"
             params.extend(types)
-        if user_id is not None:
-            sql += " AND user_id = ?"
-            params.append(user_id)
+        if scopes:
+            placeholders = ",".join("?" * len(scopes))
+            sql += f" AND scope IN ({placeholders})"
+            params.extend(scopes)
+        if agent_id is not None:
+            sql += " AND agent_id = ?"
+            params.append(agent_id)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(candidate_limit)
         cursor.execute(sql, params)
@@ -440,12 +506,13 @@ class MemoryDB:
         type: Optional[str] = None,
         limit: int = 10,
         threshold: float = 0.7,
-        user_id: Optional[str] = None,
         types: Optional[List[str]] = None,
+        scopes: Optional[List[str]] = None,
+        agent_id: Optional[str] = None,
     ) -> List[tuple[MemoryEntry, float]]:
         """向量相似度搜索
 
-        同样必须按 user_id 过滤,理由见 `search_fts`。
+        `scopes` 的作用见 `search_fts`。
 
         Returns:
             List of (MemoryEntry, similarity_score) sorted by score descending
@@ -463,9 +530,13 @@ class MemoryDB:
             placeholders = ",".join("?" * len(types))
             sql += f" AND type IN ({placeholders})"
             params.extend(types)
-        if user_id is not None:
-            sql += " AND user_id = ?"
-            params.append(user_id)
+        if scopes:
+            placeholders = ",".join("?" * len(scopes))
+            sql += f" AND scope IN ({placeholders})"
+            params.extend(scopes)
+        if agent_id is not None:
+            sql += " AND agent_id = ?"
+            params.append(agent_id)
 
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -501,7 +572,6 @@ class MemoryDB:
     def get_recent(
         self,
         type: Optional[str] = None,
-        user_id: Optional[str] = None,
         limit: int = 20,
         types: Optional[List[str]] = None,
     ) -> List[MemoryEntry]:
@@ -521,9 +591,6 @@ class MemoryDB:
             sql += f" AND type IN ({placeholders})"
             params.extend(types)
 
-        if user_id is not None:
-            sql += " AND user_id = ?"
-            params.append(user_id)
 
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
@@ -536,11 +603,10 @@ class MemoryDB:
 
     def get_by_key(
         self,
-        user_id: str,
         type: str,
         normalized_key: str,
     ) -> Optional[MemoryEntry]:
-        """按 (user, type, normalized_key) 找已有记忆 —— 用于去重/冲突检测"""
+        """按 (type, normalized_key) 找已有记忆 —— 用于去重/冲突检测"""
         if not normalized_key:
             return None
         conn = self._connect()
@@ -548,10 +614,10 @@ class MemoryDB:
         cursor.execute(
             """
             SELECT * FROM memories
-            WHERE user_id = ? AND type = ? AND normalized_key = ? AND status = 'active'
+            WHERE type = ? AND normalized_key = ? AND status = 'active'
             ORDER BY created_at DESC LIMIT 1
             """,
-            (user_id, type, normalized_key),
+            (type, normalized_key),
         )
         row = cursor.fetchone()
         conn.close()
@@ -703,12 +769,116 @@ class MemoryDB:
 
     def list_memories(
         self,
-        user_id: str,
         types: Optional[List[str]] = None,
         limit: int = 50,
     ) -> List[MemoryEntry]:
-        """列出某用户的 active 记忆(给"你记住了我什么"用)"""
-        return self.get_recent(user_id=user_id, types=types, limit=limit)
+        """列出 active 记忆(给"你记住了我什么"用)"""
+        return self.get_recent(types=types, limit=limit)
+
+    # ============================================================
+    # 记忆提案（子智能体 → 主智能体 → 用户长期记忆）
+    # ============================================================
+
+    def add_proposal(
+        self,
+        content: str,
+        *,
+        agent_id: str = "",
+        type: str = "context",
+        reason: str = "",
+        source: str = "agent",
+    ) -> Dict[str, Any]:
+        """记一条"我想让系统记住这件事"的提案。
+
+        **为什么不是直接写记忆**：子智能体并发跑，同时写用户画像会互相污染
+        （docs/15 §6 的判断是对的）。所以子智能体只能提议，主智能体裁决。
+        """
+        proposal = {
+            "id": f"prop_{uuid.uuid4().hex[:12]}",
+            "agent_id": agent_id or "",
+            "type": type,
+            "content": content,
+            "reason": reason or "",
+            "source": source,
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "decided_by": "",
+            "decided_at": "",
+        }
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO memory_proposals (
+                id, agent_id, type, content, reason, source,
+                status, created_at, decided_by, decided_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proposal["id"], proposal["agent_id"],
+                proposal["type"], proposal["content"], proposal["reason"],
+                proposal["source"], proposal["status"], proposal["created_at"],
+                proposal["decided_by"], proposal["decided_at"],
+            ),
+        )
+        conn.commit()
+        conn.close()
+        self.logger.info("MemoryDB", f"记忆提案: {proposal['id']}（{proposal['source']}）")
+        return proposal
+
+    def list_proposals(
+        self,
+        *,
+        status: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """列出提案（可按状态/智能体过滤）。"""
+        conn = self._connect()
+        cursor = conn.cursor()
+        sql = "SELECT * FROM memory_proposals"
+        clauses: List[str] = []
+        params: List[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if agent_id:
+            clauses.append("agent_id = ?")
+            params.append(agent_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        conn.close()
+        return [_proposal_row_to_dict(row) for row in rows]
+
+    def get_proposal(self, proposal_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM memory_proposals WHERE id = ?", (proposal_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return _proposal_row_to_dict(row) if row else None
+
+    def decide_proposal(
+        self, proposal_id: str, *, status: str, decided_by: str = ""
+    ) -> bool:
+        """裁决提案（accepted / rejected）。"""
+        conn = self._connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE memory_proposals SET status = ?, decided_by = ?, decided_at = ? "
+            "WHERE id = ?",
+            (status, decided_by or "", datetime.now().isoformat(), proposal_id),
+        )
+        changed = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return changed
 
     def clear_all(self) -> int:
         """清空所有记忆(含 FTS 索引)。
@@ -732,30 +902,9 @@ class MemoryDB:
         self.logger.info("MemoryDB", f"清空记忆: 删除 {count} 条")
         return count
 
-    def clear_user(self, user_id: str) -> int:
-        """清空某个用户的全部记忆(不含别人的)。
-
-        Returns:
-            删除的条数
-        """
-        if not user_id:
-            return 0
-        conn = self._connect()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,))
-        count = cursor.fetchone()[0]
-        # 必须在删主表**之前**摘索引:先删主表,下面的子查询就查不到 id,
-        # FTS 行会永久残留。
-        cursor.execute(
-            "DELETE FROM memories_fts WHERE id IN "
-            "(SELECT id FROM memories WHERE user_id = ?)",
-            (user_id,),
-        )
-        cursor.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        self.logger.info("MemoryDB", f"清空用户 {user_id} 的记忆: 删除 {count} 条")
-        return count
+    def clear_user(self, user_id: str = "") -> int:
+        """兼容旧调用：本地单用户，等价于 clear_all。"""
+        return self.clear_all()
 
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""

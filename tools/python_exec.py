@@ -433,7 +433,7 @@ class PythonExecTool(Tool):
                 except Exception as exc:
                     return ToolResult(success=False, error=f"读取脚本失败: {exc}")
             else:
-                script = workdir / "main.py"
+                script = workdir / _script_name()
                 script.write_text(code, encoding="utf-8")
 
             # --- 执行 ---
@@ -524,6 +524,17 @@ class PythonExecTool(Tool):
     #: 执行器自己写的文件，永远不算产物
     _INFRA_FILES = {"main.py", "input.json"}
 
+    @classmethod
+    def _is_infra_file(cls, name: str) -> bool:
+        """执行器自己写的脚本不算产物。
+
+        脚本名带 execution 后缀（`run_xxxxxxxx.py`），所以不能只比对
+        固定文件名 —— 要同时挡住这一类。
+        """
+        if name in cls._INFRA_FILES:
+            return True
+        return name.startswith("run_") and name.endswith(".py")
+
     def _collect_artifacts(self, workdir: Path,
                            before: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
         """把**本次执行新产生/改动过**的文件复制到 workspace，并返回清单。
@@ -538,7 +549,7 @@ class PythonExecTool(Tool):
         for path in sorted(workdir.rglob("*")):
             if not path.is_file():
                 continue
-            if path.name in self._INFRA_FILES:
+            if self._is_infra_file(path.name):
                 continue  # 我们自己写的脚本/输入文件,不算产物
             if before is not None:
                 try:
@@ -609,15 +620,41 @@ def _kill_process_group(proc) -> None:
 def _run_dir() -> Path:
     """常驻执行目录（相对路径跨调用的前提）。
 
-    放在 workspace 下的 `_run`，和交付物根目录分开 ——
+    放在 workspace 下的 `_run/<作用域>`，和交付物根目录分开 ——
     根目录只放用户能下载的东西。
+
+    **作用域 = 用户 + 会话**（见 `core/exec_context.py`）：
+
+    - 同一会话内 → 目录不变 → 相对路径跨调用仍然有效（这是这个目录存在的理由）；
+    - 不同会话 / 不同用户 → 目录不同 → **并发执行不会互相覆盖 `main.py`**。
+
+    实机踩过（docs/17 P0-2）：原来是全局单例 `_run`，两个用户并发跑代码
+    时，A 的脚本被 B 的覆盖，A 实际执行了 B 的代码 —— 是数据正确性事故，
+    不是"输出串了"。
     """
-    d = _workspace_dir() / "_run"
+    from core.exec_context import current_scope_key
+
+    d = _workspace_dir() / "_run" / current_scope_key()
     try:
         d.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
     return d
+
+
+def _script_name() -> str:
+    """本次执行的脚本文件名。
+
+    **带 execution 后缀** —— 同一会话内的两次并发执行也不会抢同一个文件。
+    （workdir 是会话级的，相对路径跨调用有效；脚本文件是一次性的。）
+    """
+    from core.exec_context import get_exec_context
+
+    ctx = get_exec_context()
+    if not ctx.execution_id:
+        return "main.py"
+    return f"run_{ctx.execution_id[-8:]}.py"
+
 
 
 def _snapshot(root: Path, *, max_files: int = 20000) -> Dict[str, int]:

@@ -71,12 +71,6 @@ async def _startup():
     sessions.ttl_s = int(config.session_ttl_s)
     await register_handlers()
 
-    # 没配 SESSION_SECRET → 令牌密钥每次重启都变 → 用户被当成新用户,
-    # 表现为"刷新/重启后历史对话没了"。启动就警告,别等用户来问。
-    from infra.auth import warn_if_unstable_secret
-
-    warn_if_unstable_secret()
-
     from infra.providers.registry import init_providers_from_config
 
     init_providers_from_config()
@@ -297,61 +291,27 @@ async def get_features():
     }
 
 
-# ===== 用户(假用户服务) =====
+# ===== 用户（本地单用户，兼容旧端点） =====
+
+_LOCAL_USER = {"id": "local", "tenant_id": "default", "display_name": "本地用户"}
 
 
 @app.get("/api/users")
 async def list_users():
-    """列出用户(运维/隔离测试用)。"""
-    from core.user_service import get_user_service
-
-    users = get_user_service().list_users()
-    return {
-        "users": [
-            {
-                "id": u.id,
-                "tenant_id": u.tenant_id,
-                "display_name": u.display_name,
-                "created_at": u.created_at,
-                "last_seen_at": u.last_seen_at,
-            }
-            for u in users
-        ]
-    }
+    """本地单用户：始终只有一个人。"""
+    return {"users": [_LOCAL_USER]}
 
 
 @app.post("/api/users")
 async def create_user(payload: Optional[dict] = None):
-    """新建用户并签发用户令牌。
-
-    没有登录体系时,这个接口就是"分发 userid"的入口:
-    拿到的 user_token 交给前端存在 localStorage,之后所有连接都认这个用户。
-    """
-    from core.user_service import get_user_service
-
-    payload = payload or {}
-    service = get_user_service()
-    user = service.create(
-        display_name=payload.get("display_name", ""),
-        tenant_id=payload.get("tenant_id", "default"),
-    )
-    return {
-        "user_id": user.id,
-        "tenant_id": user.tenant_id,
-        "display_name": user.display_name,
-        "user_token": service.issue_token(user.id, user.tenant_id),
-    }
+    """兼容旧调用：不创建用户，始终返回同一个本地用户。"""
+    return dict(_LOCAL_USER)
 
 
 @app.delete("/api/users/{user_id}")
 @require_auth
 async def delete_user(user_id: str):
-    """删除用户档案(管理操作)。"""
-    from core.user_service import get_user_service
-
-    ok = get_user_service().delete(user_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail=f"user not found: {user_id}")
+    """兼容旧调用：本地用户不可删除。"""
     return {"deleted": user_id}
 
 
@@ -360,16 +320,15 @@ async def delete_user(user_id: str):
 
 @app.get("/api/sessions")
 @require_auth
-async def list_sessions(user_id: str = ""):
-    """列出会话(管理员视角,可按 user_id 过滤)。"""
+async def list_sessions():
+    """列出全部会话（本地单用户）。"""
     from core.session_memory import get_session_memory_store
 
-    rows = get_session_memory_store().list_sessions(user_id or None)
+    rows = get_session_memory_store().list_sessions()
     return {
         "sessions": [
             {
                 "session_id": r["session_id"],
-                "user_id": r["user_id"],
                 "message_count": r["message_count"],
                 "created_at": r["created_at"],
                 "updated_at": r["updated_at"],
@@ -387,23 +346,22 @@ async def get_my_session_messages(request: Request, limit: int = 200):
     (`require_auth` 验的是 owner token)。普通前端只有会话令牌,没有 owner token,
     一旦配了 `OWNER_TOKEN`,前端就取不到自己的历史了。
 
-    这里和记忆面板用同一套鉴权:`user_id` 和 `session_id` **只从令牌里取**,
-    不接受 query 参数 —— 否则传个别人的 session_id 就能读别人的对话。
+    session_id 从 query 参数取（本地单用户，无越权问题）。
     """
     from core.session_memory import get_session_memory_store
 
     identity = _resolve_user_and_session(request)
-    user_id = identity["user_id"]
     session_id = identity["session_id"]
     if not session_id:
-        raise HTTPException(status_code=400, detail="令牌里没有 session_id")
+        # 还没拿到 session_id（首轮连接）—— 空历史比 400 更合适
+        return {"session_id": "", "messages": [], "count": 0}
 
     store = get_session_memory_store()
     if not store.session_exists(session_id):
         # 会话还没落盘(全新会话)—— 空历史比 404 更合适,前端不用特殊处理
         return {"session_id": session_id, "messages": [], "count": 0}
 
-    msgs = store.get_messages(session_id, limit=max(0, min(limit, 1000)), user_id=user_id)
+    msgs = store.get_messages(session_id, limit=max(0, min(limit, 1000)))
     return {
         "session_id": session_id,
         "count": len(msgs),
@@ -416,17 +374,14 @@ async def get_my_session_messages(request: Request, limit: int = 200):
 
 @app.get("/api/sessions/{session_id}/messages")
 @require_auth
-async def get_session_messages(session_id: str, limit: int = 100, user_id: str = ""):
-    """取某个会话的消息(管理员接口,短期记忆内容全量保留)。
-
-    ``user_id`` 可选:传了就只返回该用户的,用于隔离校验。
-    """
+async def get_session_messages(session_id: str, limit: int = 100):
+    """取某个会话的消息(短期记忆内容全量保留)。"""
     from core.session_memory import get_session_memory_store
 
     store = get_session_memory_store()
     if not store.session_exists(session_id):
         raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
-    msgs = store.get_messages(session_id, limit=limit or 0, user_id=user_id or None)
+    msgs = store.get_messages(session_id, limit=limit or 0)
     return {
         "session_id": session_id,
         "messages": [m.to_dict() for m in msgs],
@@ -450,25 +405,17 @@ async def delete_session(session_id: str):
 
 @app.get("/api/memories")
 @require_auth
-async def list_memories(user_id: str = "", limit: int = 50):
-    """「你记住了我什么」:列出某用户的画像条目。
-
-    `user_id` 必填 —— 长期记忆是用户数据,不给默认值就查全部
-    等于把别人的画像摊开(docs/13 §2.9)。
-    """
-    if not user_id:
-        raise HTTPException(status_code=400, detail="user_id required")
+async def list_memories(limit: int = 50):
+    """「你记住了我什么」：列出画像条目（本地单用户）。"""
 
     from core.memory_db import PROFILE_MEMORY_TYPES
     from core.semantic_memory import get_semantic_memory
 
     entries = get_semantic_memory().get_recent(
-        user_id=user_id,
         types=list(PROFILE_MEMORY_TYPES),
         limit=limit,
     )
     return {
-        "user_id": user_id,
         "count": len(entries),
         "memories": [
             {
@@ -621,11 +568,11 @@ async def reload_skills():
 # ===== M1-06 / M1-08: TeachingSession API =====
 
 @app.get("/api/teachings")
-async def list_teachings(user_id: str = "default", session_id: str = "default"):
+async def list_teachings(session_id: str = "default"):
     """列出当前 session 上的活跃教学会话(用于重复技能决策 UI)。"""
     from agents.teaching_session import get_teaching_store
     store = get_teaching_store()
-    ts = store.find_active_for(user_id, session_id)
+    ts = store.find_active_for(session_id)
     if not ts:
         return {"active": None}
     return {
@@ -643,10 +590,10 @@ async def list_teachings(user_id: str = "default", session_id: str = "default"):
 
 @app.post("/api/teachings/cancel")
 @require_auth
-async def cancel_teaching(user_id: str = "default", session_id: str = "default"):
+async def cancel_teaching(session_id: str = "default"):
     from agents.skill_trainer import SkillTrainer
     t = SkillTrainer()
-    ok = t.cancel(user_id, session_id)
+    ok = t.cancel(session_id)
     return {"cancelled": ok}
 
 
@@ -654,13 +601,12 @@ async def cancel_teaching(user_id: str = "default", session_id: str = "default")
 @require_auth
 async def choose_teaching_decision(
     choice: str,
-    user_id: str = "default",
     session_id: str = "default",
 ):
     """处理用户在重复技能上的决策:reuse / update_new / cancel。"""
     from agents.teaching_session import get_teaching_store, TeachingStatus
     store = get_teaching_store()
-    ts = store.find_active_for(user_id, session_id)
+    ts = store.find_active_for(session_id)
     if not ts:
         return {"ok": False, "error": "no active teaching"}
     ts.user_choice = choice
@@ -677,11 +623,11 @@ async def choose_teaching_decision(
 
 @app.post("/api/teachings/confirm")
 @require_auth
-async def confirm_teaching(user_id: str = "default", session_id: str = "default"):
+async def confirm_teaching(session_id: str = "default"):
     """用户在草稿 UI 上点确认发布时调用。"""
     from agents.skill_trainer import SkillTrainer
     t = SkillTrainer()
-    ok, msg, skill = t.confirm_and_publish(user_id, session_id)
+    ok, msg, skill = t.confirm_and_publish(session_id)
     if not ok:
         return {"ok": False, "error": msg}
     return {
@@ -1100,39 +1046,8 @@ def _resolve_artifact(name: str) -> Path:
 
 
 def _resolve_artifact_user(request: Request) -> str:
-    """产物接口的鉴权：**接受 header 或 `?token=`**。
-
-    ## 为什么要特殊对待
-
-    浏览器直接打开 `<a href="/api/artifacts/x.mp4">` 时**带不了自定义头**,
-    所以下载链接只能把令牌放进 URL。这是权衡:
-
-    - 好处:用户点一下就预览/下载,不用额外弹窗
-    - 代价:令牌会出现在浏览器历史、代理日志、Referer 里
-
-    所以:
-    1. 这个口子**只给产物接口**用,管理接口仍然只认 header
-    2. 令牌本来就绑定 client_id + session,泄露后影响面有限
-    3. 真要更严,应该发**短期一次性下载凭证**而不是复用会话令牌
-       (记在 docs/11 的待办里)
-    """
-    from infra.auth import verify_session_token, verify_user_token
-
-    token = ""
-    if hasattr(request, "headers"):
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:].strip()
-    if not token:
-        token = (request.query_params.get("token") or "").strip()
-
-    payload = verify_session_token(token) or verify_user_token(token)
-    if not payload or not payload.get("user_id"):
-        raise HTTPException(
-            status_code=401,
-            detail="需要 Authorization: Bearer <会话令牌> 或 ?token=<令牌>",
-        )
-    return str(payload["user_id"])
+    """产物接口（本地单用户，无鉴权）。恒返回固定值。"""
+    return "local"
 
 
 @app.get("/api/artifacts")
@@ -1202,13 +1117,8 @@ async def download_artifact(name: str, request: Request, download: bool = False)
 #
 # 「你记住了我什么 / 忘掉这件事」
 #
-# **用户级接口,不是管理员接口。** 所以不能用 `require_auth`
-# (那是 owner token,管的是删技能/审批补丁这类管理操作)。
-# 这里校验的是**会话令牌 / 用户令牌** —— 两者都是 HMAC 签名的,
-# payload 里带 user_id,服务端据此认定"你只能看自己的画像"。
-#
-# **最重要的一条**:user_id **只能从令牌里取**,绝不能从 query 参数取。
-# 否则用户 A 传个 user_id=B 就能看/删 B 的画像 —— 那是越权。
+# 本地单用户：没有令牌、没有用户切换。session_id 从 query 参数取，
+# 只用于定位"当前会话"的记忆，不存在跨用户越权问题。
 
 #: 画像类型的展示标签(与 build_profile_block 保持一致)
 _PROFILE_LABELS = {
@@ -1221,38 +1131,21 @@ _PROFILE_LABELS = {
 
 
 def _resolve_user_id(request: Request) -> str:
-    """从请求头里的令牌解析出 user_id;无效则 401。
-
-    接受两种令牌:
-    - **会话令牌**(WS 连接期间签发):payload 带 user_id/session_id/client_id
-    - **用户令牌**(长期凭证):payload 带 user_id/tenant_id
-    """
-    return _resolve_user_and_session(request)["user_id"]
+    """本地单用户，恒返回固定值（兼容旧调用）。"""
+    return "local"
 
 
 def _resolve_user_and_session(request: Request) -> dict:
-    """从令牌里取身份(user_id + session_id)。**只信任令牌,不信任 query 参数。**
+    """从 query 参数取 session_id（本地单用户，无令牌）。
 
     Returns:
-        {"user_id": str, "session_id": str, "client_id": str}
+        {"user_id": "local", "session_id": str, "client_id": str}
     """
-    from infra.auth import verify_session_token, verify_user_token
-
-    auth = ""
-    if hasattr(request, "headers"):
-        auth = request.headers.get("authorization", "")
-    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
-
-    payload = verify_session_token(token) or verify_user_token(token)
-    if not payload or not payload.get("user_id"):
-        raise HTTPException(
-            status_code=401,
-            detail="需要 Authorization: Bearer <会话令牌>",
-        )
+    session_id = (request.query_params.get("session_id") or "").strip()
     return {
-        "user_id": str(payload["user_id"]),
-        "session_id": str(payload.get("session_id") or ""),
-        "client_id": str(payload.get("client_id") or ""),
+        "user_id": "local",
+        "session_id": session_id,
+        "client_id": session_id,
     }
 
 
@@ -1276,8 +1169,8 @@ async def memory_overview(request: Request):
     from pathlib import Path as _Path
 
     identity = _resolve_user_and_session(request)
-    user_id = identity["user_id"]
     session_id = identity["session_id"]
+    user_id = "local"
 
     out: Dict[str, Any] = {"user_id": user_id, "session_id": session_id}
 
@@ -1287,7 +1180,7 @@ async def memory_overview(request: Request):
         from core.session_memory import get_session_memory_store
 
         recent = get_session_memory_store().get_recent_messages(
-            session_id, limit=40, user_id=user_id
+            session_id, limit=40
         ) or []
         short["count"] = len(recent)
         short["recent"] = [
@@ -1307,8 +1200,8 @@ async def memory_overview(request: Request):
         from core.semantic_memory import get_semantic_memory
 
         smem = get_semantic_memory()
-        entries = smem.get_profile(user_id, limit=100) or []
-        block = smem.build_profile_block(user_id) or ""
+        entries = smem.get_profile(limit=100) or []
+        block = smem.build_profile_block() or ""
         profile["count"] = len(entries)
         profile["injected_chars"] = len(block)
         profile["entries"] = [
@@ -1418,8 +1311,8 @@ async def get_profile(request: Request):
     user_id = _resolve_user_id(request)
     store = get_semantic_memory()
 
-    entries = store.get_profile(user_id, limit=100)
-    block = store.build_profile_block(user_id)
+    entries = store.get_profile(limit=100)
+    block = store.build_profile_block()
 
     items = []
     for e in entries:
@@ -1458,7 +1351,7 @@ async def forget_profile_entry(entry_id: str, request: Request):
 
     # **先确认这条属于该用户** —— 不然可以拿别的用户的 entry_id 来删
     owned = [
-        e for e in store.get_profile(user_id, limit=1000)
+        e for e in store.get_profile(limit=1000)
         if e.id == entry_id
     ]
     if not owned:
@@ -1479,7 +1372,7 @@ async def forget_all_profile(request: Request):
     user_id = _resolve_user_id(request)
     store = get_semantic_memory()
 
-    entries = store.get_profile(user_id, limit=1000)
+    entries = store.get_profile(limit=1000)
     forgotten, failed = [], []
     for e in entries:
         if store.forget(e.id):

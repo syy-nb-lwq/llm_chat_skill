@@ -70,11 +70,9 @@ class Agent:
     def __init__(
         self,
         session_id: str = "default",
-        user_id: str = "default",
         persist_session: bool = False,
     ):
         self.session_id = session_id
-        self.user_id = user_id
         self.logger = get_logger()
         self.trace_id = f"session-{session_id}-{int(time.time())}"
 
@@ -306,9 +304,9 @@ class Agent:
         if self._profile_cache is not None:
             return self._profile_cache
         block = ""
-        if self.persist_memory and self.user_id:
+        if self.persist_memory:
             try:
-                block = self.manager.profile_block(self.user_id)
+                block = self.manager.profile_block()
             except Exception as exc:
                 self.logger.warning("Agent", f"读取用户画像失败: {exc}")
         self._profile_cache = block
@@ -434,11 +432,23 @@ class Agent:
         try:
             from core.trace import TurnTrace
 
+            scope = ""
+            agent_id = "main"
+            try:
+                from core.exec_context import get_exec_context
+
+                ctx = get_exec_context()
+                scope = ctx.scope_key
+                agent_id = ctx.agent_id or "main"
+            except Exception:
+                pass
+
             return TurnTrace(
                 trace_id=self.trace_id,
-                user_id=self.user_id,
                 session_id=self.session_id,
                 turn_id=self.turn_id,
+                scope=scope,
+                agent_id=agent_id,
             )
         except Exception:
             return None
@@ -463,7 +473,7 @@ class Agent:
         docs/13 §2.4:写入必须异步且失败只记日志 —— 记忆是"锦上添花",
         不能因为它把回答拖慢或拖垮。
         """
-        if not self.persist_memory or not self.user_id or not user_input:
+        if not self.persist_memory or not user_input:
             return
         try:
             from core.memory_writer import get_memory_writer
@@ -471,7 +481,6 @@ class Agent:
             task = asyncio.create_task(
                 get_memory_writer().record_turn(
                     user_input,
-                    user_id=self.user_id,
                     session_id=self.session_id,
                     turn_id=self.turn_id,
                 )
@@ -506,7 +515,7 @@ class Agent:
 
             self._session_store = get_session_memory_store()
             store = self._session_store
-            store.ensure_session(self.session_id, self.user_id)
+            store.ensure_session(self.session_id)
             self.context.sink = self._persist_message
 
             # reset 之前的内容不装回工作上下文(但仍保留在库里、可检索)
@@ -534,7 +543,7 @@ class Agent:
 
             # 只恢复"尚未被摘要覆盖"的消息,取最近若干条
             restored = store.get_recent_messages(
-                self.session_id, limit=session_restore_limit(), user_id=self.user_id
+                self.session_id, limit=session_restore_limit()
             )
             for msg in restored:
                 if msg.seq <= skip_before:
@@ -576,7 +585,6 @@ class Agent:
         try:
             seq = self._session_store.append_message(
                 session_id=self.session_id,
-                user_id=self.user_id,
                 role=msg.role,
                 content=msg.content,
                 turn_id=self.turn_id,
@@ -600,7 +608,6 @@ class Agent:
                 self.context,
                 self._session_store,
                 session_id=self.session_id,
-                user_id=self.user_id,
                 logger=self.logger,
             )
         except Exception as exc:
@@ -617,12 +624,25 @@ class Agent:
 
         # M0-01:每次 handle 生成新的 execution_id,同 session 多轮不互相覆盖
         self.identity = IdentityContext(
-            user_id=self.user_id,
             session_id=self.session_id,
         )
         self.execution_id = self.identity.execution_id
         self.turn_id = self.identity.turn_id
         self.trace_id = self.identity.execution_id
+
+        # 执行上下文：这一轮"是谁在跑、跑在哪个隔离空间"。
+        # 工具层（python_exec / write_script）靠它决定写入哪个目录 ——
+        # 没有它就是全局单例目录,并发时会串味（docs/17 P0-2）。
+        try:
+            from core.exec_context import set_exec_context
+
+            _exec_tokens = set_exec_context(
+                session_id=self.session_id,
+                execution_id=self.execution_id,
+                agent_id="main",
+            )
+        except Exception:
+            _exec_tokens = ()
 
         # 会话过长时先滚动一次摘要(原文不删除,只是给 LLM 一个压缩视图)
         await self._maybe_rollup()
@@ -766,7 +786,6 @@ class Agent:
                 user_input,
                 self.context,
                 session_id=self.session_id,
-                user_id=self.user_id,
                 profile_block=profile_block,
             )
             if trace is not None:
@@ -931,7 +950,6 @@ class Agent:
                     user_input,
                     self.context,
                     session_id=self.session_id,
-                    user_id=self.user_id,
                     profile_block=profile_block,
                     prior_findings=prior_findings,
                 )
@@ -940,9 +958,8 @@ class Agent:
 
             # 让子智能体知道"这是谁在问"、"前面聊到哪了"
             try:
-                from core.subagents import set_current_context, set_current_user
+                from core.subagents import set_current_context
 
-                set_current_user(self.user_id)
                 # 共享主对话上下文 —— 否则子智能体不知道"发"指的是什么。
                 # 给**快照**而不是本体:子智能体是并发跑的(gather),
                 # 共享本体会看到互相穿插的消息列表。快照不带 sink,
@@ -1038,7 +1055,6 @@ class Agent:
                 # M0-01:四级标识
                 execution_id=self.execution_id,
                 turn_id=self.turn_id,
-                user_id=self.identity.user_id if self.identity else self.user_id,
                 session_id=self.identity.session_id if self.identity else self.session_id,
             )
             # 工具自修复：自己造的工具反复失败 → 让它自己修一版
@@ -1076,6 +1092,13 @@ class Agent:
             trace_error = str(e)
             raise
         finally:
+            # 还原执行上下文（子智能体各自设置自己的 agent_id）
+            try:
+                from core.exec_context import reset_exec_context
+
+                reset_exec_context(_exec_tokens)
+            except Exception:
+                pass
             # 统一 await 所有异步 emit,保证事件按 emit 顺序完成
             if pending_async:
                 results = await asyncio.gather(*pending_async, return_exceptions=True)

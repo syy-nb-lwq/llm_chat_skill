@@ -75,6 +75,15 @@ RISK_LOW = "low"
 RISK_MEDIUM = "medium"
 RISK_HIGH = "high"
 
+#: 工具可见性（docs/18 §10.2）
+#:
+#: `global` —— 全局可见（**当前默认**：自造的工具默认进全局 ToolHub）
+#: `owner`  —— 只有 owner_agent_id 相同的智能体可见
+#: `tenant` —— 同租户可见（tenant 暂用 user 近似）
+VISIBILITY_GLOBAL = "global"
+VISIBILITY_OWNER = "owner"
+VISIBILITY_TENANT = "tenant"
+
 
 class ToolSpecError(Exception):
     """提案不合法。"""
@@ -162,6 +171,18 @@ class ToolProposal:
     source: str = "agent"
     validation: Dict[str, Any] = field(default_factory=dict)
     blocked_reason: str = ""
+    # --- 归属 ---
+    #
+    # 之前**没有归属**：提案存进 `memory/tools/proposals/*.json`，
+    # 发布后进**全局单例** ToolHub，谁造的、能不能禁用，全都不知道。
+    #
+    # 现在的决定（docs/18 §10.2）：默认 `visibility="global"` —— 自造的工具
+    # 默认全局可见。但 owner 必须落盘：
+    #   - 能回答"这个工具是谁造的"
+    #   - 能一键禁用某个 owner 的全部工具
+    #   - 将来要收紧成按用户可见时，**只改过滤逻辑，不做数据迁移**
+    owner_agent_id: str = ""
+    visibility: str = VISIBILITY_GLOBAL   # global | owner | tenant
 
     def __post_init__(self):
         if not self.id:
@@ -175,6 +196,31 @@ class ToolProposal:
         if self.implementation and self.kind in ("", "http") and not (self.url_template or "").strip():
             self.kind = "code"
         self.params = normalize_params(self.params)
+        # owner 缺省时从当前执行上下文补（谁在造就是谁的）
+        if not self.owner_agent_id:
+            try:
+                from core.exec_context import get_exec_context
+
+                ctx = get_exec_context()
+                self.owner_agent_id = ctx.agent_id or ""
+            except Exception:
+                pass
+        self.visibility = (self.visibility or VISIBILITY_GLOBAL).strip().lower()
+
+    def is_visible_to(self, user_id: str = "", agent_id: str = "") -> bool:
+        """这个工具对某个调用者可见吗？
+
+        本地单用户：owner/tenant 可见性都退化为按 agent_id 判断。
+        - `global`：都可见（当前默认）
+        - `owner`/`tenant`：只对创建它的智能体可见
+        """
+        vis = (self.visibility or VISIBILITY_GLOBAL).strip().lower()
+        if vis == VISIBILITY_GLOBAL:
+            return True
+        if vis in (VISIBILITY_OWNER, VISIBILITY_TENANT):
+            return bool(agent_id) and agent_id == self.owner_agent_id
+        return True
+
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -560,6 +606,32 @@ def materialize_code(proposal: ToolProposal) -> str:
     return rel
 
 
+def _register_with_owner(hub, tool, proposal: "ToolProposal") -> None:
+    """把工具注册进 hub，并带上归属信息。
+
+    **兼容旧 hub**：`register_python_tool` 现在多三个可选参数（owner/visibility），
+    但 hub 是可插拔的（测试替身、第三方实现、MCP 桥接），不能假设它一定支持。
+    所以先看签名，不支持就退回老调用方式。
+    """
+    supports_owner = True
+    try:
+        import inspect
+
+        params = inspect.signature(hub.register_python_tool).parameters
+        supports_owner = "owner_agent_id" in params
+    except (TypeError, ValueError, AttributeError):
+        supports_owner = False
+
+    if supports_owner:
+        hub.register_python_tool(
+            tool,
+            owner_agent_id=proposal.owner_agent_id,
+            visibility=proposal.visibility,
+        )
+    else:
+        hub.register_python_tool(tool)
+
+
 def publish(proposal: ToolProposal, hub, *, reviewer: str = "auto") -> Tuple[bool, str]:
     """把提案注册进 ToolHub。
 
@@ -572,7 +644,7 @@ def publish(proposal: ToolProposal, hub, *, reviewer: str = "auto") -> Tuple[boo
         return False, f"构造工具失败：{exc}"
 
     try:
-        hub.register_python_tool(tool)
+        _register_with_owner(hub, tool, proposal)
     except ValueError as exc:
         return False, str(exc)
     except Exception as exc:
@@ -610,7 +682,7 @@ def restore_published(hub) -> int:
             continue
         try:
             tool = build_tool(proposal)
-            hub.register_python_tool(tool)
+            _register_with_owner(hub, tool, proposal)
             restored += 1
         except Exception as exc:
             logger.warning(

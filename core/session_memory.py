@@ -47,7 +47,6 @@ class SessionMessage:
 
     id: str
     session_id: str
-    user_id: str
     seq: int
     turn_id: str
     role: str
@@ -60,7 +59,6 @@ class SessionMessage:
         return {
             "id": self.id,
             "session_id": self.session_id,
-            "user_id": self.user_id,
             "seq": self.seq,
             "turn_id": self.turn_id,
             "role": self.role,
@@ -75,7 +73,6 @@ class SessionSummary:
     """一条滚动摘要(覆盖 session 的前 cover_until_seq 条消息)。"""
 
     session_id: str
-    user_id: str
     cover_until_seq: int
     summary: str
     created_at: str = ""
@@ -85,7 +82,6 @@ class SessionSummary:
         return {
             "id": self.id,
             "session_id": self.session_id,
-            "user_id": self.user_id,
             "cover_until_seq": self.cover_until_seq,
             "summary": self.summary,
             "created_at": self.created_at,
@@ -252,8 +248,6 @@ class SessionMemoryStore:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id    TEXT PRIMARY KEY,
-                tenant_id     TEXT NOT NULL DEFAULT 'default',
-                user_id       TEXT NOT NULL,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 reset_at_seq  INTEGER NOT NULL DEFAULT 0,
                 created_at    TEXT NOT NULL,
@@ -264,8 +258,6 @@ class SessionMemoryStore:
             CREATE TABLE IF NOT EXISTS session_messages (
                 id         TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
-                tenant_id  TEXT NOT NULL DEFAULT 'default',
-                user_id    TEXT NOT NULL,
                 seq        INTEGER NOT NULL,
                 turn_id    TEXT NOT NULL DEFAULT '',
                 role       TEXT NOT NULL,
@@ -291,16 +283,10 @@ class SessionMemoryStore:
             "CREATE INDEX IF NOT EXISTS idx_sess_msg "
             "ON session_messages(session_id, seq)"
         )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sess_msg_user "
-            "ON session_messages(user_id, created_at)"
-        )
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS session_summaries (
                 id               TEXT PRIMARY KEY,
                 session_id       TEXT NOT NULL,
-                tenant_id        TEXT NOT NULL DEFAULT 'default',
-                user_id          TEXT NOT NULL,
                 cover_until_seq  INTEGER NOT NULL,
                 summary          TEXT NOT NULL,
                 created_at       TEXT NOT NULL
@@ -310,34 +296,55 @@ class SessionMemoryStore:
             "CREATE INDEX IF NOT EXISTS idx_sess_summary "
             "ON session_summaries(session_id, cover_until_seq)"
         )
+        # 迁移：本地单用户化，从历史库移除 user_id / tenant_id 列
+        self._migrate_drop_user_columns(cursor)
         conn.commit()
+
+    @staticmethod
+    def _migrate_drop_user_columns(cursor) -> None:
+        """从三张历史表移除 user_id / tenant_id 列（先删依赖索引）。"""
+        for table in ("sessions", "session_messages", "session_summaries"):
+            try:
+                cols = {r[1] for r in cursor.execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall()}
+            except Exception:
+                continue
+            if "user_id" not in cols and "tenant_id" not in cols:
+                continue
+            if table == "session_messages":
+                try:
+                    cursor.execute("DROP INDEX IF EXISTS idx_sess_msg_user")
+                except Exception:
+                    pass
+            for col in ("user_id", "tenant_id"):
+                if col in cols:
+                    try:
+                        cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+                    except Exception:
+                        pass  # 老 SQLite 不支持 DROP COLUMN 时保留，读写仍正常
 
     # ===== 会话 =====
 
-    def ensure_session(
-        self,
-        session_id: str,
-        user_id: str,
-        tenant_id: str = DEFAULT_TENANT,
-    ) -> None:
+    def ensure_session(self, session_id: str) -> None:
         """登记会话(幂等)。"""
         conn = self._connect()
         try:
             conn.execute(
                 """
                 INSERT INTO sessions
-                    (session_id, tenant_id, user_id, message_count, created_at, updated_at)
-                VALUES (?, ?, ?, 0, ?, ?)
+                    (session_id, message_count, created_at, updated_at)
+                VALUES (?, 0, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET updated_at = excluded.updated_at
                 """,
-                (session_id, tenant_id, user_id, _now(), _now()),
+                (session_id, _now(), _now()),
             )
             conn.commit()
         finally:
             conn.close()
 
-    def session_exists(self, session_id: str, user_id: Optional[str] = None) -> bool:
-        """会话是否存在。带 user_id 时同时校验归属 —— 防止越权恢复他人会话。"""
+    def session_exists(self, session_id: str) -> bool:
+        """会话是否存在（本地单用户，无归属校验）。"""
         if not session_id:
             return False
         conn = self._connect()
@@ -346,30 +353,16 @@ class SessionMemoryStore:
                 "SELECT session_id FROM sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
-            if row is None:
-                return False
-            if user_id:
-                row2 = conn.execute(
-                    "SELECT session_id FROM sessions WHERE session_id = ? AND user_id = ?",
-                    (session_id, user_id),
-                ).fetchone()
-                return row2 is not None
-            return True
+            return row is not None
         finally:
             conn.close()
 
-    def list_sessions(self, user_id: Optional[str] = None) -> List[Dict]:
+    def list_sessions(self) -> List[Dict]:
         conn = self._connect()
         try:
-            if user_id:
-                rows = conn.execute(
-                    "SELECT * FROM sessions WHERE user_id = ? ORDER BY updated_at DESC",
-                    (user_id,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM sessions ORDER BY updated_at DESC"
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM sessions ORDER BY updated_at DESC"
+            ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
@@ -429,11 +422,9 @@ class SessionMemoryStore:
     def append_message(
         self,
         session_id: str,
-        user_id: str,
         role: str,
         content: str,
         turn_id: str = "",
-        tenant_id: str = DEFAULT_TENANT,
         tool_tasks: Optional[List[Dict]] = None,
     ) -> int:
         """追加一条消息,返回分配的 ``seq``(会话内绝对序号)。
@@ -453,10 +444,10 @@ class SessionMemoryStore:
                 conn.execute(
                     """
                     INSERT INTO sessions
-                        (session_id, tenant_id, user_id, message_count, created_at, updated_at)
-                    VALUES (?, ?, ?, 0, ?, ?)
+                        (session_id, message_count, created_at, updated_at)
+                    VALUES (?, 0, ?, ?)
                     """,
-                    (session_id, tenant_id, user_id, _now(), _now()),
+                    (session_id, _now(), _now()),
                 )
                 seq = 0
             else:
@@ -466,12 +457,12 @@ class SessionMemoryStore:
             conn.execute(
                 """
                 INSERT INTO session_messages
-                    (id, session_id, tenant_id, user_id, seq, turn_id,
+                    (id, session_id, seq, turn_id,
                      role, content, tool_tasks, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    msg_id, session_id, tenant_id, user_id, seq, turn_id,
+                    msg_id, session_id, seq, turn_id,
                     role, content or "", _dump_tool_tasks(tool_tasks), _now(),
                 ),
             )
@@ -488,7 +479,6 @@ class SessionMemoryStore:
         self,
         session_id: str,
         limit: int = 50,
-        user_id: Optional[str] = None,
         from_seq: int = 0,
     ) -> List[SessionMessage]:
         """取消息(按 seq 升序)。
@@ -500,9 +490,6 @@ class SessionMemoryStore:
         try:
             sql = "SELECT * FROM session_messages WHERE session_id = ? AND seq > ?"
             params: List[Any] = [session_id, from_seq]
-            if user_id:
-                sql += " AND user_id = ?"
-                params.append(user_id)
             sql += " ORDER BY seq ASC"
             if limit and limit > 0:
                 sql += " LIMIT ?"
@@ -512,7 +499,6 @@ class SessionMemoryStore:
                 SessionMessage(
                     id=r["id"],
                     session_id=r["session_id"],
-                    user_id=r["user_id"],
                     seq=r["seq"],
                     turn_id=r["turn_id"],
                     role=r["role"],
@@ -529,16 +515,12 @@ class SessionMemoryStore:
         self,
         session_id: str,
         limit: int = 50,
-        user_id: Optional[str] = None,
     ) -> List[SessionMessage]:
         """取最近 N 条(按 seq 升序返回)。"""
         conn = self._connect()
         try:
             sql = "SELECT * FROM session_messages WHERE session_id = ?"
             params: List[Any] = [session_id]
-            if user_id:
-                sql += " AND user_id = ?"
-                params.append(user_id)
             sql += " ORDER BY seq DESC"
             if limit and limit > 0:
                 sql += " LIMIT ?"
@@ -548,7 +530,6 @@ class SessionMemoryStore:
                 SessionMessage(
                     id=r["id"],
                     session_id=r["session_id"],
-                    user_id=r["user_id"],
                     seq=r["seq"],
                     turn_id=r["turn_id"],
                     role=r["role"],
@@ -578,10 +559,8 @@ class SessionMemoryStore:
     def save_summary(
         self,
         session_id: str,
-        user_id: str,
         cover_until_seq: int,
         summary: str,
-        tenant_id: str = DEFAULT_TENANT,
     ) -> str:
         """保存一条滚动摘要(覆盖前 cover_until_seq 条消息)。"""
         sid = _new_id()
@@ -590,10 +569,10 @@ class SessionMemoryStore:
             conn.execute(
                 """
                 INSERT INTO session_summaries
-                    (id, session_id, tenant_id, user_id, cover_until_seq, summary, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, session_id, cover_until_seq, summary, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (sid, session_id, tenant_id, user_id, cover_until_seq, summary or "", _now()),
+                (sid, session_id, cover_until_seq, summary or "", _now()),
             )
             conn.commit()
             return sid
@@ -615,7 +594,6 @@ class SessionMemoryStore:
             return SessionSummary(
                 id=row["id"],
                 session_id=row["session_id"],
-                user_id=row["user_id"],
                 cover_until_seq=row["cover_until_seq"],
                 summary=row["summary"],
                 created_at=row["created_at"],
@@ -630,19 +608,16 @@ class SessionMemoryStore:
         session_id: str,
         query: str,
         limit: int = 5,
-        user_id: Optional[str] = None,
         min_score: float = 0.3,
     ) -> List[SessionMessage]:
         """会话内检索(按 CJK 二元组命中比例排序)。
 
-        只在本会话内检索 —— 会话内容是短期记忆,不跨用户、不跨会话。
+        只在本会话内检索 —— 会话内容是短期记忆，不跨会话。
         """
         fragments = query_fragments(query)
         if not fragments:
             return []
-        candidates = self.get_recent_messages(
-            session_id, limit=0, user_id=user_id
-        )
+        candidates = self.get_recent_messages(session_id, limit=0)
         scored = []
         for msg in candidates:
             s = score_fragments(msg.content, fragments)

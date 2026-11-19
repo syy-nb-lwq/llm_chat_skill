@@ -17,6 +17,12 @@ class ToolInfo:
     source_name: str
     source_type: SourceType
     instance: Any
+    # --- 归属（agent 自造的工具才有）---
+    #
+    # 之前注册完就不知道"这工具是谁造的"了 —— 既没法按来源禁用，
+    # 也没法在将来收紧可见性时做数据迁移。
+    owner_agent_id: str = ""
+    visibility: str = "global"   # global | owner | tenant
 
 
 class ToolHub:
@@ -155,7 +161,13 @@ class ToolHub:
     def all(self) -> List[Any]:
         return [tool.instance for tool in self._tools.values()]
 
-    def register_python_tool(self, tool: Tool):
+    def register_python_tool(
+        self,
+        tool: Tool,
+        *,
+        owner_agent_id: str = "",
+        visibility: str = "global",
+    ):
         if not tool.name:
             raise ValueError("tool.name 不能为空")
         if tool.name in self._tools:
@@ -168,9 +180,31 @@ class ToolHub:
             source_name="builtin",
             source_type=SourceType.PYTHON,
             instance=tool,
+            owner_agent_id=owner_agent_id or "",
+            visibility=visibility or "global",
         )
         self._tools[tool.name] = info
         self.logger.info("ToolHub", f"registered python tool {tool.name}")
+
+    def tools_by_owner(self, owner_agent_id: str) -> List[str]:
+        """某个 owner 名下的工具名（agent 自造的工具）。"""
+        return [
+            info.name
+            for info in self._tools.values()
+            if info.owner_agent_id and info.owner_agent_id == owner_agent_id
+        ]
+
+    def unregister_owner(self, owner_agent_id: str) -> List[str]:
+        """一次性禁用某个 owner 的全部工具。返回被禁用的工具名。
+
+        存在的意义：**出了事要能立刻收手**。agent 自造的工具默认全局可见
+        （docs/18 §10.2），那就必须有一条"一键收回"的路径。
+        """
+        removed = []
+        for name in self.tools_by_owner(owner_agent_id):
+            if self.unregister_tool(name):
+                removed.append(name)
+        return removed
 
     def register(self, tool: Tool):
         self.register_python_tool(tool)

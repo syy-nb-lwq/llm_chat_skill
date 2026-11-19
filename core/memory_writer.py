@@ -481,17 +481,15 @@ class MemoryWriter:
         self,
         user_input: str,
         *,
-        user_id: str,
         session_id: str = "",
         turn_id: str = "",
-        tenant_id: str = "default",
     ) -> WriteResult:
         """一轮对话结束后抽取并写入画像。
 
         任何失败都只记日志、绝不抛出 —— 记忆写入不能影响本轮响应。
         """
         result = WriteResult()
-        if not user_id or not user_input:
+        if not user_input:
             return result
 
         try:
@@ -505,10 +503,8 @@ class MemoryWriter:
                 await self._write_one(
                     candidate,
                     result=result,
-                    user_id=user_id,
                     session_id=session_id,
                     turn_id=turn_id,
-                    tenant_id=tenant_id,
                 )
             except Exception as exc:
                 self.logger.warning(
@@ -529,10 +525,8 @@ class MemoryWriter:
         candidate: MemoryCandidate,
         *,
         result: WriteResult,
-        user_id: str,
         session_id: str,
         turn_id: str,
-        tenant_id: str,
     ) -> None:
         # 1) 敏感信息检查
         sensitive = find_sensitive(candidate.content)
@@ -552,7 +546,7 @@ class MemoryWriter:
         db = store.memory_db
 
         # 3) 去重 / 冲突检测
-        existing = db.get_by_key(user_id, candidate.type, candidate.normalized_key)
+        existing = db.get_by_key(candidate.type, candidate.normalized_key)
         if existing is not None:
             if _skeleton(existing.content) == _skeleton(candidate.content):
                 result.skipped_duplicate.append(candidate.content)
@@ -563,8 +557,6 @@ class MemoryWriter:
                 type=candidate.type,
                 content=candidate.content,
                 embedding=embedding,
-                user_id=user_id,
-                tenant_id=tenant_id,
                 scope=candidate.scope,
                 confidence=candidate.confidence,
                 importance=candidate.importance,
@@ -584,8 +576,6 @@ class MemoryWriter:
             type=candidate.type,
             content=candidate.content,
             embedding=embedding,
-            user_id=user_id,
-            tenant_id=tenant_id,
             scope=candidate.scope,
             confidence=candidate.confidence,
             importance=candidate.importance,

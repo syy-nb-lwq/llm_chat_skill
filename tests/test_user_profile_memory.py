@@ -121,20 +121,20 @@ def test_benign_text_not_sensitive():
 async def test_sensitive_never_written(writer, db):
     """敏感内容**绝不入库**(宁可不记,也不泄漏)"""
     result = await writer.record_turn(
-        "以后我的手机号是 13800138000 就用这个", user_id="u1"
+        "以后我的手机号是 13800138000 就用这个"
     )
     assert result.skipped_sensitive
     assert result.added == []
-    assert db.get_recent(user_id="u1", limit=10) == []
+    assert db.get_recent(limit=10) == []
 
 
 # ===== 3. 写入 / 去重 / 取代 =====
 
 @pytest.mark.asyncio
 async def test_write_preference(writer, db):
-    result = await writer.record_turn("以后回答都用中文", user_id="u1")
+    result = await writer.record_turn("以后回答都用中文")
     assert len(result.added) == 1
-    entries = db.get_recent(user_id="u1", limit=10)
+    entries = db.get_recent(limit=10)
     assert len(entries) == 1
     assert entries[0].type == "preference"
     assert entries[0].confidence >= MIN_CONFIDENCE
@@ -143,35 +143,27 @@ async def test_write_preference(writer, db):
 
 @pytest.mark.asyncio
 async def test_same_statement_is_not_duplicated(writer, db):
-    await writer.record_turn("以后回答都用中文", user_id="u1")
-    result = await writer.record_turn("以后回答都用中文", user_id="u1")
+    await writer.record_turn("以后回答都用中文")
+    result = await writer.record_turn("以后回答都用中文")
     assert result.added == []
     assert result.skipped_duplicate
-    assert len(db.get_recent(user_id="u1", limit=10)) == 1
+    assert len(db.get_recent(limit=10)) == 1
 
 
 @pytest.mark.asyncio
 async def test_changed_preference_supersedes_old(writer, db):
     """用户改主意 → 新记忆取代旧记忆,旧的保留可追溯"""
-    await writer.record_turn("以后回答都用中文", user_id="u1")
-    result = await writer.record_turn("以后回答都用英文", user_id="u1")
+    await writer.record_turn("以后回答都用中文")
+    result = await writer.record_turn("以后回答都用英文")
     assert len(result.superseded) == 1
 
-    active = db.get_recent(user_id="u1", limit=10)
+    active = db.get_recent(limit=10)
     assert len(active) == 1
     assert "英文" in active[0].content
     # 旧的被标记 superseded,可追溯但不参与召回
     assert active[0].supersedes_id
 
 
-@pytest.mark.asyncio
-async def test_memory_written_per_user(writer, db):
-    await writer.record_turn("以后回答都用中文", user_id="u1")
-    await writer.record_turn("以后回答都用英文", user_id="u2")
-    assert len(db.get_recent(user_id="u1", limit=10)) == 1
-    assert len(db.get_recent(user_id="u2", limit=10)) == 1
-    assert "中文" in db.get_recent(user_id="u1", limit=10)[0].content
-    assert "英文" in db.get_recent(user_id="u2", limit=10)[0].content
 
 
 @pytest.mark.asyncio
@@ -186,7 +178,7 @@ async def test_writer_never_raises_on_bad_store():
         embedding_service = None
 
     writer = MemoryWriter(semantic_memory=_Boom())
-    result = await writer.record_turn("以后回答都用中文", user_id="u1")
+    result = await writer.record_turn("以后回答都用中文")
     assert result.total == 0
 
 
@@ -196,18 +188,16 @@ def test_profile_block_contains_entries(store, db):
     db.add(
         type="preference",
         content="回答用中文",
-        user_id="u1",
         confidence=0.9,
         importance=0.9,
     )
     db.add(
         type="constraint",
         content="不要用 emoji",
-        user_id="u1",
         confidence=0.9,
         importance=0.95,
     )
-    block = store.build_profile_block("u1")
+    block = store.build_profile_block()
     assert block
     assert "用户画像" in block
     assert "回答用中文" in block
@@ -217,7 +207,7 @@ def test_profile_block_contains_entries(store, db):
 
 
 def test_profile_block_empty_for_unknown_user(store):
-    assert store.build_profile_block("nobody") == ""
+    assert store.build_profile_block() == ""
 
 
 def test_profile_block_respects_budget(store, db):
@@ -225,30 +215,27 @@ def test_profile_block_respects_budget(store, db):
         db.add(
             type="preference",
             content=f"这是一条很长的偏好描述{i}" * 3,
-            user_id="u1",
             confidence=0.9,
             importance=0.9,
         )
-    block = store.build_profile_block("u1", max_chars=200)
+    block = store.build_profile_block(max_chars=200)
     assert len(block) <= 400  # 含标题
     assert "..." not in block  # 是截断条目数,不是截断字符串
 
 
 def test_profile_block_ordered_by_confidence(store, db):
-    db.add(type="preference", content="低置信偏好", user_id="u1",
-           confidence=0.6, importance=0.6)
-    db.add(type="preference", content="高置信偏好", user_id="u1",
-           confidence=0.99, importance=0.99)
-    block = store.build_profile_block("u1")
+    db.add(type="preference", content="低置信偏好", confidence=0.6, importance=0.6)
+    db.add(type="preference", content="高置信偏好", confidence=0.99, importance=0.99)
+    block = store.build_profile_block()
     assert block.index("高置信偏好") < block.index("低置信偏好")
 
 
 def test_profile_only_profile_types(store, db):
     """会话/执行类记忆不进画像块"""
-    db.add(type="failure", content="工具超时失败", user_id="u1")
-    db.add(type="episode", content="查了一次北京天气", user_id="u1")
-    db.add(type="preference", content="回答用中文", user_id="u1")
-    block = store.build_profile_block("u1")
+    db.add(type="failure", content="工具超时失败")
+    db.add(type="episode", content="查了一次北京天气")
+    db.add(type="preference", content="回答用中文")
+    block = store.build_profile_block()
     assert "回答用中文" in block
     assert "工具超时失败" not in block
     assert "查了一次北京天气" not in block
@@ -256,27 +243,14 @@ def test_profile_only_profile_types(store, db):
 
 # ===== 5. 作用域隔离(数据泄漏回归) =====
 
-@pytest.mark.asyncio
-async def test_search_requires_user_id():
-    """`user_id` 是必填参数 —— 不传就应该报错,而不是静默泄漏"""
-    store = SemanticMemoryStore(memory_db=MemoryDB.__new__(MemoryDB))
-    with pytest.raises(TypeError):
-        await store.search("随便什么")  # type: ignore[call-arg]
 
 
-@pytest.mark.asyncio
-async def test_search_does_not_leak_across_users(store, db):
-    db.add(type="preference", content="u1 的秘密偏好", user_id="u1",
-           confidence=0.9, importance=0.9)
-    results = await store.search("秘密偏好", user_id="u2", limit=5)
-    assert results == []
 
 
 @pytest.mark.asyncio
 async def test_search_finds_own_memory(store, db):
-    db.add(type="preference", content="回答用中文", user_id="u1",
-           confidence=0.9, importance=0.9)
-    results = await store.search("回答用中文", user_id="u1", limit=5)
+    db.add(type="preference", content="回答用中文", confidence=0.9, importance=0.9)
+    results = await store.search("回答用中文", limit=5)
     assert len(results) == 1
     assert results[0][0].content == "回答用中文"
 
@@ -286,13 +260,12 @@ async def test_search_finds_own_memory(store, db):
 @pytest.mark.asyncio
 async def test_forget_removes_from_search(store, db):
     """「忘掉这件事」后不再被召回(索引也要清)"""
-    entry = db.add(type="preference", content="回答用中文", user_id="u1",
-                   confidence=0.9, importance=0.9)
-    assert await store.search("回答用中文", user_id="u1", limit=5)
+    entry = db.add(type="preference", content="回答用中文", confidence=0.9, importance=0.9)
+    assert await store.search("回答用中文", limit=5)
 
     assert store.forget(entry.id) is True
-    assert await store.search("回答用中文", user_id="u1", limit=5) == []
-    assert store.build_profile_block("u1") == ""
+    assert await store.search("回答用中文", limit=5) == []
+    assert store.build_profile_block() == ""
 
 
 def test_cleanup_never_deletes_profile(db):
@@ -300,7 +273,7 @@ def test_cleanup_never_deletes_profile(db):
     from datetime import datetime, timedelta
 
     old = (datetime.now() - timedelta(days=400)).isoformat()
-    entry = db.add(type="preference", content="回答用中文", user_id="u1")
+    entry = db.add(type="preference", content="回答用中文")
     conn = __import__("sqlite3").connect(str(db.db_path))
     conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (old, entry.id))
     conn.commit()
@@ -331,13 +304,12 @@ async def test_agent_schedules_memory_write(monkeypatch):
         "core.memory_writer.get_memory_writer", lambda: _FakeWriter()
     )
 
-    agent = agent_mod.Agent(session_id="s1", user_id="u1")
+    agent = agent_mod.Agent(session_id="s1")
     assert agent.persist_memory is True
     agent._schedule_memory_write("以后回答都用中文")
     await asyncio.sleep(0)  # 让 create_task 跑起来
     assert calls
     assert calls[0][0] == "以后回答都用中文"
-    assert calls[0][1]["user_id"] == "u1"
 
 
 def test_agent_skips_memory_write_when_disabled(monkeypatch):
@@ -354,7 +326,7 @@ def test_agent_skips_memory_write_when_disabled(monkeypatch):
     monkeypatch.setattr(
         "core.memory_writer.get_memory_writer", lambda: _FakeWriter()
     )
-    agent = agent_mod.Agent(session_id="s1", user_id="u1")
+    agent = agent_mod.Agent(session_id="s1")
     assert agent.persist_memory is False
     agent._schedule_memory_write("以后回答都用中文")
     assert calls == []
@@ -366,10 +338,10 @@ def test_manager_injects_profile_block(monkeypatch):
 
     mgr = ManagerAgent()
     monkeypatch.setattr(
-        mgr, "_build_profile_block", lambda uid: "[用户画像](长期记忆)\n- [偏好] 回答用中文"
+        mgr, "_build_profile_block", lambda: "[用户画像](长期记忆)\n- [偏好] 回答用中文"
     )
     prompt = mgr._build_user_prompt(
-        "帮我查个天气", None, None, mgr._build_profile_block("u1")
+        "帮我查个天气", None, None, mgr._build_profile_block()
     )
     assert "用户画像" in prompt
     assert "回答用中文" in prompt
@@ -393,12 +365,11 @@ def client():
     return TestClient(app)
 
 
-def _seed(store, user_id="u1"):
+def _seed(store):
     db = store.memory_db
     return db.add(
         type="preference",
         content="回答用中文",
-        user_id=user_id,
         confidence=0.9,
         importance=0.9,
     )
@@ -409,7 +380,7 @@ def test_api_list_memories(client, monkeypatch, store):
     monkeypatch.setattr(
         "core.semantic_memory.get_semantic_memory", lambda: store
     )
-    r = client.get("/api/memories", params={"user_id": "u1"})
+    r = client.get("/api/memories")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] == 1
@@ -417,26 +388,8 @@ def test_api_list_memories(client, monkeypatch, store):
     assert body["memories"][0]["type"] == "preference"
 
 
-def test_api_list_memories_requires_user_id(client, monkeypatch, store):
-    """不给 user_id 就查全部 = 数据泄漏,必须 400"""
-    monkeypatch.setattr(
-        "core.semantic_memory.get_semantic_memory", lambda: store
-    )
-    r = client.get("/api/memories")
-    assert r.status_code == 400
 
 
-def test_api_list_memories_isolated_by_user(client, monkeypatch, store):
-    _seed(store, "u1")
-    _seed(store, "u2")
-    monkeypatch.setattr(
-        "core.semantic_memory.get_semantic_memory", lambda: store
-    )
-    r1 = client.get("/api/memories", params={"user_id": "u1"})
-    r2 = client.get("/api/memories", params={"user_id": "u2"})
-    assert r1.json()["count"] == 1
-    assert r2.json()["count"] == 1
-    assert r1.json()["memories"][0]["id"] != r2.json()["memories"][0]["id"]
 
 
 def test_api_forget_memory(client, monkeypatch, store):
@@ -448,7 +401,7 @@ def test_api_forget_memory(client, monkeypatch, store):
     assert r.status_code == 200
     assert r.json()["forgotten"] == entry.id
     # 忘掉之后列表里就没有了
-    r2 = client.get("/api/memories", params={"user_id": "u1"})
+    r2 = client.get("/api/memories")
     assert r2.json()["count"] == 0
 
 

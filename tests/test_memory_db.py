@@ -181,15 +181,13 @@ class TestSemanticMemoryStore:
         await self.store.add_memory(
             content="Python 适合初学者入门编程",
             type="context",
-            user_id="u1",
-        )
+            )
         await self.store.add_memory(
             content="JavaScript 是 Web 开发的主要语言",
             type="context",
-            user_id="u1",
-        )
+            )
         
-        results = await self.store.search("Python 编程", user_id="u1", limit=10)
+        results = await self.store.search("Python 编程", limit=10)
         assert len(results) >= 1
     
     @pytest.mark.asyncio
@@ -198,16 +196,14 @@ class TestSemanticMemoryStore:
         await self.store.add_memory(
             content="用户正在做一个数据分析项目",
             type="context",
-            user_id="u1",
-        )
+            )
         await self.store.add_memory(
             content="用户想要学习机器学习",
             type="context",
-            user_id="u1",
-        )
+            )
         
         contexts = await self.store.search_context(
-            "用户项目", user_id="u1", limit=3
+            "用户项目", limit=3
         )
         assert len(contexts) >= 1
     
@@ -217,10 +213,9 @@ class TestSemanticMemoryStore:
         await self.store.add_memory(
             content="上次那个项目需要用到 pandas",
             type="context",
-            user_id="u1",
-        )
+            )
         
-        recall = await self.store.recall_recent_context("上次那个项目", user_id="u1")
+        recall = await self.store.recall_recent_context("上次那个项目")
         assert "pandas" in recall or len(recall) > 0
     
     def test_add_sync(self):
@@ -272,16 +267,14 @@ class TestIntegration:
             content="用户上次问我关于 Python 的问题",
             type="context",
             metadata={"topic": "python"},
-            user_id="u1",
-        )
+            )
         await store.add_memory(
             content="用户对数据分析很感兴趣",
             type="preference",
-            user_id="u1",
-        )
+            )
         
         # 5. 搜索
-        results = await store.search("Python", user_id="u1", limit=5)
+        results = await store.search("Python", limit=5)
         assert len(results) >= 1
         
         # 6. 获取统计

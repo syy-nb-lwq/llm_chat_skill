@@ -16,9 +16,8 @@
 
     <div v-if="error" class="error">{{ error }}</div>
 
-    <div v-if="!hasToken" class="hint-box">
+    <div v-if="!sessionId" class="hint-box">
       <p>连接后即可查看系统记住的关于你的信息。</p>
-      <p class="hint">长期记忆按用户隔离 —— 只有你能看到自己被记住的内容。</p>
     </div>
 
     <template v-else>
@@ -147,8 +146,8 @@ export default {
     }
   },
   computed: {
-    hasToken() {
-      return !!(wsService.session && wsService.session.token)
+    sessionId() {
+      return (wsService.session && wsService.session.session_id) || ''
     },
     visibleEntries() {
       if (this.filter === 'all') return this.entries
@@ -156,7 +155,7 @@ export default {
     },
   },
   mounted() {
-    if (this.hasToken) {
+    if (this.sessionId) {
       this.refresh()
     } else {
       // 身份是 WS 连接后签发的 —— 连上再拉
@@ -167,19 +166,16 @@ export default {
     wsService.off('connected', this.refresh)
   },
   methods: {
-    _authHeaders() {
-      const token = (wsService.session && wsService.session.token) || ''
-      return token ? { Authorization: `Bearer ${token}` } : {}
+    _sessionQuery() {
+      return this.sessionId ? `session_id=${encodeURIComponent(this.sessionId)}` : ''
     },
 
     async refresh() {
-      if (!this.hasToken) return
+      if (!this.sessionId) return
       this.loading = true
       this.error = ''
       try {
-        const res = await fetch(`${API_BASE}/api/memory/profile`, {
-          headers: this._authHeaders(),
-        })
+        const res = await fetch(`${API_BASE}/api/memory/profile?${this._sessionQuery()}`)
         if (!res.ok) throw new Error(await res.text())
         const data = await res.json()
         this.entries = data.entries || []
@@ -188,9 +184,7 @@ export default {
 
         // 全景是"锦上添花"：拿不到不影响画像列表
         try {
-          const ov = await fetch(`${API_BASE}/api/memory/overview`, {
-            headers: this._authHeaders(),
-          })
+          const ov = await fetch(`${API_BASE}/api/memory/overview?${this._sessionQuery()}`)
           if (ov.ok) this.overview = await ov.json()
         } catch (e) {
           this.overview = null
@@ -212,9 +206,8 @@ export default {
       this.loading = true
       this.error = ''
       try {
-        const res = await fetch(`${API_BASE}/api/memory/profile/${encodeURIComponent(entry.id)}`, {
+        const res = await fetch(`${API_BASE}/api/memory/profile/${encodeURIComponent(entry.id)}?${this._sessionQuery()}`, {
           method: 'DELETE',
-          headers: this._authHeaders(),
         })
         if (!res.ok) throw new Error(await res.text())
         // 本地先移除,再刷新 —— 界面立刻响应
@@ -232,9 +225,8 @@ export default {
       this.loading = true
       this.error = ''
       try {
-        const res = await fetch(`${API_BASE}/api/memory/profile`, {
+        const res = await fetch(`${API_BASE}/api/memory/profile?${this._sessionQuery()}`, {
           method: 'DELETE',
-          headers: this._authHeaders(),
         })
         if (!res.ok) throw new Error(await res.text())
         this.entries = []

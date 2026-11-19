@@ -100,14 +100,13 @@ export default {
       return content ? this.md.render(content) : ''
     },
 
-    // 产物链接:后端要求会话令牌,所以拼上 token 作为 query
-    // (浏览器直接打开链接时带不了自定义 header)
+    // 产物链接（本地单用户，无令牌）
     artifactUrl(artifact, download = false) {
       const base = artifact.url || `/api/artifacts/${artifact.path}`
-      const token = (wsService.session && wsService.session.token) || ''
-      const parts = [`token=${encodeURIComponent(token)}`]
+      const parts = []
       if (download) parts.push('download=true')
-      return `${API_BASE}${base}?${parts.join('&')}`
+      const qs = parts.length ? `?${parts.join('&')}` : ''
+      return `${API_BASE}${base}${qs}`
     },
 
     formatSize(bytes) {

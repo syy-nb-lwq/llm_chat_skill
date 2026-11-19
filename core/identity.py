@@ -1,11 +1,12 @@
 """Identity & Execution 标识生成器
 
-统一 user_id / session_id / turn_id / execution_id 四级标识，避免
+本地单用户项目：统一 session_id / turn_id / execution_id 三级标识，避免
 不同模块各自拼字符串导致 trace 文件互相覆盖的问题。
 
 设计：
-- 标识只承担"区分身份/回合/执行"职责，不绑定任何存储路径前缀。
+- 标识只承担"区分会话/回合/执行"职责，不绑定任何存储路径前缀。
 - 真正的存储路径由调用方决定，这样 e2e 测试可以用 tmp_path 隔离。
+- 没有 user_id / tenant_id：本项目跑在使用者本地，只有他一个人。
 """
 from __future__ import annotations
 
@@ -31,7 +32,6 @@ class IdentityContext:
     execution_id，同一 session 多次 handle 不会相互覆盖记录。
     """
 
-    user_id: str = "default"
     session_id: str = "default"
     turn_id: str = ""
     execution_id: str = ""
@@ -47,7 +47,6 @@ class IdentityContext:
     def child(self) -> "IdentityContext":
         """为重试/分支派生 execution_id，同时保留父指针。"""
         return IdentityContext(
-            user_id=self.user_id,
             session_id=self.session_id,
             turn_id=self.turn_id,
             execution_id=new_id("exec"),

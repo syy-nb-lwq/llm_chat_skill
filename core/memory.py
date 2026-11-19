@@ -167,7 +167,6 @@ class MemoryStore:
         user_corrected: bool = False,
         *,
         execution_id: Optional[str] = None,
-        user_id: str = "default",
         session_id: str = "default",
         turn_id: str = "",
     ) -> FailureRecord:
@@ -197,7 +196,6 @@ class MemoryStore:
         payload = asdict(record)
         payload.update({
             "execution_id": eid,
-            "user_id": user_id,
             "session_id": session_id,
             "turn_id": turn_id,
         })

@@ -19,9 +19,8 @@
 - 自演化面板已接入真实后端接口，不再依赖前端本地假状态
 - 每次 `handle()` 生成唯一 `execution_id`，同 session 多轮失败记录不互相覆盖
 - 规划器的工具枚举从 `ToolHub` 动态生成，MCP / 自注册工具可被选中
-- 管理接口支持 `OWNER_TOKEN` 鉴权（未配置时保持开放）
-- WebSocket 身份由服务端签发，`client_id` 不再由客户端自带；令牌缺失或伪造一律拒绝
-- 假用户服务签发长期用户令牌，同一浏览器始终是同一个 `user_id`（长期记忆可跨重启累积）
+- **本地单用户**：项目跑在使用者本地，只有他一个人 —— 没有多用户隔离、没有令牌、没有登录
+- WebSocket 身份由服务端签发，`client_id` 不再由客户端自带；`session_id` 存 localStorage 用于跨重启续聊
 - 补丁发布前跑回归样例；自动发布还需通过静态校验并写审计记录
 - 意图识别的三处关键词误伤已修（结构化正则 + 元问题识别）
 - 意图识别已分层：L0 守卫层（0 次 LLM）→ L1 闭集判别（一次 LLM 调用，6 标签 + 置信度）
@@ -33,7 +32,7 @@
   - **长期记忆 = 用户画像**：`preference/habit/method/constraint/fact` 由 **LLM 抽取 + 证据校验**写入，
     **每轮常驻注入**（≤400 字符，进 **system prompt**，闲聊轮同样生效）；
     「忘掉这件事」软删除并同步清索引
-- 长期记忆按 `user_id` 严格隔离：检索接口的 `user_id` 是必填参数（跨用户召回为 0）
+- 长期记忆与画像是**全局**的（单用户），按 `scope` + `agent_id` 分层隔离而不是按用户
 - **检索链路对中文可用**：FTS5 切不开汉字，长期记忆另有一条 CJK 二元组通道
   （与 FTS 一起进 RRF 融合）
 - **向量检索默认关闭**：没配 `EMBEDDING_PROVIDER` 就只用 FTS + 常驻注入 ——
@@ -52,13 +51,13 @@
   - `GET /api/skills/quality` 看每个技能的通过率，前端显示「通过率 xx%」徽章
 - **能写脚本、能跑脚本**（`python_exec` / `write_script`）：
   - 子进程隔离执行：独立 cwd、`-I` 隔离模式、**env 白名单(子进程拿不到 API key)**、超时、AST 静态黑名单
-  - **子进程隔离 = 崩溃隔离,不是安全边界**——多租户对外开放前必须关掉 `CODE_EXEC_ENABLED` 或换容器隔离
+  - **子进程隔离 = 崩溃隔离,不是安全边界**——若要对外开放，必须关掉 `CODE_EXEC_ENABLED` 或换容器隔离
 - **自演化链路存储自愈**(目录被外部删了也不报错);
   落盘失败**只记日志不影响用户拿答案**
 - **用户看得见、也删得掉自己的记忆**（「🧠 记忆」面板）：
   - 列出“系统记住了我什么”,分类过滤,逐条忘掉 / 全部忘掉
   - 同时显示**此刻正在影响你回答的内容**(已注入那段文本)
-  - **用户级隔离**:`user_id` 只能从令牌里取,传 query 参数不作数
+  - **本地单用户**：记忆与画像属于本机使用者，无跨用户隔离问题
 - **能读文件**（`read_file`）：
   - 源码 / 配置 / 日志 / 数据这类**文本文件**直接读，返回带行号的内容
   - **单个文件上限 10MB**——超了明确报错，不做“只读一半当全文”
@@ -107,7 +106,7 @@
 
 测试状态：
 
-- `825 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
+- `980 passed, 3 skipped`（skipped 为 `--live` 意图评估集的 LLM 通道，需真实 key）
 
 ## 快速启动
 
@@ -123,14 +122,6 @@ copy .env.example .env
 ```env
 OPENAI_API_KEY=your-key
 ```
-
-可选：给管理接口（删除技能 / 审批补丁 / 切换开关）开启鉴权：
-
-```env
-OWNER_TOKEN=your-owner-token
-```
-
-配置后这些接口必须带 `Authorization: Bearer <token>` 请求头；前端可在「进化」面板里填写该令牌（保存在 `localStorage`）。不配置则保持开放，适合单机个人环境。
 
 启动后端：
 
@@ -201,7 +192,7 @@ python ui/cli.py
 - `core/trace.py`
   - 每轮分阶段耗时记录（plan / tools / generate / first_token / total）
 - `core/sqlite_util.py`
-  - SQLite 连接工厂：WAL + `busy_timeout`（多用户并发写的前提）
+  - SQLite 连接工厂：WAL + `busy_timeout`（并发写的前提）
 - `core/correction.py`
   - 用户纠正检测（纯规则）：识别「不对/应该是/重来/太啰嗦」等纠正语，
     并要求存在上一条非空回答才判定为纠正
@@ -251,7 +242,7 @@ regression:
   - 聊天、流程、技能、补丁、进化面板整合
 - `frontend/src/websocket.js`
   - `clientId`（连接句柄）持久化
-  - 服务端签发的会话身份与令牌随 `chat` / `reset` 一起带上
+  - 服务端签发的会话身份（`session_id`）随 `chat` / `reset` 一起带上
   - `userToken`（长期用户凭证）持久化并在 `init` 时回传，服务端据此认出同一个用户
   - 自动重连
 - `frontend/src/components/EvolutionDashboard.vue`
@@ -281,16 +272,14 @@ regression:
 
 - `GET /api/tools`
 
-### 用户（假用户服务）
+### 用户（本地单用户，兼容旧端点）
 
-- `GET /api/users` —— 列出用户
-- `POST /api/users` —— 新建用户，返回 `user_id` 与 `user_token`
-- `DELETE /api/users/{user_id}` —— 删除用户档案（需 `OWNER_TOKEN`）
+- `GET /api/users` —— 始终返回唯一的本地用户
 
 ### 会话内容（短期记忆）
 
-- `GET /api/sessions` —— 列出会话（可按 `user_id` 过滤）
-- `GET /api/sessions/{session_id}/messages` —— 取会话消息（可按 `user_id` 过滤）
+- `GET /api/sessions` —— 列出会话
+- `GET /api/sessions/{session_id}/messages` —— 取会话消息
 - `DELETE /api/sessions/{session_id}` —— 删除会话及其内容
 
 ### 自演化
@@ -315,16 +304,16 @@ regression:
 - `trace_id` 在 `__init__` 生成，同 session 多轮失败记录互相覆盖（改为每次 `handle()` 生成 `execution_id`）
 - 执行记录缺真实工具名 / retry / fallback / latency（`build_execution_context` 支持 `task_specs`）
 - 工具结果 `meta` 缺 `attempts` / `latency_ms` / `timeout_s` / `fallback_to`
-- `infra/auth.py` 完全没接线，`Config` 里也没有 `owner_token` 字段（管理接口现在真的受保护）
+- `infra/auth.py` 完全没接线（历史问题；鉴权体系后来整体移除，见「本地单用户化」）
 - 规划 schema 硬编码工具枚举，MCP / 自注册工具无法被选中（改为从 `ToolHub` 动态生成）
 - 补丁审批原地改写技能 YAML，破坏版本历史（改为生成新版本并切 `active`）
 - 技能删除用通配符匹配，`delete demo` 会连 `demo2` 一起删掉（改为精确文件名匹配）
 - `tests/conftest.py` 写入的是过期变量名 `LLM_API_KEY`，导致后端测试整片报错
 - `_complete_teaching()` 把助手追问当用户消息回写 context，污染多轮教学
-- `client_id` 由客户端自带并直接当会话键，任何人可冒用他人会话（改为服务端签发 + 令牌校验）
+- `client_id` 由客户端自带并直接当会话键（改为服务端签发）
 - 高置信度补丁跳过校验直接落盘（改为必须过静态校验 + 回归样例 + 审计记录）
 - 补丁审批不跑新旧样例，新版本可能带病上线（审批前先在内存里算候选版本并校验）
-- 每次 WebSocket 连接都重新生成 `user_id`，长期记忆按连接碎片化（引入假用户服务与长期用户令牌）
+- 每次 WebSocket 连接都重新生成身份，长期记忆按连接碎片化（改为按 `session_id` 累积）
 - 技能管理关键词裸子串匹配，`查看北京天气` 被判成技能管理（改为结构化正则）
 - 教导关键词含 `要`/`遇到`/`以后` 等泛词，`遇到雨天要带伞` 被判成教导（改为结构化正则 + 排除规则）
 - 工具关键词把 `搜索` 当强词，`搜索是一个动词吗` 被判成搜索任务（拆强弱关键词 + 元问题拦截）

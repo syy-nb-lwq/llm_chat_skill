@@ -53,7 +53,6 @@ class ExecutionContext:
     # M0-01:四级标识(每次 handle 唯一 execution_id,同 session 多轮不互相覆盖)
     execution_id: str = ""
     turn_id: str = ""
-    user_id: str = "default"
     session_id: str = "default"
 
 
@@ -174,7 +173,6 @@ class ExecutionCritic:
                 user_corrected=user_corrected,
                 # M0-01:用 execution_id 落盘,同 session 多轮失败不再互相覆盖
                 execution_id=context.execution_id or context.trace_id,
-                user_id=context.user_id,
                 session_id=context.session_id,
                 turn_id=context.turn_id,
             ):
@@ -541,7 +539,6 @@ def build_execution_context(
     task_specs: Optional[Dict[str, Dict[str, Any]]] = None,
     execution_id: str = "",
     turn_id: str = "",
-    user_id: str = "default",
     session_id: str = "default",
 ) -> ExecutionContext:
     """从工具执行结果构建 ExecutionContext。
@@ -549,7 +546,7 @@ def build_execution_context(
     Args:
         task_specs: task_id → 任务规格(type / retry / timeout_s / fallback_to)。
             提供时用真实工具名与声明的 fallback,不再从 task_id 反推(M0-02)。
-        execution_id / turn_id / user_id / session_id: 四级标识(M0-01)。
+        execution_id / turn_id / session_id: 标识(M0-01)。
     """
     tasks: List[TaskExecutionSummary] = []
     specs = task_specs or {}
@@ -599,6 +596,5 @@ def build_execution_context(
         user_feedback=user_feedback,
         execution_id=execution_id,
         turn_id=turn_id,
-        user_id=user_id,
         session_id=session_id,
     )

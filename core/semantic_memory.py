@@ -89,8 +89,8 @@ class SemanticMemoryStore:
         type: str = "context",
         metadata: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
-        user_id: Optional[str] = None,
         generate_embedding: bool = True,
+        scope: str = "user",
     ) -> MemoryEntry:
         """添加记忆
         
@@ -99,8 +99,10 @@ class SemanticMemoryStore:
             type: 记忆类型 (failure/success/preference/context)
             metadata: 额外元数据
             tags: 标签
-            user_id: 用户 ID
             generate_embedding: 是否生成向量(需要 embedding_service)
+            scope: 作用域（session/user/project/global/agent）。
+                **之前写路径恒为 user**，检索也一律不过滤 —— scope 是死字段
+                (docs/18 F0-4)。现在写进来的就是真作用域。
         """
         embedding = None
         
@@ -116,22 +118,19 @@ class SemanticMemoryStore:
             metadata=metadata,
             embedding=embedding,
             tags=tags,
-            user_id=user_id,
+            scope=scope,
         )
 
     async def search(
         self,
         query: str,
         *,
-        user_id: str,
         types: Optional[List[str]] = None,
         type: Optional[str] = None,
         limit: int = 5,
+        scopes: Optional[List[str]] = None,
     ) -> List[Tuple[MemoryEntry, float]]:
         """混合检索:向量通道 + 全文通道,**RRF 融合**。
-
-        `user_id` 是**必填关键字参数** —— 长期记忆是用户数据,不传就等于
-        跨用户泄漏(docs/13 §1.2 R5)。这是故意让调用方编译期报错的。
 
         为什么用 RRF 而不是加权求和(docs/13 §2.5 ④):
         向量分是 0~1 的余弦相似度,FTS 的 BM25 是任意量纲的负值 ——
@@ -140,15 +139,16 @@ class SemanticMemoryStore:
 
         Args:
             query: 查询串
-            user_id: 当前用户(必填)
             types: 记忆类型过滤(多个)
             type: 记忆类型过滤(单个,兼容旧调用)
             limit: 返回条数
+            scopes: 作用域过滤（session/user/project/global/agent）。
+                不传 = 不按作用域过滤（保持旧行为）。
 
         Returns:
             [(MemoryEntry, rrf_score)],按分数降序
         """
-        if not query or not query.strip() or not user_id:
+        if not query or not query.strip():
             return []
 
         type_filter = [type] if type else (types or None)
@@ -166,8 +166,8 @@ class SemanticMemoryStore:
                 query_embedding = await self.embedding_service.embed(query)
                 vector_hits = self.memory_db.search_vector(
                     query_embedding=query_embedding,
-                    user_id=user_id,
                     types=type_filter,
+                    scopes=scopes,
                     limit=limit * 4,
                     threshold=self.min_similarity,
                 )
@@ -181,8 +181,8 @@ class SemanticMemoryStore:
             try:
                 fts_hits = self.memory_db.search_fts(
                     query=query,
-                    user_id=user_id,
                     types=type_filter,
+                    scopes=scopes,
                     limit=limit * 4,
                 )
                 for rank, (entry, _score) in enumerate(fts_hits):
@@ -196,8 +196,8 @@ class SemanticMemoryStore:
         try:
             cjk_hits = self.memory_db.search_cjk(
                 query=query,
-                user_id=user_id,
                 types=type_filter,
+                scopes=scopes,
                 limit=limit * 4,
             )
             for rank, (entry, _score) in enumerate(cjk_hits):
@@ -215,7 +215,8 @@ class SemanticMemoryStore:
         return fused[:limit]
 
     async def search_context(
-        self, query: str, *, user_id: str, limit: int = 3
+        self, query: str, *, limit: int = 3,
+        scopes: Optional[List[str]] = None,
     ) -> List[str]:
         """检索与本轮相关的「执行经验」类记忆,返回可注入的文本片段。
 
@@ -224,9 +225,9 @@ class SemanticMemoryStore:
         """
         results = await self.search(
             query=query,
-            user_id=user_id,
             types=["episode", "failure", "context"],
             limit=limit,
+            scopes=scopes,
         )
 
         contexts = []
@@ -235,17 +236,16 @@ class SemanticMemoryStore:
 
         return contexts
 
-    async def search_preferences(self, user_id: str, limit: int = 5) -> List[str]:
+    async def search_preferences(self, limit: int = 5) -> List[str]:
         """获取用户偏好(画像类)"""
         recent = self.memory_db.get_recent(
-            user_id=user_id,
             types=list(PROFILE_MEMORY_TYPES),
             limit=limit,
         )
         return [f"[{entry.type}] {entry.content}" for entry in recent]
 
     async def recall_recent_context(
-        self, query: str, *, user_id: str, limit: int = 5
+        self, query: str, *, limit: int = 5
     ) -> str:
         """回忆最近的上下文记忆
 
@@ -253,7 +253,6 @@ class SemanticMemoryStore:
         """
         results = await self.search(
             query=query,
-            user_id=user_id,
             types=["episode", "context"],
             limit=limit,
         )
@@ -272,16 +271,13 @@ class SemanticMemoryStore:
     # ---- 用户画像(长期记忆 L2) ----
 
     def get_profile(
-        self, user_id: str, limit: int = 20
+        self, limit: int = 20
     ) -> List[MemoryEntry]:
         """取某用户的画像条目(按 置信度 × 重要度 排序)
 
         这是长期记忆的**常驻注入**来源:每轮都在场,不依赖 query 命中。
         """
-        if not user_id:
-            return []
         entries = self.memory_db.get_recent(
-            user_id=user_id,
             types=list(PROFILE_MEMORY_TYPES),
             limit=max(limit * 2, 20),
         )
@@ -292,14 +288,14 @@ class SemanticMemoryStore:
         return entries[:limit]
 
     def build_profile_block(
-        self, user_id: str, limit: int = 20, max_chars: int = PROFILE_BLOCK_MAX_CHARS
+        self, limit: int = 20, max_chars: int = PROFILE_BLOCK_MAX_CHARS
     ) -> str:
         """把用户画像拼成可注入提示词的文本块
 
         预算上限按字符数卡,超了就截断 —— 画像最多 ~400 字符,
         不跟会话内容抢 token(docs/13 §2.8 召回策略)。
         """
-        entries = self.get_profile(user_id, limit=limit)
+        entries = self.get_profile(limit=limit)
         if not entries:
             return ""
 
@@ -329,7 +325,6 @@ class SemanticMemoryStore:
         type: str = "context",
         metadata: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
-        user_id: Optional[str] = None,
         **kwargs: Any,
     ) -> MemoryEntry:
         """同步添加记忆(不生成向量)"""
@@ -338,7 +333,6 @@ class SemanticMemoryStore:
             content=content,
             metadata=metadata,
             tags=tags,
-            user_id=user_id,
             embedding=None,
             **kwargs,
         )
@@ -346,13 +340,12 @@ class SemanticMemoryStore:
     def get_recent(
         self,
         type: Optional[str] = None,
-        user_id: Optional[str] = None,
         limit: int = 20,
         types: Optional[List[str]] = None,
     ) -> List[MemoryEntry]:
         """获取最近的记忆"""
         return self.memory_db.get_recent(
-            type=type, user_id=user_id, limit=limit, types=types
+            type=type, limit=limit, types=types
         )
 
     def delete(self, id: str) -> bool:

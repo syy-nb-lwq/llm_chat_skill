@@ -40,23 +40,6 @@ from contextvars import ContextVar
 from infra.logger import get_logger
 
 
-#: 当前这一轮是**哪个用户**在问 —— 子智能体要拿它去取用户画像。
-#:
-#: 为什么不一路传参：`run_subagents` 是工具，工具签名里塞 user_id 会很脏；
-#: 而 `contextvars` 在 `asyncio.create_task()` 时会复制上下文，
-#: 所以 gather 出来的子智能体任务能自动读到，正好合用。
-_current_user: ContextVar[str] = ContextVar("dsh_subagent_user", default="")
-
-
-def set_current_user(user_id: str) -> None:
-    """一轮开始时由 Agent 调用。"""
-    _current_user.set(user_id or "")
-
-
-def get_current_user() -> str:
-    return _current_user.get() or ""
-
-
 #: 当前这一轮的**对话上下文** —— 子智能体必须能看到，否则它不知道在聊什么。
 #:
 #: 实机踩过：用户说"发"，主智能体知道指的是刚才那个视频任务；
@@ -102,6 +85,8 @@ class SubAgentTask:
     id: str = ""
     status: str = STATUS_PENDING
     depth: int = 0
+    #: 岗位（角色 id）。决定它能用哪些工具、拿什么上下文。
+    role: str = ""
     #: 结构化结论（给主智能体看的"事实"，不是给用户的回答）
     result: str = ""
     error: str = ""
@@ -112,6 +97,10 @@ class SubAgentTask:
     rounds: int = 0
     started_at: float = 0.0
     finished_at: float = 0.0
+    #: 本次实际注入的上下文字符数（看"按需投喂"有没有真的生效）
+    context_chars: int = 0
+    #: 注入日志（哪些块给了、哪些被裁）
+    context_dropped: int = 0
 
     def __post_init__(self):
         if not self.id:
@@ -134,12 +123,15 @@ class SubAgentTask:
             "goal": self.goal,
             "status": self.status,
             "depth": self.depth,
+            "role": self.role,
             "result": self.result,
             "error": self.error,
             "tool_calls": list(self.tool_calls),
             "progress": self.progress,
             "rounds": self.rounds,
             "duration_ms": round(self.duration_ms, 1),
+            "context_chars": self.context_chars,
+            "context_dropped": self.context_dropped,
         }
 
 
@@ -228,6 +220,8 @@ class SubAgentPool:
         self.logger = get_logger()
         #: id -> 任务(运行中也能查状态)
         self._tasks: Dict[str, SubAgentTask] = {}
+        #: 角色表（懒加载）
+        self._roles = None
 
     # ===== 状态查询 =====
 
@@ -241,6 +235,86 @@ class SubAgentPool:
         return sum(
             1 for t in self._tasks.values()
             if t.status in (STATUS_PENDING, STATUS_RUNNING)
+        )
+
+    # ===== 岗位与上下文 =====
+
+    def _roles_registry(self):
+        """角色表（懒加载一次）。"""
+        if getattr(self, "_roles", None) is None:
+            from core.agentkit.roles import RoleRegistry, default_roles
+
+            self._roles = RoleRegistry(default_roles())
+        return self._roles
+
+    def _resolve_role(self, role_id: str):
+        """把角色 id 解析成 `RoleProfile`。
+
+        未知角色 → 退回"通才"并记日志（**不静默** —— 主智能体要知道
+        它派了个不存在的岗位）。
+        """
+        registry = self._roles_registry()
+        role = registry.get(role_id) if role_id else None
+        if role is None:
+            if role_id:
+                self.logger.warning(
+                    "SubAgent", f"未知角色 '{role_id}'，退回 generalist"
+                )
+            role = registry.get("generalist")
+        return role
+
+    def _all_tool_names(self) -> List[str]:
+        try:
+            from tools.hub import get_tool_hub
+
+            return list(get_tool_hub().names() or [])
+        except Exception:
+            return []
+
+    def _allowed_tools(self, role, blocked_tools: set) -> List[str]:
+        """这个角色能用哪些工具（= 白名单 ∩ 已注册 − 被禁的）。
+
+        **白名单为空 → 全部工具**（"通才"角色的语义）。
+        白名单里一个都没注册上 → 也退回全部（并在日志里说明），
+        否则子智能体会因为"没工具可用"而**静默地什么都不做**。
+        """
+        allow = list(role.tools.allow) if role else []
+        if role is not None and getattr(role.tools, "allow_all", False):
+            allow = []
+        if not allow:
+            return [t for t in self._all_tool_names() if t not in blocked_tools]
+        registered = set(self._all_tool_names())
+        usable = [t for t in allow if t in registered and t not in blocked_tools]
+        if not usable:
+            self.logger.warning(
+                "SubAgent",
+                f"角色 {role.role_id} 的白名单一个都没注册上，退回全部工具",
+            )
+            return [t for t in self._all_tool_names() if t not in blocked_tools]
+        return usable
+
+    def _build_context(
+        self,
+        *,
+        goal: str,
+        role,
+        agent_id: str,
+        allowed_tools: List[str],
+        allowed_skills: Optional[List[str]],
+        profile_block: str,
+    ):
+        """装配这个子智能体的上下文包。"""
+        from core.agentkit.sources import ContextBuilder
+
+        builder = ContextBuilder()
+        return builder.build(
+            goal=goal,
+            role=role,
+            agent_id=agent_id,
+            allowed_tools=allowed_tools,
+            allowed_skills=allowed_skills,
+            profile_block=profile_block,
+            context=get_current_context(),
         )
 
     # ===== 调度 =====
@@ -284,6 +358,7 @@ class SubAgentPool:
                 goal=str(spec.get("goal") or "").strip(),
                 name=str(spec.get("name") or "").strip(),
                 depth=depth,
+                role=str(spec.get("role") or "").strip(),
             )
             self._tasks[t.id] = t
             tasks.append(t)
@@ -301,6 +376,16 @@ class SubAgentPool:
         task.started_at = time.time()
         task.progress = "启动"
         await self._emit(on_event, "subagent_spawned", task)
+
+        # 子智能体有自己的 agent 身份 —— 工具调用按它记账，
+        # 将来还能按 agent 隔离工作区（见 core/exec_context.py）。
+        # 用户/会话/执行 id 从父任务继承（asyncio 复制上下文）。
+        try:
+            from core.exec_context import reset_exec_context, set_exec_context
+
+            _exec_tokens = set_exec_context(agent_id=task.id)
+        except Exception:
+            _exec_tokens = ()
 
         try:
             await asyncio.wait_for(
@@ -321,6 +406,12 @@ class SubAgentPool:
             task.progress = "异常退出"
             self.logger.warning("SubAgent", f"{task.name} 失败: {exc}")
         finally:
+            try:
+                from core.exec_context import reset_exec_context
+
+                reset_exec_context(_exec_tokens)
+            except Exception:
+                pass
             task.finished_at = time.time()
             await self._emit(on_event, "subagent_done", task)
 
@@ -335,11 +426,21 @@ class SubAgentPool:
         # 子智能体**不能**再派子智能体（深度已到上限时要把它从工具表里摘掉）
         blocked_tools = {"run_subagents", "subagent_status"} if task.depth >= self.max_depth else set()
 
+        # --- 岗位（角色）---
+        # 角色决定它能用哪些工具、拿多少预算；未知角色退回"通才"。
+        role = self._resolve_role(task.role)
+        task.role = role.role_id
+        allowed_tools = self._allowed_tools(role, blocked_tools)
+        allowed_skills = list(role.skills) or None
+
         findings: List[str] = []
         last_action_sig = ""
         goal_text = task.goal
+        # 轮次上限取「池子上限」与「角色预算」的较小值 —— 角色是岗位，
+        # 岗位的预算就是它能做的最大尝试次数。
+        max_rounds = max(1, min(self.max_rounds, role.budget.max_rounds))
 
-        for round_no in range(1, self.max_rounds + 1):
+        for round_no in range(1, max_rounds + 1):
             task.rounds = round_no
             task.progress = f"第 {round_no} 轮规划"
             await self._emit(on_event, "subagent_progress", task)
@@ -353,21 +454,45 @@ class SubAgentPool:
             # 不传的话，子智能体就是个"没人格的执行器"，
             # 和"结合使用者习惯"的定位不一致。
             profile_block = ""
-            uid = get_current_user()
-            if uid:
-                try:
-                    profile_block = manager.profile_block(uid)
-                except Exception:
-                    profile_block = ""
+            try:
+                profile_block = manager.profile_block()
+            except Exception:
+                profile_block = ""
+
+            # --- 上下文装配（docs/18 §4.3）---
+            #
+            # 改造前：把**主对话全量快照**丢给子智能体（`get_current_context()`）。
+            # 改造后：按角色与任务**装配**一块上下文（带来源、理由、预算、裁剪记录），
+            #         并把工具表裁到角色白名单。
+            #
+            # 失败不致命 —— 装配器出问题就退回"无上下文块"，让子智能体
+            # 至少还能拿到自己的目标。
+            context_blocks: Optional[List[Dict[str, Any]]] = None
+            try:
+                bundle = self._build_context(
+                    goal=enriched,
+                    role=role,
+                    agent_id=task.id,
+                    allowed_tools=allowed_tools,
+                    allowed_skills=allowed_skills,
+                    profile_block=profile_block,
+                )
+                context_blocks = [b.to_dict() for b in bundle.blocks]
+                task.context_chars = bundle.total_chars
+                task.context_dropped = len(bundle.dropped)
+            except Exception as exc:
+                self.logger.warning(
+                    "SubAgent", f"{task.name} 上下文装配失败（继续执行）: {exc}"
+                )
 
             try:
-                # **带上主对话上下文** —— 用户说"发"，子智能体得知道指的是什么。
-                # Context 对象由规划层自己按 token 预算截断，这里不用额外裁剪。
                 plan = await manager.plan(
                     enriched,
                     get_current_context(),
-                    user_id=uid,
                     profile_block=profile_block,
+                    allowed_tools=allowed_tools,
+                    allowed_skills=allowed_skills,
+                    context_blocks=context_blocks,
                 )
             except Exception as exc:
                 task.error = f"规划失败: {exc}"
@@ -445,7 +570,7 @@ class SubAgentPool:
         task.status = STATUS_DONE if findings else STATUS_FAILED
         task.result = self._compose(findings)
         if not findings and not task.error:
-            task.error = f"{self.max_rounds} 轮内没拿到任何有效结果"
+            task.error = f"{max_rounds} 轮内没拿到任何有效结果"
 
     # ===== 内部 =====
 

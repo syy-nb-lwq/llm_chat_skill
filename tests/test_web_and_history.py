@@ -13,7 +13,6 @@ import json
 
 import pytest
 
-from infra.auth import issue_session_token
 
 
 # ============================================================
@@ -189,17 +188,15 @@ def client(tmp_path):
         yield c
 
 
-def test_session_messages_requires_token(client):
+def test_session_messages_needs_no_token(client):
+    """本地单用户：会话历史接口无需令牌。"""
     resp = client.get("/api/session/messages")
-    assert resp.status_code == 401
+    assert resp.status_code == 200
 
 
 def test_session_messages_empty_for_new_session(client):
     """全新会话返回空历史,不是 404 —— 前端不用特殊处理。"""
-    token = issue_session_token("u1", "s-notexist", "c1")
-    resp = client.get(
-        "/api/session/messages", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = client.get("/api/session/messages?session_id=s-notexist")
     assert resp.status_code == 200
     assert resp.json()["messages"] == []
 
@@ -210,13 +207,10 @@ def test_session_messages_returns_saved_history(client):
 
     store = get_session_memory_store()
     sid = "s-history-1"
-    store.append_message(sid, "u1", "user", "我叫小明", turn_id="t1")
-    store.append_message(sid, "u1", "assistant", "好的", turn_id="t1")
+    store.append_message(sid, "user", "我叫小明", turn_id="t1")
+    store.append_message(sid, "assistant", "好的", turn_id="t1")
 
-    token = issue_session_token("u1", sid, "c1")
-    resp = client.get(
-        "/api/session/messages", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = client.get(f"/api/session/messages?session_id={sid}")
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] == 2
@@ -224,25 +218,13 @@ def test_session_messages_returns_saved_history(client):
     assert roles == ["user", "assistant"]
 
 
-def test_session_messages_is_scoped_to_token_user(client):
-    """**只返回令牌里那个用户的消息** —— 不能读到别人的会话。"""
+def test_session_messages_scoped_to_given_session(client):
+    """按 session_id 取消息 —— 别的会话的内容不该混进来。"""
     from core.session_memory import get_session_memory_store
 
     store = get_session_memory_store()
-    sid = "s-history-2"
-    store.append_message(sid, "u2", "user", "别人的秘密", turn_id="t1")
+    store.append_message("s-history-2", "user", "别的会话内容", turn_id="t1")
 
-    # u1 的令牌指向同一个 session_id —— 也不该读到 u2 的内容
-    token = issue_session_token("u1", sid, "c1")
-    resp = client.get(
-        "/api/session/messages", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = client.get("/api/session/messages?session_id=s-history-1")
     assert resp.status_code == 200
-    assert "别人的秘密" not in resp.text
-
-
-def test_session_messages_rejects_bad_token(client):
-    resp = client.get(
-        "/api/session/messages", headers={"Authorization": "Bearer garbage"}
-    )
-    assert resp.status_code == 401
+    assert "别的会话内容" not in resp.text

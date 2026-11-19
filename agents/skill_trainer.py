@@ -107,7 +107,6 @@ class SkillTrainer(BaseAgent):
     async def start_or_continue(
         self,
         user_input: str,
-        user_id: str = "default",
         session_id: str = "default",
     ) -> TeachingSession:
         """处理一轮用户输入,推进教学状态机。
@@ -115,9 +114,9 @@ class SkillTrainer(BaseAgent):
         返回最新的 TeachingSession 状态(已保存)。
         """
         # 1) 找当前活跃教学会话
-        ts = self.teaching_store.find_active_for(user_id, session_id)
+        ts = self.teaching_store.find_active_for(session_id)
         if ts is None:
-            ts = TeachingSession.new(user_id=user_id, session_id=session_id)
+            ts = TeachingSession.new(session_id=session_id)
 
         # 2) 记录本轮证据
         ts.evidence_turns.append({"role": "user", "content": user_input})
@@ -208,17 +207,17 @@ class SkillTrainer(BaseAgent):
         self.teaching_store.save(ts)
         return ts
 
-    def cancel(self, user_id: str, session_id: str) -> bool:
-        ts = self.teaching_store.find_active_for(user_id, session_id)
+    def cancel(self, session_id: str) -> bool:
+        ts = self.teaching_store.find_active_for(session_id)
         if not ts:
             return False
         ts.status = TeachingStatus.CANCELLED
         self.teaching_store.save(ts)
         return True
 
-    def confirm_and_publish(self, user_id: str, session_id: str) -> Tuple[bool, str, Optional[Skill]]:
+    def confirm_and_publish(self, session_id: str) -> Tuple[bool, str, Optional[Skill]]:
         """用户在草稿阶段确认 → 校验 → 写盘 → 注册。"""
-        ts = self.teaching_store.find_active_for(user_id, session_id)
+        ts = self.teaching_store.find_active_for(session_id)
         if not ts or ts.status not in (TeachingStatus.DRAFT,):
             return False, "当前没有可发布的草稿", None
         if not ts.draft_skill:
@@ -307,7 +306,7 @@ class SkillTrainer(BaseAgent):
             steps=steps,
             examples=[t["content"][:200] for t in ts.evidence_turns if t.get("role") == "user"][:3],
             source="taught",
-            author=ts.user_id,
+            author="local",
             updated_at=datetime.now().isoformat(),
         )
 
@@ -383,7 +382,7 @@ class SkillTrainer(BaseAgent):
             self.logger.error("SkillTrainer", f"持久化失败: {e}")
             return False, str(e)
 
-    async def teach(self, user_input: str, user_id: str = "default",
+    async def teach(self, user_input: str,
                     session_id: str = "default") -> Tuple[bool, str, Optional[Skill]]:
         """兼容旧单轮 teach()。
 
@@ -392,11 +391,11 @@ class SkillTrainer(BaseAgent):
         - 否则返回 mid-state
         """
         ts = await self.start_or_continue(
-            user_input, user_id=user_id, session_id=session_id,
+            user_input, session_id=session_id,
         )
         if ts.status == TeachingStatus.DRAFT:
             # 单轮已完整 → 自动确认发布
-            ok, msg, skill = self.confirm_and_publish(user_id, session_id)
+            ok, msg, skill = self.confirm_and_publish(session_id)
             if ok and skill is not None:
                 return True, msg, skill
             return False, msg, None

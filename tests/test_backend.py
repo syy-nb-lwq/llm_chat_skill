@@ -273,9 +273,7 @@ def test_websocket_init_and_ping_via_client():
             payload = connected[0]["payload"]
             issued_client_id = payload["client_id"]
             assert issued_client_id != conn_id
-            assert payload["user_id"]
             assert payload["session_id"]
-            assert payload["token"]
 
             # 3) ping(心跳不要求令牌)
             sub.topic = f"ping/{conn_id}"
@@ -285,15 +283,9 @@ def test_websocket_init_and_ping_via_client():
                 for e in captured
             ), captured
 
-            # 4) reset —— 必须带令牌
+            # 4) reset —— 本地单用户，无需令牌
             sub.topic = f"reset/{conn_id}"
             await dispatcher(sub, {})
-            assert any(
-                e["event"] == "error" and "令牌无效" in e["payload"].get("message", "")
-                for e in captured
-            ), captured
-
-            await dispatcher(sub, {"token": payload["token"]})
             assert any(
                 e["event"] == "reset_ack" and e["client_id"] == conn_id
                 for e in captured
@@ -340,26 +332,10 @@ def test_websocket_init_and_ping_via_client():
 
             Agent.handle = stub_handle
             try:
-                # 无令牌 → 拒绝
+                # 本地单用户：chat 无需令牌，直接放行
                 captured.clear()
                 sub.topic = f"chat/{conn_id}"
                 await dispatcher(sub, {"content": "hello"})
-                assert any(
-                    e["event"] == "error" and "令牌无效" in e["payload"].get("message", "")
-                    for e in captured
-                ), captured
-
-                # 伪造令牌 → 拒绝
-                captured.clear()
-                await dispatcher(sub, {"content": "hello", "token": "forged.token"})
-                assert any(
-                    e["event"] == "error" and "令牌无效" in e["payload"].get("message", "")
-                    for e in captured
-                ), captured
-
-                # 正确令牌 → 放行
-                captured.clear()
-                await dispatcher(sub, {"content": "hello", "token": payload["token"]})
                 assert any(
                     e["event"] == "message_final"
                     for e in captured

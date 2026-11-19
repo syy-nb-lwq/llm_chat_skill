@@ -44,17 +44,17 @@ Frontend / CLI / Streamlit
 - `clientId`（服务端称 `conn_id`）保存在浏览器 `localStorage`，**只用于 topic 路由**，
   不再作为会话键，也不代表身份
 - 后端在 `backend/websocket_handler.py` 分发：
-  - `init/{conn_id}` → 服务端签发身份（`user_id` / `session_id` / `client_id`）+ 签名令牌
-  - `chat/{conn_id}` → 必须带令牌
-  - `reset/{conn_id}` → 必须带令牌
-  - `ping/{conn_id}` → 心跳，不要求令牌
+  - `init/{conn_id}` → 服务端签发身份（`session_id` / `client_id`）
+  - `chat/{conn_id}` → 直接放行
+  - `reset/{conn_id}` → 直接放行
+  - `ping/{conn_id}` → 心跳
 
 ### 2.2 会话层
 
 - `backend/session.py` 按**服务端签发的 `client_id`** 持有 `Session`
 - `SessionManager.issue_identity()` 维护 `conn_id → client_id` 绑定，
-  `resolve_identity()` 校验令牌后才放行
-- 每个 `Session` 内含一个 `Agent`（带签发的 `user_id` / `session_id`）
+  `resolve_identity()` 按绑定放行（本地单用户，无令牌校验）
+- 每个 `Session` 内含一个 `Agent`（带签发的 `session_id`）
 - 支持 TTL GC（会话过期时同步清理身份绑定）
 - dispose 回调现在支持异步 await
 
@@ -253,14 +253,12 @@ Frontend / CLI / Streamlit
 浏览器                                        服务端
   │ localStorage['skill_agent_session']         │
   │      .session_id                            │
-  ├─────── init { user_token, session_id } ─────→│
-  │                                              │ 会话属于该 user_id ?
-  │                                              │   是 → 复用（内容恢复）
-  │                                              │   否 → 新建会话
-  │←──── connected { session_id, token } ────────┤
+  ├─────── init { session_id } ─────────────────→│
+  │                                              │ 复用该会话（内容恢复）
+  │←──── connected { session_id } ───────────────┤
 ```
 
-**归属校验是硬要求**：会话内容是用户数据，仅凭 `session_id` 就给读等于越权。
+**本地单用户**：只有使用者本人，不存在越权读取他人会话的问题。
 
 ### 相关位置
 
@@ -298,40 +296,31 @@ Frontend / CLI / Streamlit
 
 ### 管理接口
 
-- `infra/auth.py` 提供 `require_auth` 装饰器，保护管理类接口
-  （删除技能 / 审批补丁 / 切换特性开关 / 复盘请求）
-- `OWNER_TOKEN` 未配置时跳过校验（单机个人环境的默认行为）
-- 配置后请求必须带 `Authorization: Bearer <token>`；前端通过 `localStorage`
-  里的令牌自动附带请求头
+- 本地单用户，**管理接口无鉴权**（`require_auth` 保留为 no-op 装饰器）
+- 删除技能 / 审批补丁 / 切换特性开关 / 复盘请求 —— 直接调用
 
-### WebSocket 会话身份（C-01）
+### WebSocket 会话身份
 
 - `client_id` 由**服务端签发**：客户端自带的 `conn_id` 只是消息路由句柄
-- `init` 时服务端签发 `user_id` / `session_id` / `client_id`，并下发 HMAC 签名令牌
-  （`base64url(payload).base64url(HMAC-SHA256)`）
-- `chat` / `reset` 必须携带该令牌；缺失、过期或被篡改一律拒绝
-- 签名密钥取 `SESSION_SECRET`，未配置时使用进程级随机密钥
-  （进程重启后旧令牌失效，前端重连时自动重新 `init`）
-- 签发的 `user_id` 会传到 `Agent`，为跨用户记忆隔离打底
+- `init` 时服务端签发 `session_id` / `client_id`
+- `session_id` 存在浏览器 `localStorage`，重连时带回即可续上会话
+- `chat` / `reset` / `feedback` 直接放行（本地单用户，无令牌）
 
-### 用户身份（假用户服务）
+### 为什么没有用户身份
 
-会话身份是**一次连接**的；用户身份是**这个人**的。两者用不同的令牌承载：
+项目跑在使用者本地，只有他一个人。因此**没有多用户隔离、没有令牌、没有登录**：
 
-| | 会话令牌 | 用户令牌 |
+| | 原多用户设计 | 现状 |
 |---|---|---|
-| 生命周期 | 一次 WS 连接 | 长期 |
-| 绑定 | `user_id + session_id + client_id` | `user_id + tenant_id` |
-| 用途 | 证明"这条连接是谁" | 证明"这个人还是那个人" |
-| 过期 | 随连接断开失效 | 默认不过期 |
+| 身份 | `user_id` + `tenant_id` | 只有 `session_id` |
+| 令牌 | 会话令牌 + 长期用户令牌（HMAC） | 无 |
+| 假用户服务 | `core/user_service.py` + `POST /api/users` | 已删除（端点保留为兼容） |
+| 管理接口鉴权 | `OWNER_TOKEN` | 无（`require_auth` 为 no-op） |
+| 记忆隔离 | 按 `user_id` 过滤 | 按 `scope` + `agent_id` 分层 |
+| 执行目录 | 按 `user_id + session_id` | 按 `session_id` |
 
-- `core/user_service.py` 负责签发/解析用户令牌、维护用户档案（落盘 `memory/users/<id>.json`）
-- `init` 时客户端回传 `user_token`：有效 → 认出同一个用户；无效/为空 → 新建用户
-- 前端把 `user_token` 存在 `localStorage`，下次连接自动带上
-- **修掉的缺陷**：改造前每次 WS 连接都新生成 `user_id`，浏览器刷新一次就是一个新用户，
-  长期记忆会按连接碎片化、用户画像永远积累不起来
-- `POST /api/users` 可签发新用户与令牌 —— 用来模拟多用户、验证记忆隔离
-- 将来接入真实登录时，只需把 `UserService.get_or_create()` 换成"从登录态取 user_id"，上层无感
+**保留的是多智能体维度**：智能体私有记忆、工具归属（`owner_agent_id`）、
+执行目录隔离都还在 —— 它们与用户数无关。剥离的只是"用户"这一个维度。
 
 ## 8. 当前设计取舍
 

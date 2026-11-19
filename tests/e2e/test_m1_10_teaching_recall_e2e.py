@@ -75,7 +75,7 @@ async def test_three_round_teaching_reaches_draft(e2e_env):
 
     ts1 = await trainer.start_or_continue(
         "以后帮我整理日报",
-        user_id=user_id, session_id=session_id,
+        session_id=session_id,
     )
     assert ts1.status == TeachingStatus.COLLECTING, f"Round1 状态应为 COLLECTING,实际 {ts1.status}"
     assert ts1.partial_skill.get("name") == "DailyReport"
@@ -92,7 +92,7 @@ async def test_three_round_teaching_reaches_draft(e2e_env):
 
     ts2 = await trainer.start_or_continue(
         "需要包含:今日完成、问题、明日计划",
-        user_id=user_id, session_id=session_id,
+        session_id=session_id,
     )
     assert ts2.partial_skill.get("method"), "method 应当被填写"
     assert "capability" in ts2.missing_fields, "capability 仍应缺失"
@@ -108,7 +108,7 @@ async def test_three_round_teaching_reaches_draft(e2e_env):
 
     ts3 = await trainer.start_or_continue(
         "能力是:按上面的栏目生成日报,风格简洁,不披露客户名称",
-        user_id=user_id, session_id=session_id,
+        session_id=session_id,
     )
     assert ts3.missing_fields == [], f"字段应齐全,仍缺 {ts3.missing_fields}"
     assert ts3.status == TeachingStatus.DRAFT, f"Round3 应为 DRAFT,实际 {ts3.status}"
@@ -145,7 +145,7 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
     )
     ts1 = await trainer.start_or_continue(
         "以后帮我写日报",
-        user_id=user_id, session_id=session_id,
+        session_id=session_id,
     )
     assert ts1.status == TeachingStatus.COLLECTING
 
@@ -157,7 +157,7 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
     )
     ts2 = await trainer.start_or_continue(
         "分三块:完成/问题/计划",
-        user_id=user_id, session_id=session_id,
+        session_id=session_id,
     )
 
     _queue_extract(llm,
@@ -169,12 +169,12 @@ async def test_confirm_publish_then_restart_then_recall(e2e_env):
     )
     ts3 = await trainer.start_or_continue(
         "风格简洁,不披露客户名",
-        user_id=user_id, session_id=session_id,
+        session_id=session_id,
     )
     assert ts3.status == TeachingStatus.DRAFT
 
     # 确认发布
-    ok, msg, skill = trainer.confirm_and_publish(user_id, session_id)
+    ok, msg, skill = trainer.confirm_and_publish(session_id)
     assert ok, f"发布失败: {msg}"
     assert skill is not None
     assert skill.name == "DailyReport"
@@ -272,22 +272,22 @@ async def test_execution_record_carries_skill_version(e2e_env):
     _queue_extract(llm, name="DailyReport", method="", capability="",
                    patterns=["日报"])
     await trainer.start_or_continue("以后帮我写日报",
-                                    user_id=user_id, session_id=session_id)
+                                    session_id=session_id)
 
     _queue_extract(llm, name="DailyReport",
                    method="1) 完成 2) 问题 3) 计划", capability="")
     await trainer.start_or_continue("分三块写",
-                                    user_id=user_id, session_id=session_id)
+                                    session_id=session_id)
 
     _queue_extract(llm, name="DailyReport",
                    method="1) 完成 2) 问题 3) 计划",
                    capability="按三块生成日报,简洁不披露客户名",
                    patterns=["日报", "daily"])
     ts3 = await trainer.start_or_continue("简洁,不披露客户名",
-                                          user_id=user_id, session_id=session_id)
+                                          session_id=session_id)
     assert ts3.status == TeachingStatus.DRAFT
 
-    ok, msg, skill = trainer.confirm_and_publish(user_id, session_id)
+    ok, msg, skill = trainer.confirm_and_publish(session_id)
     assert ok and skill is not None
 
     # ---------- 模拟重启 ----------
@@ -379,15 +379,15 @@ async def test_persisted_yaml_is_immutable_and_active(e2e_env):
     )
     await trainer.start_or_continue(
         "以后帮我整理日报,分三块:完成、问题、计划",
-        user_id=user_id, session_id=session_id,
+        session_id=session_id,
     )
 
     # 自动 publish(teach() 在信息完整时会自动 confirm_and_publish)
     # 这里 teaching session 可能仍在 COLLECTING/DRAFT,需要再调一次 confirm_and_publish
-    ts = teaching_store.find_active_for(user_id, session_id)
+    ts = teaching_store.find_active_for(session_id)
     assert ts is not None
     if ts.status == TeachingStatus.DRAFT:
-        ok, msg, skill = trainer.confirm_and_publish(user_id, session_id)
+        ok, msg, skill = trainer.confirm_and_publish(session_id)
         assert ok, f"发布失败: {msg}"
 
     yaml_path = runtime["skills_path"] / "user" / "DailyReport@1.0.0.yaml"

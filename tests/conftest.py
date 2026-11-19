@@ -213,7 +213,6 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     from tools.base import reset_tool_registry
     from agents import teaching_session as ts_mod
     from core import session_memory as sm_mod
-    from core import user_service as us_mod
     from core import memory_db as mdb_mod
     from core import semantic_memory as sem_mod
     from core import memory_writer as mw_mod
@@ -293,7 +292,6 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     skill_mod.reset_skill_store()
     ts_mod.reset_teaching_store()
     sm_mod.reset_session_memory_store()
-    us_mod.reset_user_service()
     reset_l1_classifier()
     reset_clarifier()
     # 清理 teaching 持久化目录

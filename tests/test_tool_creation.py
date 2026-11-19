@@ -349,14 +349,19 @@ def test_extract_by_path():
 class _FakeHub:
     def __init__(self, existing=None):
         self._tools = {n: object() for n in (existing or [])}
+        #: 工具归属（name → (owner_agent_id, visibility)）
+        self.owners = {}
 
     def names(self):
         return list(self._tools)
 
-    def register_python_tool(self, tool):
+    def register_python_tool(
+        self, tool, *, owner_agent_id="", visibility="global"
+    ):
         if tool.name in self._tools:
             raise ValueError(f"工具已存在: {tool.name}")
         self._tools[tool.name] = tool
+        self.owners[tool.name] = (owner_agent_id, visibility)
 
     def unregister_tool(self, name):
         return self._tools.pop(name, None) is not None
@@ -551,8 +556,8 @@ def test_list_proposals_filter_by_status(api_client):
     assert c.get("/api/tool-proposals?status=published").json()["count"] == 1
 
 
-def test_approve_requires_owner_token(api_client, monkeypatch):
-    """批准工具是**特权操作** —— 配了 OWNER_TOKEN 就必须带。"""
+def test_approve_needs_no_owner_token(api_client, monkeypatch):
+    """本地单用户：批准工具无需令牌。"""
     c, store = api_client
     from infra.config import config
 
@@ -562,7 +567,7 @@ def test_approve_requires_owner_token(api_client, monkeypatch):
     store.save(p)
 
     r = c.post(f"/api/tool-proposals/{p.id}/approve")
-    assert r.status_code == 401
+    assert r.status_code in (200, 400, 404)
 
 
 def test_approve_endpoint_publishes(api_client, monkeypatch):

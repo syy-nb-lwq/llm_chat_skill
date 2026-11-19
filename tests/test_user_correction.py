@@ -481,7 +481,6 @@ async def test_feedback_topic_slices_conn_id_correctly():
             await dispatcher(
                 _Sub(),
                 {
-                    "token": identity.token,
                     "execution_id": "exec-not-exist",
                     "accepted": False,
                     "comment": "不对",
@@ -501,8 +500,8 @@ async def test_feedback_topic_slices_conn_id_correctly():
 
 
 @pytest.mark.asyncio
-async def test_feedback_topic_rejects_invalid_token():
-    """令牌无效 → 推 error 事件,不能静默"""
+async def test_feedback_topic_rejects_uninitialized_conn():
+    """连接未初始化 → 推 error 事件,不能静默"""
     from backend.websocket_handler import dispatcher
 
     pushed = []

@@ -125,10 +125,10 @@ def test_assistant_message_does_not_inherit_last_tool_tasks():
 def test_tool_tasks_roundtrip_through_db(tmp_path):
     store = SessionMemoryStore(db_path=tmp_path / "s.db")
     store.append_message(
-        "s1", "u1", "assistant", "回答",
+        "s1", "assistant", "回答",
         tool_tasks=[{"id": "t1", "type": "weather"}],
     )
-    store.append_message("s1", "u1", "assistant", "不用工具", tool_tasks=[])
+    store.append_message("s1", "assistant", "不用工具", tool_tasks=[])
 
     msgs = store.get_messages("s1")
     assert msgs[0].tool_tasks == [{"id": "t1", "type": "weather"}]
@@ -137,7 +137,7 @@ def test_tool_tasks_roundtrip_through_db(tmp_path):
 
 def test_tool_tasks_absent_is_none(tmp_path):
     store = SessionMemoryStore(db_path=tmp_path / "s.db")
-    store.append_message("s1", "u1", "user", "hi")
+    store.append_message("s1", "user", "hi")
     assert store.get_messages("s1")[0].tool_tasks is None
 
 
@@ -146,13 +146,13 @@ async def test_agent_restores_last_tool_tasks(patched_store):
     """会话恢复后仍知道上一轮调了哪些工具(重试要用)。"""
     from core.agent import Agent
 
-    a1 = Agent(session_id="s-rt", user_id="u1", persist_session=True)
+    a1 = Agent(session_id="s-rt", persist_session=True)
     a1.context.add_user_message("查天气")
     a1.context.add_assistant_message(
         "好的", tool_tasks=[{"id": "t1", "type": "weather"}]
     )
 
-    a2 = Agent(session_id="s-rt", user_id="u1", persist_session=True)
+    a2 = Agent(session_id="s-rt", persist_session=True)
     assert a2.context.get_last_tool_tasks() == [{"id": "t1", "type": "weather"}]
 
 
@@ -185,8 +185,7 @@ async def test_rollup_summary_is_capped(patched_store, monkeypatch):
         m = ctx.add_message("user", f"msg{i}")
         m.seq = i + 1
         await rollup_mod.maybe_rollup(
-            ctx, patched_store, session_id="s-cap", user_id="u1",
-            threshold=10, keep_recent=5,
+            ctx, patched_store, session_id="s-cap", threshold=10, keep_recent=5,
         )
 
     assert len(ctx.get_summary()) <= Context.MAX_SUMMARY_CHARS + 40
@@ -211,8 +210,7 @@ async def test_rollup_summary_in_db_matches_memory(patched_store, monkeypatch):
         m = ctx.add_message("user", f"msg{i}")
         m.seq = i + 1
         await rollup_mod.maybe_rollup(
-            ctx, patched_store, session_id="s-sync", user_id="u1",
-            threshold=10, keep_recent=5,
+            ctx, patched_store, session_id="s-sync", threshold=10, keep_recent=5,
         )
 
     stored = patched_store.get_latest_summary("s-sync")
@@ -236,12 +234,11 @@ async def test_summary_survives_session_restore(patched_store, monkeypatch):
         m = ctx.add_message("user", f"msg{i}")
         m.seq = i + 1
     await rollup_mod.maybe_rollup(
-        ctx, patched_store, session_id="s-rs", user_id="u1",
-        threshold=10, keep_recent=5,
+        ctx, patched_store, session_id="s-rs", threshold=10, keep_recent=5,
     )
     expected = ctx.get_summary()
 
-    agent = Agent(session_id="s-rs", user_id="u1", persist_session=True)
+    agent = Agent(session_id="s-rs", persist_session=True)
     assert agent.context.get_summary() == expected
 
 
@@ -256,16 +253,16 @@ async def test_reset_drops_pre_reset_summary(patched_store):
     """
     from core.agent import Agent
 
-    agent = Agent(session_id="s-reset", user_id="u1", persist_session=True)
+    agent = Agent(session_id="s-reset", persist_session=True)
     agent.context.add_user_message("旧话题")
     agent.context.add_assistant_message("旧回答")
     patched_store.save_summary(
-        session_id="s-reset", user_id="u1", cover_until_seq=1, summary="[旧摘要]"
+        session_id="s-reset", cover_until_seq=1, summary="[旧摘要]"
     )
 
     agent.reset()
 
-    agent2 = Agent(session_id="s-reset", user_id="u1", persist_session=True)
+    agent2 = Agent(session_id="s-reset", persist_session=True)
     assert agent2.context.get_summary() == ""
 
 
@@ -274,15 +271,15 @@ async def test_summary_after_reset_is_kept(patched_store):
     """reset 之后产生的新摘要要能正常装回。"""
     from core.agent import Agent
 
-    agent = Agent(session_id="s-reset2", user_id="u1", persist_session=True)
+    agent = Agent(session_id="s-reset2", persist_session=True)
     agent.context.add_user_message("旧话题")
     agent.reset()
     agent.context.add_user_message("新话题")
     patched_store.save_summary(
-        session_id="s-reset2", user_id="u1", cover_until_seq=99, summary="[新摘要]"
+        session_id="s-reset2", cover_until_seq=99, summary="[新摘要]"
     )
 
-    agent2 = Agent(session_id="s-reset2", user_id="u1", persist_session=True)
+    agent2 = Agent(session_id="s-reset2", persist_session=True)
     assert agent2.context.get_summary() == "[新摘要]"
 
 
@@ -322,7 +319,7 @@ def test_store_reuses_connection(tmp_path, monkeypatch):
     calls.clear()
 
     for i in range(5):
-        store.append_message("s1", "u1", "user", f"m{i}")
+        store.append_message("s1", "user", f"m{i}")
         store.get_messages("s1")
 
     assert calls == [], f"每条消息都新建连接(共 {len(calls)} 次)"
@@ -337,14 +334,14 @@ def test_store_is_thread_safe(tmp_path):
     import threading
 
     store = SessionMemoryStore(db_path=tmp_path / "s.db")
-    store.ensure_session("s1", "u1")
+    store.ensure_session("s1")
 
     errors = []
 
     def writer(n):
         try:
             for i in range(10):
-                store.append_message("s1", "u1", "user", f"t{n}-{i}")
+                store.append_message("s1", "user", f"t{n}-{i}")
         except Exception as exc:  # pragma: no cover - 出错就说明并发有问题
             errors.append(exc)
 

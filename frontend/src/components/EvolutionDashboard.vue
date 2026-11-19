@@ -74,23 +74,12 @@
       <div class="action-buttons">
         <button @click="exportData" class="action-btn">导出数据</button>
       </div>
-      <div class="owner-token">
-        <label for="owner-token-input">管理令牌(OWNER_TOKEN)</label>
-        <input
-          id="owner-token-input"
-          v-model="ownerTokenInput"
-          type="password"
-          placeholder="后端未配置 OWNER_TOKEN 时可留空"
-          @change="saveOwnerToken"
-        />
-        <p class="hint">后端配置了 OWNER_TOKEN 后,删除技能 / 审批补丁等管理操作需要该令牌。</p>
-      </div>
     </div>
   </div>
 </template>
 
 <script>
-import { API_BASE, apiFetch, getOwnerToken, setOwnerToken } from '../config'  // M0-04 / C-01
+import { API_BASE, apiFetch } from '../config'
 
 export default {
   name: 'EvolutionDashboard',
@@ -101,18 +90,12 @@ export default {
       reflectionReports: [],
       loading: false,
       error: '',
-      ownerTokenInput: getOwnerToken(),
     }
   },
   mounted() {
     this.refresh()
   },
   methods: {
-    saveOwnerToken() {
-      setOwnerToken(this.ownerTokenInput)
-      this.error = ''
-      this.refresh()
-    },
 
     async refresh() {
       this.loading = true
@@ -330,29 +313,6 @@ export default {
   padding: 10px;
   margin-bottom: 8px;
   border-left: 3px solid #42a5f5;
-}
-
-.owner-token {
-  margin-top: 10px;
-}
-.owner-token label {
-  display: block;
-  font-size: 11px;
-  color: #888;
-  margin-bottom: 4px;
-}
-.owner-token input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 5px 8px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(0, 0, 0, 0.25);
-  color: inherit;
-  font-size: 12px;
-}
-.owner-token .hint {
-  margin: 4px 0 0;
 }
 
 .report-header {

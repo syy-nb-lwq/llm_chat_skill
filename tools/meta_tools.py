@@ -186,6 +186,9 @@ class CreateToolTool(Tool):
             if not ok:
                 return ToolResult(success=False, error=msg, data={"name": proposal.name})
             self.logger.info("CreateTool", f"自动发布工具: {proposal.name}")
+            self._audit_tool_event(
+                "tool_published", proposal, extra={"reviewer": "auto"}
+            )
             return ToolResult(
                 success=True,
                 data={
@@ -194,6 +197,7 @@ class CreateToolTool(Tool):
                     "risk": proposal.risk,
                     "warnings": warnings,
                     "tests": test_report or None,
+                    "visibility": proposal.visibility,
                     "next": "工具已生效，现在可以直接调用它完成任务。",
                 },
             )
@@ -208,6 +212,7 @@ class CreateToolTool(Tool):
         )
         store.save(proposal)
         self.logger.info("CreateTool", f"待审工具: {proposal.name} ({proposal.risk})")
+        self._audit_tool_event("tool_proposed", proposal, extra={"reviewer": ""})
         return ToolResult(
             success=True,
             data={
@@ -216,6 +221,7 @@ class CreateToolTool(Tool):
                 "risk": proposal.risk,
                 "proposal_id": proposal.id,
                 "warnings": warnings,
+                "visibility": proposal.visibility,
                 "next": (
                     "已提交待审。这只工具需要人工批准（会改外部状态或要执行代码），"
                     "批准前 planner 看不到它。告诉用户需要批准，"
@@ -223,6 +229,26 @@ class CreateToolTool(Tool):
                 ),
             },
         )
+
+    def _audit_tool_event(self, event: str, proposal, *, extra: dict | None = None) -> None:
+        """工具提案/发布写审计（写失败不影响业务）。"""
+        try:
+            from core.audit import append_jsonl, current_identity, event as mk_event
+
+            payload = mk_event(
+                event,
+                **current_identity(),
+                name=getattr(proposal, "name", ""),
+                proposal_id=getattr(proposal, "id", ""),
+                kind=getattr(proposal, "kind", ""),
+                risk=getattr(proposal, "risk", ""),
+                owner_agent_id=getattr(proposal, "owner_agent_id", ""),
+                visibility=getattr(proposal, "visibility", ""),
+                **(extra or {}),
+            )
+            append_jsonl("tools.jsonl", payload)
+        except Exception:
+            pass
 
     async def _run_tests(self, proposal) -> Dict[str, Any]:
         """跑提案里带的测试用例。返回 {ran, passed, failed}。"""

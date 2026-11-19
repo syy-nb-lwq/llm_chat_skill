@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import re
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -84,7 +83,24 @@ class WriteScriptTool(Tool):
 
     def __init__(self, run_id: str = ""):
         self.logger = get_logger()
-        self.run_id = run_id or uuid.uuid4().hex[:8]
+        #: 显式指定的目录名（测试与特殊场景用）。为空则按会话作用域自动算。
+        self.run_id = run_id or ""
+
+    def _scope_dir(self) -> str:
+        """脚本落盘的子目录名。
+
+        **按会话隔离**（见 `core/exec_context.py`）：
+        同一会话内目录稳定 → 下一轮还能引用上一轮存的脚本；
+        不同会话/用户目录不同 → 并发时不会互相覆盖同名脚本。
+
+        实机踩过（docs/17 P0-2）：原来是**进程级随机**目录（工具实例化时
+        随机一次，全进程共享），多用户共用一个目录。
+        """
+        if self.run_id:
+            return self.run_id
+        from core.exec_context import current_scope_key
+
+        return current_scope_key()
 
     def schema(self) -> ToolSchema:
         return ToolSchema(
@@ -144,7 +160,8 @@ class WriteScriptTool(Tool):
                 error=f"不支持的文件类型 {suffix}(允许: {', '.join(ALLOWED_SUFFIXES)})",
             )
 
-        target_dir = workspace_dir() / self.run_id
+        scope_dir = self._scope_dir()
+        target_dir = workspace_dir() / scope_dir
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / name
 
@@ -171,7 +188,7 @@ class WriteScriptTool(Tool):
                 "path": str(target),
                 "name": name,
                 "size": len(content.encode("utf-8")),
-                "run_id": self.run_id,
+                "run_id": scope_dir,
                 "description": description,
                 # 脚本也是交付物 —— 用统一的 artifacts 结构,
                 # 前端「生成的文件」区才能把它列出来下载
@@ -181,7 +198,7 @@ class WriteScriptTool(Tool):
                     "size": len(content.encode("utf-8")),
                 }],
             },
-            meta={"run_id": self.run_id},
+            meta={"run_id": scope_dir},
         )
 
 
@@ -202,7 +219,15 @@ class ListScriptsTool(Tool):
 
     async def execute(self, **kwargs) -> ToolResult:
         ws = workspace_dir()
+        # **只列当前作用域的脚本** —— 否则 A 能看到 B 存的脚本。
+        from core.exec_context import get_exec_context
+
+        ctx = get_exec_context()
+        if ctx.is_scoped:
+            ws = ws / ctx.scope_key
         items: List[Dict[str, Any]] = []
+        if not ws.exists():
+            return ToolResult(success=True, data={"scripts": [], "count": 0})
         for path in sorted(ws.rglob("*")):
             if not path.is_file():
                 continue

@@ -366,7 +366,7 @@ def _fake_plan(intent):
     from agents.manager import PlanResult
 
     async def _plan(
-        user_input, context=None, session_id="", user_id="", profile_block=""
+        user_input, context=None, session_id="", profile_block=""
     ):
         return PlanResult(
             intent=intent,
@@ -456,12 +456,11 @@ async def test_ws_clarification_event(monkeypatch):
         await dispatcher(sub, {"client_id": conn_id})
         connected = [e for e in captured if e["event"] == "connected"]
         assert connected, captured
-        token = connected[0]["payload"]["token"]
         issued_client_id = connected[0]["payload"]["client_id"]
 
         captured.clear()
         sub.topic = f"chat/{conn_id}"
-        await dispatcher(sub, {"content": "那个事你懂的", "token": token})
+        await dispatcher(sub, {"content": "那个事你懂的"})
 
         clarification = [
             e for e in captured if e["event"] == "clarification_request"

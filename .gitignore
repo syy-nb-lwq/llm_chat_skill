@@ -29,7 +29,10 @@ build/
 uploads/
 outputs/
 vector_store/
-memory/
+# ACL 审计报告（运行时产物）
+.acl_report/
+# 只忽略项目根的 memory/（运行时数据），不影响 .workbuddy/memory/ 里的项目记忆
+/memory/
 *.xlsx
 *.xls
 
