@@ -67,11 +67,18 @@ class LongTermMemory:
 
     # ===== 画像：读 =====
 
-    def profile_block(self, limit: int = 20, max_chars: int = 400) -> str:
-        """常驻注入的画像文本块（每轮只取一次，由 Agent 缓存）。"""
+    def profile_block(
+        self, limit: int = 20, max_chars: int = 400, query: str = ""
+    ) -> str:
+        """常驻注入的画像文本块（每轮只取一次，由 Agent 缓存）。
+
+        `query` 是本轮用户输入：**限定场景**的画像（"在 minimax 上用国内站"）
+        只在 query 提到该场景时才注入，否则整条不出现 —— 不然聊电商时
+        助手会拿它去否掉跨境电商。
+        """
         try:
             return self.profile_store.build_profile_block(
-                limit=limit, max_chars=max_chars
+                limit=limit, max_chars=max_chars, query=query
             )
         except Exception as exc:
             try:
@@ -97,11 +104,22 @@ class LongTermMemory:
     # ===== 画像：写（只允许后台写入器） =====
 
     async def record_turn(
-        self, user_input: str, *, session_id: str = "", turn_id: str = ""
+        self,
+        user_input: str,
+        *,
+        session_id: str = "",
+        turn_id: str = "",
+        context: str = "",
     ) -> Any:
-        """从一轮用户输入里抽取画像并入库（LLM + 证据校验）。"""
+        """从一轮用户输入里抽取画像并入库（LLM + 证据校验）。
+
+        `context` = 最近几轮对白，只用来让抽取器听懂"国际站"指的是哪个平台。
+        """
         return await self.writer.record_turn(
-            user_input, session_id=session_id, turn_id=turn_id
+            user_input,
+            session_id=session_id,
+            turn_id=turn_id,
+            context=context,
         )
 
     # ===== 经验：读 =====

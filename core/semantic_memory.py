@@ -23,6 +23,31 @@ RRF_K = 60
 #: 画像常驻注入的字符预算(粗略 ≈ token × 1.5)
 PROFILE_BLOCK_MAX_CHARS = 400
 
+
+def _norm_for_match(text: str) -> str:
+    """匹配用的归一化：去空白 + 小写。
+
+    "minimax" / "MiniMax" / "Mini Max" 在中文输入法里都会出现，
+    限定名对不上就等于没过滤。
+    """
+    return "".join((text or "").split()).lower()
+
+
+def _applies_to_of(entry: Any) -> str:
+    """取一条画像的限定名；全局条目返回空串。
+
+    优先读 `metadata.applies_to`；老数据（这个字段之前不存在）没有它，
+    只能算全局 —— 迁移脚本会把已知的几条补上（见 docs/13）。
+    也兼容"只写了 tag 没写 metadata"的写入路径。
+    """
+    meta = getattr(entry, "metadata", None) or {}
+    if isinstance(meta, dict):
+        value = str(meta.get("applies_to") or "").strip()
+        if value:
+            return value
+    tags = getattr(entry, "tags", None) or []
+    return str(tags[0]).strip() if tags else ""
+
 #: 向量通道的默认最小余弦相似度。
 #:
 #: 不能是 0 —— 那样任何带向量的记忆都会进融合,随机分数会盖掉全文检索的
@@ -289,14 +314,33 @@ class SemanticMemoryStore:
         return entries[:limit]
 
     def build_profile_block(
-        self, limit: int = 20, max_chars: int = PROFILE_BLOCK_MAX_CHARS
+        self,
+        limit: int = 20,
+        max_chars: int = PROFILE_BLOCK_MAX_CHARS,
+        query: str = "",
     ) -> str:
         """把用户画像拼成可注入提示词的文本块
 
         预算上限按字符数卡,超了就截断 —— 画像最多 ~400 字符,
         不跟会话内容抢 token(docs/13 §2.8 召回策略)。
+
+        ## 为什么要按 query 过滤（2026-11-20 加）
+
+        画像里有两种东西，混在一起注入会出事：
+
+        - **全局的**：「我是做横屏短剧的」「不喜欢表情符号」—— 任何话题都成立
+        - **限定场景的**：「在 minimax 上优先用国内站」—— 只在聊 minimax 时成立
+
+        以前不分，全都挂在 `[用户画像](请始终遵守)` 下面。于是用户说
+        「我要做电商」，助手看到一条「不要使用国际站」就把它当成了
+        「这个人拒绝一切国际站」，直接否掉跨境电商的建议 —— 而用户当时
+        说的只是**某个 AI 服务商**用国内站还是海外站。
+
+        现在：限定条目只在 `query` 里出现了它的限定名时才注入，**不相关就
+        完全不出现**。不出现比"出现了但标注了适用条件"更可靠 —— 模型很可能
+        忽略标注。
         """
-        entries = self.get_profile(limit=limit)
+        entries = self.get_profile(limit=max(limit * 2, 20))
         if not entries:
             return ""
 
@@ -307,18 +351,46 @@ class SemanticMemoryStore:
             "constraint": "雷区",
             "fact": "事实",
         }
+        haystack = _norm_for_match(query)
+
+        global_lines: List[str] = []
+        scoped_lines: List[str] = []
+        for entry in entries:
+            text = f"- [{label.get(entry.type, entry.type)}] {entry.content}"
+            applies_to = _applies_to_of(entry)
+            if not applies_to:
+                global_lines.append(text)
+                continue
+            # query 空 = 不知道在聊什么（澄清分支等）→ 只注入全局的
+            if haystack and _norm_for_match(applies_to) in haystack:
+                scoped_lines.append(text)
+
+        # 全局的先占预算，限定的用剩下的 —— 全局那条永远该在场
         lines: List[str] = []
         used = 0
-        for entry in entries:
-            line = f"- [{label.get(entry.type, entry.type)}] {entry.content}"
-            if used + len(line) > max_chars:
+        for text in global_lines:
+            if used + len(text) > max_chars:
                 break
-            lines.append(line)
-            used += len(line) + 1
-        if not lines:
+            lines.append(text)
+            used += len(text) + 1
+
+        scoped_used: List[str] = []
+        for text in scoped_lines:
+            if used + len(text) > max_chars:
+                break
+            scoped_used.append(text)
+            used += len(text) + 1
+
+        if not lines and not scoped_used:
             return ""
 
-        return "[用户画像](长期记忆,请始终遵守)\n" + "\n".join(lines)
+        out = ["[用户画像](长期记忆)"]
+        out.extend(lines)
+        if scoped_used:
+            # 单独起一个小标题：这批只在当前话题下成立，别推广
+            out.append("[当前话题相关](只在本话题成立，不要推广到其他场景)")
+            out.extend(scoped_used)
+        return "\n".join(out)
 
     def add_sync(
         self,

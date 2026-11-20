@@ -123,7 +123,7 @@ def test_long_term_profile_block_is_bounded(monkeypatch):
     from core.memorykit.long_term import LongTermMemory
 
     class _FakeProfile:
-        def build_profile_block(self, limit=20, max_chars=400):
+        def build_profile_block(self, limit=20, max_chars=400, query=""):
             assert max_chars == 400       # 常驻注入的预算不能被随手放大
             return "[用户画像]\n- [偏好] 用中文"
 

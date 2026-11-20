@@ -362,7 +362,7 @@ def _offline_profile_extractor(monkeypatch):
     """
     import core.memory_writer as mw
 
-    async def _stub(text):
+    async def _stub(text, context=""):
         return mw.extract_candidates(text)
 
     monkeypatch.setattr(mw, "_extractor", _stub)

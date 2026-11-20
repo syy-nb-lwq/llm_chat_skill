@@ -153,12 +153,20 @@ def test_prompt_demands_long_term_only():
 def test_prompt_contains_the_real_bad_example():
     """把实机踩过的误抽案例写进提示词，防止它再犯。
 
-    用户说过：「不要用国际站然后可以开始生成视频」
-    规则版把它抽成了 `constraint`。提示词里必须点名这个坑。
+    两个真实案例，第二个更危险：
+    1. 「不要用国际站然后可以开始生成视频」被抽成 `constraint`
+       —— 一次性指令被当成长期雷区
+    2. 「minimax 我以后都用国内站」被抽成「用户不要使用国际站」
+       —— **限定被放大成普遍结论**，于是聊电商时助手也拿它否掉跨境方案
     """
     p = PROFILE_PROMPT
     assert "不要用国际站" in p
-    assert "不构成长期雷区" in p
+    assert "minimax" in p
+    # 限定字段 + 不许放大的规则必须在提示词里
+    assert "applies_to" in p
+    assert "放大" in p
+    # 平台站群 ≠ 跨境业务，这一点必须点明，否则模型会自己联想
+    assert "跨境电商" in p
 
 
 def test_prompt_allows_empty_result():
@@ -220,3 +228,118 @@ async def test_empty_facts_is_normal():
 
     got = await extract_with_llm(TEXT, llm=FakeLLM(json.dumps({"facts": []})))
     assert got == []
+
+
+# ============================================================
+# 5. 限定作用域 —— 不许把"某个平台的选择"放大成普遍结论
+# ============================================================
+#
+# 实机翻车：用户在前文讨论 minimax（有国内站/海外站）时说
+# 「我以后都不要用国际站，只用国内站」，被抽成
+#     constraint: 用户以后不要使用国际站，只使用国内站
+# 于是几天后用户说「我要做电商」，助手拿这条去否掉跨境电商方案。
+# 用户从没说过"不做跨境"，他说的是某个 AI 服务商用哪个站。
+#
+# 修法：抽取时带上前几轮上下文（听懂指代）+ 新增 applies_to（限定名）+
+# 注入时按话题过滤（semantic_memory.build_profile_block）。
+
+SCOPED_TEXT = "我以后都不要用国际站，只用国内站。"
+SCOPED_CONTEXT = "用户：minimax 那个视频生成怎么调\n助手：可以用国内站 platform.minimaxi.com"
+
+
+def _scoped_fact(**kw):
+    base = {
+        "type": "preference",
+        "content": "在 minimax 上优先使用国内站",
+        "applies_to": "minimax",
+        "evidence": "我以后都不要用国际站",
+        "confidence": 0.9,
+        "importance": 0.8,
+    }
+    base.update(kw)
+    return base
+
+
+def test_keeps_applies_to_that_appears_in_context():
+    """平台名只在**前文**里出现过 —— 这是最常见的真实情况，必须认。"""
+    got = validate_facts({"facts": [_scoped_fact()]}, SCOPED_TEXT, context=SCOPED_CONTEXT)
+    assert len(got) == 1
+    assert got[0]["applies_to"] == "minimax"
+
+
+def test_keeps_applies_to_that_appears_in_current_sentence():
+    got = validate_facts(
+        {"facts": [_scoped_fact(evidence="minimax 用国内站")]},
+        "minimax 用国内站就行",
+        context="",
+    )
+    assert len(got) == 1
+
+
+def test_rejects_invented_applies_to():
+    """限定名在前文和当前句里都没有 = 前提是编的。
+
+    这比不填更危险：将来按名字做相关性过滤，会挂到一个不存在的场景上。
+    """
+    got = validate_facts(
+        {"facts": [_scoped_fact(applies_to="淘宝")]}, SCOPED_TEXT, context=SCOPED_CONTEXT
+    )
+    assert got == []
+
+
+def test_evidence_still_cannot_come_from_context():
+    """上下文只用来听懂指代，**不能**当证据 —— 否则模型可以拿前文凑数。"""
+    got = validate_facts(
+        {"facts": [_scoped_fact(evidence="minimax 那个视频生成怎么调")]},
+        SCOPED_TEXT,
+        context=SCOPED_CONTEXT,
+    )
+    assert got == []
+
+
+def test_global_fact_has_empty_applies_to():
+    """对所有场景都成立的话，applies_to 留空。"""
+    got = validate_facts({"facts": [_fact()]}, TEXT)
+    assert len(got) == 1
+    assert got[0]["applies_to"] == ""
+
+
+def test_too_long_applies_to_is_rejected():
+    """applies_to 是个名字，不是句子。"""
+    long_name = "某" * 60
+    got = validate_facts(
+        {"facts": [_scoped_fact(applies_to=long_name, evidence=long_name)]},
+        long_name + SCOPED_TEXT,
+    )
+    assert got == []
+
+
+@pytest.mark.asyncio
+async def test_context_is_rendered_into_prompt():
+    """前几轮必须真的进了提示词，否则模型还是看不见 minimax。"""
+    import json
+
+    captured = {}
+
+    class RecordingLLM:
+        async def chat_with_retry(self, messages, **kwargs):
+            captured["prompt"] = messages[0]["content"]
+            return json.dumps({"facts": []})
+
+    await extract_with_llm(SCOPED_TEXT, context=SCOPED_CONTEXT, llm=RecordingLLM())
+    assert "minimax" in captured["prompt"]
+    assert "前几轮" in captured["prompt"]
+    # 上下文是"只读指代"的，必须写明不许当证据用
+    assert "取 evidence" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_extract_keeps_applies_to_and_keys_by_it():
+    """限定名要进 normalized_key —— 否则"两个平台用同一策略"会互相覆盖。"""
+    import json
+
+    reply = json.dumps({"facts": [_scoped_fact()]})
+    got = await extract_with_llm(SCOPED_TEXT, context=SCOPED_CONTEXT, llm=FakeLLM(reply))
+    assert len(got) == 1
+    assert got[0].applies_to == "minimax"
+    assert "minimax" in got[0].normalized_key

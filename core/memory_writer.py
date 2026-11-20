@@ -65,6 +65,13 @@ class MemoryCandidate:
     #: 这是**反幻觉的结构性保证**：模型说不出证据、或证据在原话里找不到，
     #: 整条候选直接丢弃（见 `core/profile_llm.validate_facts`）。
     evidence: str = ""
+    #: 这条只适用于哪个具体对象（产品/平台/项目/场景名），全局则为空串。
+    #:
+    #: 为什么必须有这个字段：用户说「minimax 我以后都用国内站」，
+    #: 抽成「用户不要使用国际站」就变成了**关于这个人的普遍结论**，
+    #: 之后聊电商也会被这条约束挡住。存下限定名之后，注入侧才能做到
+    #: "话题不相关就干脆不出现"（见 `semantic_memory.build_profile_block`）。
+    applies_to: str = ""
 
 
 # ===== 抽取策略（可替换）=====
@@ -80,10 +87,10 @@ class MemoryCandidate:
 # 变不稳定，还可能因为模型措辞不同而随机失败。
 
 
-async def _llm_extractor(user_input: str) -> List["MemoryCandidate"]:
+async def _llm_extractor(user_input: str, context: str = "") -> List["MemoryCandidate"]:
     from core.profile_llm import extract_with_llm
 
-    return await extract_with_llm(user_input)
+    return await extract_with_llm(user_input, context=context)
 
 
 #: 当前抽取策略（生产 = LLM；测试可替换成离线的规则版）
@@ -483,8 +490,13 @@ class MemoryWriter:
         *,
         session_id: str = "",
         turn_id: str = "",
+        context: str = "",
     ) -> WriteResult:
         """一轮对话结束后抽取并写入画像。
+
+        `context` 是最近几轮的对白，只用于消解指代："我以后都不要用国际站"
+        这句话里没有主语，平台名（minimax）只在更早的轮次里 —— 不给上下文，
+        模型只能把它猜成"跨境电商"。
 
         任何失败都只记日志、绝不抛出 —— 记忆写入不能影响本轮响应。
         """
@@ -493,7 +505,7 @@ class MemoryWriter:
             return result
 
         try:
-            candidates = await _extractor(user_input)
+            candidates = await _extractor(user_input, context=context)
         except Exception as exc:
             self.logger.warning("MemoryWriter", f"候选提取失败: {exc}")
             return result
@@ -545,6 +557,13 @@ class MemoryWriter:
         store = self.store
         db = store.memory_db
 
+        # 限定名同时进 metadata（注入侧据此过滤）和 tags（检索侧用）
+        meta: Dict[str, Any] = {"rule": candidate.rule}
+        tags: Optional[List[str]] = None
+        if candidate.applies_to:
+            meta["applies_to"] = candidate.applies_to
+            tags = [candidate.applies_to]
+
         # 3) 去重 / 冲突检测
         existing = db.get_by_key(candidate.type, candidate.normalized_key)
         if existing is not None:
@@ -557,6 +576,7 @@ class MemoryWriter:
                 type=candidate.type,
                 content=candidate.content,
                 embedding=embedding,
+                tags=tags,
                 scope=candidate.scope,
                 confidence=candidate.confidence,
                 importance=candidate.importance,
@@ -564,7 +584,7 @@ class MemoryWriter:
                 source_session_id=session_id,
                 source_turn_id=turn_id,
                 normalized_key=candidate.normalized_key,
-                metadata={"rule": candidate.rule},
+                metadata=meta,
             )
             db.supersede(existing.id, new_entry.id)
             result.superseded.append(new_entry.id)
@@ -576,13 +596,14 @@ class MemoryWriter:
             type=candidate.type,
             content=candidate.content,
             embedding=embedding,
+            tags=tags,
             scope=candidate.scope,
             confidence=candidate.confidence,
             importance=candidate.importance,
             source_session_id=session_id,
             source_turn_id=turn_id,
             normalized_key=candidate.normalized_key,
-            metadata={"rule": candidate.rule},
+            metadata=meta,
         )
         result.added.append(entry.id)
 

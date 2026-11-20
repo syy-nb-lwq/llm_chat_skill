@@ -411,3 +411,101 @@ def test_api_forget_unknown_memory(client, monkeypatch, store):
     )
     r = client.delete("/api/memories/not-exist")
     assert r.status_code == 404
+
+
+# ===== 6. 限定作用域的画像：不相关就不注入 =====
+#
+# 实机：用户说「我要做电商」，助手拿一条「不要使用国际站」去否掉跨境方案。
+# 那条记忆的真实含义是"在 minimax 上选国内站"。修法是让它在无关话题里
+# **根本不出现** —— 比"出现了但标注适用条件"可靠，模型会忽略标注。
+
+
+def _add_scoped(db):
+    db.add(
+        type="preference",
+        content="在 minimax 上优先使用国内站",
+        confidence=0.9,
+        importance=0.8,
+        metadata={"applies_to": "minimax"},
+        tags=["minimax"],
+    )
+    db.add(
+        type="fact",
+        content="用户是做横屏短剧的",
+        confidence=0.95,
+        importance=0.9,
+    )
+
+
+def test_profile_block_omits_scoped_entry_when_topic_unrelated(store, db):
+    _add_scoped(db)
+    block = store.build_profile_block(query="我要做电商，怎么选品和物流")
+    assert "横屏短剧" in block          # 全局的照常注入
+    assert "minimax" not in block       # 限定的不出现
+    assert "国际站" not in block
+
+
+def test_profile_block_includes_scoped_entry_when_topic_matches(store, db):
+    _add_scoped(db)
+    block = store.build_profile_block(query="minimax 的接口怎么调")
+    assert "minimax" in block
+    assert "当前话题相关" in block
+    assert "横屏短剧" in block
+
+
+def test_profile_block_without_query_drops_scoped_entries(store, db):
+    """不知道在聊什么（澄清分支等）→ 只给全局的，别猜。"""
+    _add_scoped(db)
+    block = store.build_profile_block()
+    assert "横屏短剧" in block
+    assert "minimax" not in block
+
+
+def test_profile_block_matches_scope_name_case_insensitively(store, db):
+    """MiniMax / minimax 都是同一个平台（中文输入法下大小写很随机）。"""
+    _add_scoped(db)
+    assert "minimax" in store.build_profile_block(query="MiniMax 怎么充值")
+    assert "minimax" in store.build_profile_block(query="MINIMAX 视频模型")
+
+
+def test_global_entries_take_budget_first(store, db):
+    """限定条目不该把全局条目挤出预算 —— 全局的永远该在场。"""
+    db.add(type="fact", content="用户是做横屏短剧的", confidence=0.95, importance=0.9)
+    _add_scoped(db)
+    block = store.build_profile_block(query="minimax", max_chars=60)
+    assert "横屏短剧" in block
+
+
+def test_scoped_entry_falls_back_to_tag(store, db):
+    """只写了 tag、没写 metadata 的写入路径也要能认出来（老数据兼容）。"""
+    db.add(
+        type="preference",
+        content="在 minimax 上优先使用国内站",
+        confidence=0.9,
+        tags=["minimax"],
+    )
+    assert "minimax" not in store.build_profile_block(query="做电商")
+    assert "minimax" in store.build_profile_block(query="minimax 好用吗")
+
+
+@pytest.mark.asyncio
+async def test_writer_persists_applies_to(writer, db):
+    """写入侧必须把限定名落进 metadata + tags，否则注入侧无从过滤。"""
+    import core.memory_writer as mw
+
+    cand = mw.MemoryCandidate(
+        type="preference",
+        content="在 minimax 上优先使用国内站",
+        confidence=0.9,
+        importance=0.8,
+        applies_to="minimax",
+        normalized_key="preference:minimax|在minimax上优先使用国内站",
+        rule="llm",
+    )
+    result = mw.WriteResult()
+    await writer._write_one(cand, result=result, session_id="s1", turn_id="t1")
+
+    assert len(result.added) == 1
+    entry = db.get(result.added[0])
+    assert entry.metadata.get("applies_to") == "minimax"
+    assert entry.tags == ["minimax"]

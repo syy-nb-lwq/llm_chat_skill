@@ -313,10 +313,13 @@ class Agent:
 
     # ===== 用户画像写入(长期记忆) =====
 
-    def _get_profile_block(self) -> str:
+    def _get_profile_block(self, query: str = "") -> str:
         """本轮的用户画像块(**每轮只读一次**)。
 
         读取失败一律返回空串 —— 画像读不到不能影响回答。
+
+        `query` 传本轮用户输入：**限定场景**的画像只在话题相关时才注入
+        （"在 minimax 上用国内站"不该在聊电商时出现）。
 
         缓存在 `self._profile_cache` 里,`handle()` 开头清空:
         上一轮的画像写入是异步的,同一轮内重复读没有意义,
@@ -328,7 +331,7 @@ class Agent:
         if self.persist_memory:
             try:
                 # 长期记忆的唯一读入口（画像 ≤400 字，常驻注入）
-                block = self.mem.long_term.profile_block()
+                block = self.mem.long_term.profile_block(query=query)
             except Exception as exc:
                 self.logger.warning("Agent", f"读取用户画像失败: {exc}")
         self._profile_cache = block
@@ -488,6 +491,29 @@ class Agent:
         except Exception as exc:
             self.logger.warning("Agent", f"记录 trace 失败: {exc}")
 
+    def _memory_context(self, current_input: str, limit: int = 6) -> str:
+        """最近几轮对白（不含当前这句），给画像抽取消解指代用。
+
+        为什么必须给：用户说「我以后都不要用国际站」时，主语（minimax）
+        只在更早的轮次里。只把这一句丢给抽取模型，它只能猜 —— 实测猜成了
+        "拒绝一切国际站"，于是几天后聊电商被这条记忆否掉。
+
+        这对白**只用于判断指代**：证据（evidence）仍然必须来自当前这句，
+        校验在 `core/profile_llm.validate_facts` 里，不从这里放宽。
+
+        这里不包 try/except：`history_messages` 是纯切片，抛不出东西；
+        真抛了也该让 `_schedule_memory_write` 那一层的日志看见。
+        """
+        msgs = self.context.history_messages(exclude_content=current_input or "")
+        lines: List[str] = []
+        for msg in msgs[-limit:]:
+            content = (msg.content or "").strip().replace("\n", " ")
+            if not content:
+                continue
+            role = "用户" if msg.role == "user" else "助手"
+            lines.append(f"{role}：{content[:160]}")
+        return "\n".join(lines)
+
     def _schedule_memory_write(self, user_input: str) -> None:
         """异步写用户画像,**不阻塞本轮响应**。
 
@@ -497,12 +523,14 @@ class Agent:
         if not self.persist_memory or not user_input:
             return
         try:
+            context = self._memory_context(user_input)
             task = asyncio.create_task(
                 # 长期记忆的唯一写入口（LLM 抽取 + 证据校验，在后台跑）
                 self.mem.long_term.record_turn(
                     user_input,
                     session_id=self.session_id,
                     turn_id=self.turn_id,
+                    context=context,
                 )
             )
         except Exception as exc:
@@ -682,7 +710,7 @@ class Agent:
             clear_emitter()
         except Exception as exc:
             downgrade(exc, where='core/agent.py')
-        profile_block = self._get_profile_block()
+        profile_block = self._get_profile_block(user_input)
         capability_block = self._get_capability_block()
 
         # 分阶段耗时记录(产品化的最低观测要求,见 core/trace.py)

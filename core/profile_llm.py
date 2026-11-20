@@ -55,8 +55,41 @@ MAX_FACTS_PER_TURN = 3
 MIN_CONTENT_CHARS = 4
 MAX_CONTENT_CHARS = 120
 
+#: 塞进提示词的前文上限（字符）。够消解指代就行，多了既慢又容易把
+#: 前几轮里的旧结论当成"这句话里说的"
+MAX_CONTEXT_CHARS = 700
 
-PROFILE_PROMPT = """你要从用户**这一句话**里，判断有没有值得长期记住的信息。
+
+PROFILE_PROMPT = """你要从用户**这一句话**（可能附几轮前文）里，判断有没有值得长期记住的信息。
+
+## 第一条硬规则：限定条件不许丢
+
+用户说的话经常是**针对某个具体产品 / 平台 / 项目 / 场景**的。写进记忆时必须把这个
+限定一起带进 `content`，否则它会被当成"关于这个人的普遍结论"，之后在任何话题里生效。
+
+实机翻车案例（**必须避免**）：
+
+    前文在讨论 minimax（一个大模型服务商，有国内站和海外站）
+    用户说：「我以后都不要用国际站，只用国内站」
+    ✗ 错误：constraint: 用户以后不要使用国际站，只使用国内站
+      为什么错：把"在 minimax 上选国内站"放大成了"这个人拒绝一切国际站"。
+      几天后聊电商，助手拿这条否掉了"做跨境电商"的建议 —— 用户从没这么说过。
+    ✓ 正确：preference: 在 minimax 上优先使用国内站，只在国内站调用
+           applies_to: minimax
+
+    「国际站 / 国内站」是**平台自己的站群说法**，不等于「跨境电商 / 国内电商」，
+    也不等于「所有涉及海外的业务」。不要往这个方向联想。
+
+## 什么时候才算全局（applies_to 留空）
+
+只有用户对**所有场景**下结论时才留空：
+- 「我所有回答都要中文」
+- 「我不喜欢表情符号」
+- 「我是做横屏短剧的」（身份，任何话题都成立）
+
+只要话里有一个具体对象（某个产品、平台、项目、客户、活动），就必须填 `applies_to`，
+并且 `content` 里也要出现它。
+**宁可多填 `applies_to`，也不要让一条带限定的话看起来像普遍规律。**
 
 ## 判据：只记「长期稳定」的东西
 
@@ -64,7 +97,7 @@ PROFILE_PROMPT = """你要从用户**这一句话**里，判断有没有值得�
 - 身份 / 长期角色（"我是做短剧的"）
 - 长期偏好（"我一般不喜欢太啰嗦的解释"）
 - 固定习惯（"我们周会都在周一"）
-- 硬性约束 / 雷区（"这个项目不能用国际站"）
+- 硬性约束 / 雷区（"这个项目不能用国际站" → applies_to: 这个项目）
 - 长期目标（"我今年想把这个产品做上线"）
 
 **绝对不要记**（这些是临时状态，记了会污染以后的每一轮）：
@@ -73,13 +106,7 @@ PROFILE_PROMPT = """你要从用户**这一句话**里，判断有没有值得�
 - 对当前话题的评论（"这个不错"、"再试一次"）
 - 你自己的推测（用户没明说的，一律不记）
 - 助手说过的话
-
-## 已知的反面例子（**必须避免**）
-
-用户说：「不要用国际站然后可以开始生成视频」
-错误抽取：`constraint: 不要用国际站然后可以开始生成视频`
-为什么错：这是一次性的操作指令，"不要用国际站"是针对**这一次**的，
-不构成长期雷区。除非用户明确说"以后都不要用国际站"。
+- **从别处听来的、用户没有自己表态的内容**
 
 ## 输出格式
 
@@ -88,7 +115,8 @@ PROFILE_PROMPT = """你要从用户**这一句话**里，判断有没有值得�
 {{"facts": [
   {{
     "type": "preference|habit|method|constraint|fact",
-    "content": "规范化的短句（不超过 60 字，第三人称描述这个用户）",
+    "content": "规范化的短句（不超过 60 字，第三人称描述这个用户；有前提就必须写进句子里）",
+    "applies_to": "这条只适用于哪个具体产品/平台/项目/场景；对所有人都成立就填空字符串",
     "evidence": "用户原话里**逐字复制**的那一小段（必须原样，不能改写）",
     "confidence": 0.0~1.0,
     "importance": 0.0~1.0
@@ -98,13 +126,18 @@ PROFILE_PROMPT = """你要从用户**这一句话**里，判断有没有值得�
 ## 用户这句话
 
 {user_input}
-
+{context_block}
 ## 提醒
 
 - **没有值得记的就输出 `{{"facts": []}}`** —— 这是最常见、最正确的结果
 - `evidence` 必须是上面那句话里**连续出现**的一段原文，不能是 paraphrase
+- `applies_to` 必须是前文里真实出现过的名字（产品名/平台名/项目名），不能自己编
 - 不确定的宁可不记
 """
+
+
+#: `applies_to` 的长度上限 —— 它是个名字，不是句子
+MAX_APPLIES_TO_CHARS = 40
 
 
 def _norm(text: str) -> str:
@@ -133,18 +166,27 @@ def validate_facts(
     payload: Dict[str, Any],
     user_input: str,
     *,
+    context: str = "",
     min_confidence: float = MIN_CONFIDENCE,
     max_facts: int = MAX_FACTS_PER_TURN,
 ) -> List[Dict[str, Any]]:
     """把模型输出过一遍闸门。返回**通过校验**的事实列表。
 
     这里是整个模块的核心：**证据必须能在原话里找到**。
+
+    `context` 是前几轮的对白，只用于两件事：
+    1. 让模型能听懂"国际站"指的是哪个平台（见 `applies_to` 校验）
+    2. **不**放宽 evidence —— evidence 仍然只能来自 `user_input`
     """
     facts = (payload or {}).get("facts")
     if not isinstance(facts, list):
         return []
 
     haystack = _norm(user_input)
+    #: 限定名可以来自前文（"minimax 我以后都用国内站"这句话本身不含平台名时，
+    #: 平台名只可能在前文里）—— 但 evidence 不许来自前文
+    context_haystack = haystack + _norm(context)
+
     accepted: List[Dict[str, Any]] = []
     seen = set()
 
@@ -155,6 +197,7 @@ def validate_facts(
         ftype = str(raw.get("type") or "").strip().lower()
         content = str(raw.get("content") or "").strip()
         evidence = str(raw.get("evidence") or "").strip()
+        applies_to = str(raw.get("applies_to") or "").strip()
 
         # --- 类型白名单 ---
         if ftype not in ALLOWED_TYPES:
@@ -165,6 +208,16 @@ def validate_facts(
         # --- **证据校验（反幻觉的核心）** ---
         if not evidence or _norm(evidence) not in haystack:
             continue
+        # --- 限定校验：填了就必须是真实出现过的名字 ---
+        #
+        # 这一步拦的是**另一种编造**：模型知道"应该有个前提"，就自己拟一个
+        # 平台名/项目名填进去。限定名不在前文里，这条记忆的前提就是假的，
+        # 比不填更危险 —— 将来按这个名字做相关性过滤，会挂到一个不存在的场景上。
+        if applies_to:
+            if len(applies_to) > MAX_APPLIES_TO_CHARS:
+                continue
+            if _norm(applies_to) not in context_haystack:
+                continue
         # --- 置信度 ---
         try:
             confidence = float(raw.get("confidence", 0.0))
@@ -187,6 +240,7 @@ def validate_facts(
         accepted.append({
             "type": ftype,
             "content": content,
+            "applies_to": applies_to,
             "evidence": evidence,
             "confidence": round(confidence, 3),
             "importance": round(importance, 3),
@@ -197,9 +251,26 @@ def validate_facts(
     return accepted
 
 
+def _context_block(context: str) -> str:
+    """把前几轮对白塞进提示词（只用于消解指代）。
+
+    没有它，"我以后都不要用国际站"里的"国际站"就是无解的 —— 平台名
+    （minimax）只在更早的轮次里出现过，模型只能猜，猜的结果就是把它
+    当成"跨境电商"。
+    """
+    text = (context or "").strip()
+    if not text:
+        return ""
+    if len(text) > MAX_CONTEXT_CHARS:
+        # 取最近的部分：越靠后的轮次越可能包含当前这句话的所指
+        text = text[-MAX_CONTEXT_CHARS:]
+    return f"\n## 前几轮（只用来判断指代，**不要**从这里取 evidence）\n\n{text}\n"
+
+
 async def extract_with_llm(
     user_input: str,
     *,
+    context: str = "",
     llm=None,
     min_confidence: float = MIN_CONFIDENCE,
     max_facts: int = MAX_FACTS_PER_TURN,
@@ -221,7 +292,12 @@ async def extract_with_llm(
 
             llm = get_llm_client()
         raw = await llm.chat_with_retry(
-            [{"role": "user", "content": PROFILE_PROMPT.format(user_input=text)}],
+            [{
+                "role": "user",
+                "content": PROFILE_PROMPT.format(
+                    user_input=text, context_block=_context_block(context)
+                ),
+            }],
             temperature=0.0,
             max_retries=2,
         )
@@ -234,7 +310,8 @@ async def extract_with_llm(
         return []
 
     facts = validate_facts(
-        payload, text, min_confidence=min_confidence, max_facts=max_facts
+        payload, text, context=context,
+        min_confidence=min_confidence, max_facts=max_facts,
     )
 
     # 惰性导入，避免与 memory_writer 循环依赖
@@ -242,6 +319,10 @@ async def extract_with_llm(
 
     out: List[Any] = []
     for f in facts:
+        applies_to = f.get("applies_to", "")
+        # key 里带限定名：同一句话挂在两个不同平台上是**两条独立记忆**，
+        # 否则后一条会把前一条 supersede 掉
+        key = f"{f['type']}:{applies_to}|{_norm(f['content'])[:60]}"
         out.append(
             MemoryCandidate(
                 type=f["type"],
@@ -249,7 +330,8 @@ async def extract_with_llm(
                 confidence=f["confidence"],
                 importance=f["importance"],
                 scope="user",
-                normalized_key=f"{f['type']}:{_norm(f['content'])[:60]}",
+                normalized_key=key,
+                applies_to=applies_to,
                 rule="llm",
                 evidence=f["evidence"],
             )
