@@ -163,6 +163,14 @@ const FILE_ICONS = {
   json: '🧾', xml: '🧾', html: '🌐', htm: '🌐', log: '📄',
 }
 
+//: markdown 渲染结果缓存（模块级，不进响应式）。
+//:
+//: 流式输出时 messages 每个 delta 都会变，computed 重算就会把**所有**历史消息
+//: 重新 render 一遍。历史消息的 content 从不变化，缓存命中率很高；
+//: 真正在变的只有最后一条。不缓存的话长会话流式输出会明显卡。
+const HTML_CACHE = new Map()
+const HTML_CACHE_MAX = 300
+
 export default {
   name: 'ChatPanel',
   props: {
@@ -199,7 +207,7 @@ export default {
         const parsed = this.parseMessage(m.content || '')
         return {
           ...m,
-          html: parsed.text ? this.md.render(parsed.text) : '',
+          html: this.renderMarkdown(parsed.text),
           files: parsed.files,
         }
       })
@@ -224,7 +232,14 @@ export default {
   },
   methods: {
     renderMarkdown(content) {
-      return content ? this.md.render(content) : ''
+      if (!content) return ''
+      const cached = HTML_CACHE.get(content)
+      if (cached !== undefined) return cached
+      const html = this.md.render(content)
+      // 简单的封顶：聊天内容本身不重复，超出就整个丢掉重建
+      if (HTML_CACHE.size >= HTML_CACHE_MAX) HTML_CACHE.clear()
+      HTML_CACHE.set(content, html)
+      return html
     },
 
     // ===== 附件 =====
