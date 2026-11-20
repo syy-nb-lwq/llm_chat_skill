@@ -10,11 +10,12 @@
 关键点:意图与规划**解耦**。意图错了不再污染规划,规划错了也不再回写意图,
 两者可以分别评估、分别优化。
 """
-from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from contextvars import ContextVar
 
 from core.agent_base import BaseAgent
+from agents.intents import classify_l1, plan_from_label, recent_turns
+from agents.manager_types import IntentType, PlanResult
 from agents.prompts import (
     build_plan_schema,
     build_plan_system_prompt,
@@ -30,6 +31,7 @@ from core.intent_detector import (
     get_intent_detector,
 )
 from skills.manager import Skill, get_skill_store
+from core.exception_policy import downgrade
 
 #: 当前这一轮正在规划的输入（用于技能召回）。
 #:
@@ -86,42 +88,9 @@ def _l1_threshold() -> float:
         return 0.75
 
 
-@dataclass
-class PlanResult:
-    """规划结果"""
-    intent: str                    # 意图标签(6 闭集之一,见 IntentLabel)
-    intent_detail: str = ""        # 意图详情描述
-    selected_skill: Optional["Skill"] = None
-    is_retry: bool = False        # 是否是重试意图
-    tool_tasks: List[Dict] = field(default_factory=list)
-    need_llm: bool = False        # 是否需要 LLM 处理
-    # 意图判别过程的可观测信息
-    intent_layer: str = ""         # 产出该意图的层: L0 / L1 / L2
-    intent_confidence: float = 0.0  # 置信度
-    intent_uncertain: bool = False  # 置信度不足,已升级到 L2 兜底
-    intent_slots: Dict[str, Any] = field(default_factory=dict)
-    #: 规划层认为「目标已经达成」了吗？
-    #:
-    #: **这是目标循环的开关**：True（默认）表示这一轮规划就够了，
-    #: 走完工具直接生成回答；False 表示还有没做完的事，需要再规划一轮。
-    #: 默认 True 保证简单问答的行为和以前完全一样（永远只跑一轮）。
-    goal_done: bool = True
-    #: 还没做完什么（goal_done=False 时给下一轮看的提示）
-    remaining_note: str = ""
 
 
 # ===== 意图标签(6 闭集,与 core/intent_labels.py::IntentLabel 一一对应) =====
-class IntentType:
-    CHITCHAT = "chitchat"     # 闲聊:问候、感谢、道别等
-    TASK = "task"             # 任务:需要执行工具/技能完成
-    TEACH = "teach"           # 教导:用户教 Agent 新技能
-    RETRY = "retry"           # 重试:重新执行上次的任务
-    MANAGER = "manager"       # 技能管理:列出/查看/版本/回滚(M1-09)
-    CLARIFY = "clarify"       # 意图不明:需要澄清
-
-    # 兼容别名:旧代码里的 SKILL / UNKNOWN
-    SKILL = "task"
-    UNKNOWN = "clarify"
 
 
 # ===== 意图判定规则 =====
@@ -275,8 +244,8 @@ class ManagerAgent(BaseAgent):
         if self._semantic_memory is None and _semantic_memory_enabled():
             try:
                 self._semantic_memory = get_semantic_memory()
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='agents/manager.py')
         return self._semantic_memory
 
     async def plan(
@@ -398,113 +367,29 @@ class ManagerAgent(BaseAgent):
         confidence: float = 0.0,
         slots: Optional[Dict[str, Any]] = None,
     ) -> Optional[PlanResult]:
-        """把一个意图标签翻成 PlanResult。
-
-        返回 None 表示"这个标签不能直接定案,需要继续往下走"。
-        """
-        if label is IntentLabel.CHITCHAT:
-            return PlanResult(
-                intent=IntentType.CHITCHAT,
-                intent_detail=detail,
-                selected_skill=None,
-                tool_tasks=[],
-                intent_layer=layer,
-                intent_confidence=confidence,
-                intent_slots=dict(slots or {}),
-            )
-
-        if label is IntentLabel.TEACH:
-            return PlanResult(
-                intent=IntentType.TEACH,
-                intent_detail=detail,
-                selected_skill=None,
-                tool_tasks=[],
-                intent_layer=layer,
-                intent_confidence=confidence,
-                intent_slots=dict(slots or {}),
-            )
-
-        if label is IntentLabel.MANAGE:
-            return PlanResult(
-                intent=IntentType.MANAGER,
-                intent_detail=detail or "技能管理操作",
-                selected_skill=None,
-                tool_tasks=[],
-                need_llm=False,
-                intent_layer=layer,
-                intent_confidence=confidence,
-                intent_slots=dict(slots or {}),
-            )
-
-        if label is IntentLabel.RETRY:
-            # 重试需要上一轮的执行记录;没有上下文就不能重试
-            if not context or len(context) == 0:
-                return PlanResult(
-                    intent=IntentType.TASK,
-                    intent_detail="重试需要上下文,但没有历史记录",
-                    selected_skill=None,
-                    is_retry=True,
-                    tool_tasks=[],
-                    need_llm=False,
-                    intent_layer=layer,
-                    intent_confidence=confidence,
-                )
-            return PlanResult(
-                intent=IntentType.RETRY,
-                intent_detail=detail,
-                selected_skill=None,
-                is_retry=True,
-                need_llm=True,  # 需要 LLM 取上次的 tool_tasks
-                intent_layer=layer,
-                intent_confidence=confidence,
-                intent_slots=dict(slots or {}),
-            )
-
-        if label is IntentLabel.CLARIFY:
-            # L1 判为"意图不明"且置信度够高 → 直接进 L3 澄清。
-            # 置信度不够时由调用方降级到 L2 兜底(见 plan()).
-            return PlanResult(
-                intent=IntentType.CLARIFY,
-                intent_detail=detail or "意图不明,需要澄清",
-                selected_skill=None,
-                tool_tasks=[],
-                need_llm=False,
-                intent_layer=layer,
-                intent_confidence=confidence,
-                intent_slots=dict(slots or {}),
-            )
-
-        # TASK:交给 L2 规划层
-        return None
+        """标签 → PlanResult（实现在 `agents/intents.py`，独立可测）。"""
+        return plan_from_label(
+            label, detail=detail, context=context,
+            layer=layer, confidence=confidence, slots=slots,
+        )
 
     async def _l1_classify(
         self, user_input: str, context: Optional[Context]
     ) -> Optional[IntentDecision]:
-        """调用 L1 闭集分类器。失败返回 None(由调用方降级)。"""
-        if not self._l1_enabled:
-            return None
-        try:
-            recent = self._recent_turns(context, limit=2)
-            return await self.l1_classifier.classify(
-                user_input, recent_turns=recent
-            )
-        except Exception as exc:
-            self.logger.warning("Manager", f"L1 分类失败: {exc}")
-            return None
+        """L1 闭集分类（实现在 `agents/intents.py`，独立可测）。"""
+        return await classify_l1(
+            self.l1_classifier,
+            user_input,
+            context,
+            enabled=self._l1_enabled,
+            logger=self.logger,
+        )
 
     @staticmethod
     def _recent_turns(context: Optional[Context], limit: int = 2) -> List[Dict[str, str]]:
-        """取最近几轮对话(给 L1 做上下文参考)。"""
-        if context is None or len(context) == 0:
-            return []
-        msgs = [
-            m for m in context.messages
-            if m.role in ("user", "assistant") and (m.content or "").strip()
-        ]
-        out = []
-        for m in msgs[-limit * 2:]:
-            out.append({"role": m.role, "content": (m.content or "").strip()[:500]})
-        return out
+        """取最近几轮对话（实现在 `agents/intents.py`）。"""
+        return recent_turns(context, limit=limit)
+
 
 
     async def _llm_plan(
@@ -543,9 +428,8 @@ class ManagerAgent(BaseAgent):
             for token in reversed(tokens):
                 try:
                     token.var.reset(token)
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    downgrade(exc, where='agents/manager.py')
     async def _llm_plan_inner(
         self,
         user_input: str,
@@ -1000,9 +884,8 @@ class ManagerAgent(BaseAgent):
                     user_input, limit=3
                 )
                 hints.extend(results)
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='agents/manager.py')
         # 回退到普通记忆
         if not hints:
             hints = self.memory_store.get_skill_hints(user_input)

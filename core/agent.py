@@ -29,6 +29,7 @@ from core.events import (
     EV_THINKING,
 )
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 _sync_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -200,8 +201,8 @@ class Agent:
         except Exception as exc:
             try:
                 get_logger().warning("Agent", f"收集产物失败: {exc}")
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/agent.py')
         return out
 
     @staticmethod
@@ -233,8 +234,8 @@ class Agent:
             for msg in reversed(self.context.messages):
                 if msg.role == "assistant" and (msg.content or "").strip():
                     return msg.content
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/agent.py')
         return ""
 
     def _apply_correction(self, signal: CorrectionSignal):
@@ -460,9 +461,8 @@ class Agent:
                 ctx = get_exec_context()
                 scope = ctx.scope_key
                 agent_id = ctx.agent_id or "main"
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='core/agent.py')
             return TurnTrace(
                 trace_id=self.trace_id,
                 session_id=self.session_id,
@@ -680,8 +680,8 @@ class Agent:
             from core.event_bus import clear_emitter
 
             clear_emitter()
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/agent.py')
         profile_block = self._get_profile_block()
         capability_block = self._get_capability_block()
 
@@ -729,8 +729,8 @@ class Agent:
             if not asyncio.iscoroutinefunction(on_event):
                 try:
                     on_event(event, payload)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    downgrade(exc, where='core/agent.py')
                 return
             try:
                 # 把"调用 on_event 并返回结果"包装成 future
@@ -752,8 +752,8 @@ class Agent:
 
                 # 保存 _deferred 协程本身,drain 时用 ensure_future 启动并 await
                 pending_async.append(_deferred())
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/agent.py')
         return emit
 
     async def _drain_pending(self, pending_async: list) -> None:
@@ -764,9 +764,8 @@ class Agent:
             for coro in batch:
                 try:
                     await asyncio.ensure_future(coro)
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    downgrade(exc, where='core/agent.py')
     async def _stream_answer(
         self,
         user_input: str,
@@ -802,6 +801,95 @@ class Agent:
             trace.since(STAGE_GENERATE, gen_start)
         return self._ensure_answer("".join(buf))
 
+    async def _handle_quick_intents(
+        self,
+        user_input: str,
+        plan,
+        *,
+        profile_block: str,
+        capability_block: str,
+        goal_note: str,
+        trace,
+        turn_start: float,
+        emit,
+        pending_async: list,
+    ):
+        """处理不需要跑工具链的三种意图：闲聊 / 教导 / 重试。
+
+        返回 `None` 表示"不属于快捷意图，继续走正常工具链"；
+        返回字符串表示该轮已处理完毕，直接作为回答。
+
+        这三个分支原本内联在 `handle` 里，占 60+ 行且各自有 `return`，
+        是最容易独立测试的 stage —— 不需要跑 goal loop 就能验证行为。
+        """
+        from core.trace import STAGE_PLAN  # noqa: F401 - 保持与 handle 的导入时机一致
+
+        intent_type = plan.intent
+
+        # 闲聊:直接回答,不记录到记忆
+        if intent_type == IntentType.CHITCHAT:
+            emit(EV_THINKING, {"stage": "chitchat", "detail": plan.intent_detail})
+            ans = await self._stream_answer(
+                user_input, {}, None,
+                profile_block=profile_block,
+                capability_block=capability_block,
+                goal_note=goal_note,
+                trace=trace,
+                turn_start=turn_start,
+                emit=emit,
+            )
+            self.context.add_assistant_message(ans)
+            emit(EV_MESSAGE_FINAL, {"content": ans})
+            await self._drain_pending(pending_async)
+            # 闲聊不进行 ExecutionCritic 评估,避免污染记忆库
+            return ans
+
+        # 教导意图:进入技能学习流程
+        if intent_type == IntentType.TEACH:
+            emit(EV_THINKING, {"stage": "teaching_detect"})
+            ok, result, skill = await self.trainer.teach(user_input)
+
+            if ok and skill:
+                emit(EV_SKILL_LEARNED, {
+                    "name": skill.name,
+                    "version": skill.version,
+                    "message": result,
+                })
+                self.context.add_assistant_message(result)
+                emit(EV_MESSAGE_FINAL, {"content": result})
+                await self._drain_pending(pending_async)
+                return result
+
+            if result and not ok:
+                emit(EV_TEACHING_INTERACTIVE, {"questions": result})
+                complete_msg = await self._complete_teaching(user_input, result)
+                self.context.add_assistant_message(complete_msg)
+                emit(EV_MESSAGE_FINAL, {"content": complete_msg})
+                await self._drain_pending(pending_async)
+                return complete_msg
+            # 教导失败,继续后续流程
+
+        # 重试意图:重新执行上次的任务
+        if intent_type == IntentType.RETRY:
+            emit(EV_THINKING, {"stage": "retry"})
+            last_tasks = self._get_last_tool_tasks()
+            if last_tasks:
+                self.logger.info("Agent", f"重试执行上次的 {len(last_tasks)} 个工具")
+                plan.tool_tasks = last_tasks
+            else:
+                emit(EV_THINKING, {"stage": "no_retry_history"})
+                ans = (
+                    "上一轮没有需要执行的工具,无法重试"
+                    if last_tasks is not None
+                    else "没有找到上次的执行记录,无法重试"
+                )
+                self.context.add_assistant_message(ans)
+                emit(EV_MESSAGE_FINAL, {"content": ans})
+                await self._drain_pending(pending_async)
+                return ans
+
+        return None
+
     async def handle(
         self,
         user_input: str,
@@ -828,9 +916,8 @@ class Agent:
                 emit(event, payload)
 
             set_emitter(_async_emit)
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='core/agent.py')
         ans = ""       # 本轮最终回答(finally 里用来记长度)
         # 目标循环"没做完"的说明（空 = 已完成或还没跑到循环）。
         # 必须在 _answer_stream 定义/调用之前初始化 —— 闲聊路径也会用到它。
@@ -876,70 +963,22 @@ class Agent:
             self.context.metadata.pop("clarify_question", None)
             self.context.metadata.pop("clarify_options", None)
 
-            # 闲聊意图:直接回答,不记录到记忆
-            if intent_type == IntentType.CHITCHAT:
-                emit(EV_THINKING, {"stage": "chitchat", "detail": plan.intent_detail})
-                ans = await self._stream_answer(user_input, {}, None, profile_block=profile_block, capability_block=capability_block, goal_note=goal_note, trace=trace, turn_start=turn_start, emit=emit)
-                self.context.add_assistant_message(ans)
-                emit(EV_MESSAGE_FINAL, {"content": ans})
-                # 等异步 on_event 完成,保证事件按 emit 顺序排干
-                await self._drain_pending(pending_async)
-                # 闲聊不进行 ExecutionCritic 评估,避免污染记忆库
+            # 快捷意图：闲聊 / 教导 / 重试 各自是一个 stage（实现见独立方法）
+            quick = await self._handle_quick_intents(
+                user_input, plan,
+                profile_block=profile_block,
+                capability_block=capability_block,
+                goal_note=goal_note,
+                trace=trace,
+                turn_start=turn_start,
+                emit=emit,
+                pending_async=pending_async,
+            )
+            if quick is not None:
+                # finally 里的 _finish_trace 用 `ans` 记 reply_chars ——
+                # 快捷意图的回答必须回填，否则 trace 显示"回复 0 字"。
+                ans = quick
                 return ans
-
-            # 教导意图:进入技能学习流程
-            if intent_type == IntentType.TEACH:
-                emit(EV_THINKING, {"stage": "teaching_detect"})
-                ok, result, skill = await self.trainer.teach(user_input)
-                
-                if ok and skill:
-                    # 技能创建成功
-                    emit(EV_SKILL_LEARNED, {
-                        "name": skill.name,
-                        "version": skill.version,
-                        "message": result,
-                    })
-                    self.context.add_assistant_message(result)
-                    emit(EV_MESSAGE_FINAL, {"content": result})
-                    await self._drain_pending(pending_async)
-                    return result
-
-                # 需要交互式教导
-                if result and not ok:
-                    emit(EV_TEACHING_INTERACTIVE, {"questions": result})
-                    # 使用 LLM 补充信息并完成教导
-                    complete_msg = await self._complete_teaching(user_input, result)
-                    self.context.add_assistant_message(complete_msg)
-                    emit(EV_MESSAGE_FINAL, {"content": complete_msg})
-                    await self._drain_pending(pending_async)
-                    return complete_msg
-                
-                # 教导失败,继续后续流程
-
-            # 重试意图:重新执行上次的任务
-            if intent_type == IntentType.RETRY:
-                emit(EV_THINKING, {"stage": "retry"})
-                # 从 context 中获取上一次的 tool_tasks
-                last_tasks = self._get_last_tool_tasks()
-                if last_tasks:
-                    self.logger.info("Agent", f"重试执行上次的 {len(last_tasks)} 个工具")
-                    # 使用上一次的 tool_tasks 继续执行
-                    plan.tool_tasks = last_tasks
-                elif last_tasks is not None:
-                    # 空列表 = 上一轮确实没有需要执行的工具(不是"没记录")
-                    emit(EV_THINKING, {"stage": "no_retry_history"})
-                    ans = "上一轮没有需要执行的工具,无法重试"
-                    self.context.add_assistant_message(ans)
-                    emit(EV_MESSAGE_FINAL, {"content": ans})
-                    await self._drain_pending(pending_async)
-                    return ans
-                else:
-                    emit(EV_THINKING, {"stage": "no_retry_history"})
-                    ans = "没有找到上次的执行记录,无法重试"
-                    self.context.add_assistant_message(ans)
-                    emit(EV_MESSAGE_FINAL, {"content": ans})
-                    await self._drain_pending(pending_async)
-                    return ans
 
             # 技能执行(正常流程)
             skill_name = plan.selected_skill.name if plan.selected_skill else None
@@ -1035,9 +1074,8 @@ class Agent:
                 # 共享本体会看到互相穿插的消息列表。快照不带 sink,
                 # 也不会把子智能体看到的东西再落一遍库。
                 set_current_context(self.context.snapshot())
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='core/agent.py')
             tools_start = time.perf_counter()
             goal = await run_goal_loop(
                 first_plan=plan,
@@ -1171,8 +1209,8 @@ class Agent:
                 from core.exec_context import reset_exec_context
 
                 reset_exec_context(self._exec_tokens)
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/agent.py')
             # 统一 await 所有异步 emit,保证事件按 emit 顺序完成
             if pending_async:
                 results = await asyncio.gather(*pending_async, return_exceptions=True)
@@ -1276,8 +1314,8 @@ class Agent:
         if self.working is not None:
             try:
                 self.mem.end_turn(self.working)
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/agent.py')
             self.working = None
         if self._session_store is not None:
             try:
