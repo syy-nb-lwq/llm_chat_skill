@@ -473,12 +473,20 @@ Frontend / CLI / Streamlit
   向量，供语义检索），经验在 `MemoryStore`（`experience` 表，一条一行、
   原文存 `payload`）。两份数据不是副本，所以不做合并；`long_term` 门面收口。
   同库不同表的好处是"画像 ⋈ 经验"一条 SQL 就能查，备份也只有一份
-- `Agent.handle()` 仍是长函数（345 行，原 494）：准备 / 事件 / 流式 / 快捷意图
-  四个 stage 已抽出；主执行段（目标循环 + DAG）还耦合在一起，
-  要彻底切分需先引入 `TurnContext` 对象
-- `ManagerAgent` 948 行（原 1190）：提示词（`agents/prompts.py`）、判别层
-  （`agents/intents.py`）、数据类型（`agents/manager_types.py`）已拆分；
-  `plan()` 仍是 L0→L1→L2 的编排核心
+- `Agent.handle()` 52 行（原 494），只表达"这一轮怎么走"：
+  `_begin_turn` → `_plan_turn` → 分流（澄清 / `_handle_quick_intents` /
+  `_execute_goal_loop`）→ `_synthesize` → `_persist_turn` → `_end_turn`。
+  跨 stage 的状态全在 `core/turn_context.py::TurnContext` 上（每轮一个，
+  轮末随工作记忆一起收，不跨轮复用）。
+  `tests/test_turn_and_plan_stages.py` 用 AST 钉住"handle ≤ 60 行、且必须真的
+  调这几个 stage" —— 只靠 code review 挡不住它慢慢长回去
+- `ManagerAgent` 1038 行：提示词（`agents/prompts.py`）、判别层
+  （`agents/intents.py`）、数据类型（`agents/manager_types.py`）已拆出；
+  `plan()` 58 行，L0/L1/L2 三层各自是独立方法（`_guard_plan` /
+  `_l1_plan` / `_llm_plan_inner`），L2 内部再分"问模型（`_ask_planner`）"
+  与"把输出翻成 PlanResult（`_build_plan_result`）"。
+  **行数没有再降**：拆成可单测的方法必然多出 docstring 与参数，
+  原来按"行数降 50%"验收这条是错的，见 `docs/19` §06
 - 经验存储已从 JSON 目录树搬到 SQLite（`experience` 表），老的 JSON 目录
   用 `scripts/migrate_experience_to_sqlite.py` 一次性导入（幂等 + 可按批次回滚），
   见 `docs/20`。`export_json()` 保留为单向出口，供人工审阅与备份
