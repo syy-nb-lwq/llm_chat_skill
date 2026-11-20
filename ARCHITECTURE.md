@@ -472,20 +472,26 @@ Frontend / CLI / Streamlit
   底层是**两种载体、互斥职责**：画像走 SQLite（`MemoryDB`），经验走 JSON
   （`MemoryStore`）。这不是"同一份数据的两个副本"，所以不做合并；
   代价是"查全部经验"与"查全部画像"是两个入口，`long_term` 门面负责收口
-- `Agent.handle()` 仍是一个长函数（393 行，原 494）：
-  准备 / 事件 / 流式三块已抽出，主执行段（目标循环 + DAG）还耦合在一起，
+- `Agent.handle()` 仍是长函数（345 行，原 494）：准备 / 事件 / 流式 / 快捷意图
+  四个 stage 已抽出；主执行段（目标循环 + DAG）还耦合在一起，
   要彻底切分需先引入 `TurnContext` 对象
-- `ManagerAgent` 仍是 1059 行（原 1190）：提示词与 schema 已移到 `agents/prompts.py`，
-  判别 / 规划 / 检索仍在一个 `plan()` 里
-- `core/agentkit` 是"契约层已存在、主链未接完"的并行层，尚未决定接完或移出
+- `ManagerAgent` 948 行（原 1190）：提示词（`agents/prompts.py`）、判别层
+  （`agents/intents.py`）、数据类型（`agents/manager_types.py`）已拆分；
+  `plan()` 仍是 L0→L1→L2 的编排核心
+- 经验存储（JSON）到 SQLite 的迁移方案与脚本已就绪（`scripts/migrate_experience_to_sqlite.py`），
+  但数据未迁移、读写未切换，见 `docs/20`
+- `core/agentkit` 已收口：主链**直接**引用 `roles` / `sources`，`context` / `memory`
+  经 `sources` 间接使用，`identity` / `brief` / `blackboard` / `messaging` 是契约层。
+  接线表在 `core/agentkit/__init__.py`，由 `test_declared_wiring_matches_reality` 守着；
+  多智能体协作能力仍未全部启用（当前主链只用单角色 + 事件推送）
 - **自演化质量信号已接通**，但**只有纠正信号**：
   `user_feedback` 现在会被写入（隐式纠正语 + 前端 👍/👎），critic 会把被纠正的轮次记成失败；
-  见 `docs/14` §2.3
+  见 `docs/archive/14` §2.3
 - **技能质量台账已建**，但验收样例仍由"提补丁的人"自己给，
-  缺独立于实现者的标准；见 `docs/14` §2.4
+  缺独立于实现者的标准；见 `docs/archive/14` §2.4
 - **真模型基线已建立，但只覆盖意图与画像**：L1 意图（开发集 100% / 留出集 94.7%）、
   画像抽取（精确率 100%）。**答案质量与澄清质量仍没有基线** —— 那要有标注问答对；
-  且基线是单模型的，换模型必须重跑；见 `docs/14` §4.1
+  且基线是单模型的，换模型必须重跑；见 `docs/archive/14` §4.1
 - L1 判别每轮多一次 LLM 调用（主路径 +1 轮往返），可用 `INTENT_MODEL` 指向更快的模型
 - 会话内检索是 Python 侧 CJK 二元组打分，十万级消息后需要换 `sqlite-vec` 之类
 - 第三方 WebSocket 客户端必须回 RPC ACK（服务端事件推送是请求/响应式的），
@@ -521,6 +527,24 @@ core/events.py  ──(scripts/gen_events_js.py)──>  frontend/src/events.js
 4. `events.js` 必须与重新生成的结果逐字节一致（防止手改或忘了重新生成）。
 
 CI 里也跑 `python scripts/gen_events_js.py --check`。
+
+## 8.6 异常分类约定
+
+宽捕获 `except Exception` 不是问题本身 —— **静默吞掉**才是。
+统一按三类处理（`core/exception_policy.py` 是"降级"这一类唯一的落点）：
+
+| 类别 | 什么时候用 | 怎么写 | 例子 |
+|---|---|---|---|
+| **可降级** | 外部依赖 / 观测 / 缓存失败，失败不影响主链路 | `except Exception as exc: downgrade(exc, where=...)` —— 记 debug 后走默认值 | 画像读取失败用空串、审计写失败不影响业务 |
+| **必须冒泡** | 数据完整性 / schema 不一致 / 配置错误 | 捕获窄异常类型后 `raise`，或干脆不捕获 | JSON 解析失败、DB 行与 FTS 索引不一致 |
+| **必须重试** | 网络 / 子进程 / 临时 I/O | 交给该层已有的重试逻辑，不在业务层假装成功 | 工具调用重试、Provider 请求重试 |
+
+**硬约束**：不允许 `except Exception: pass`（静默吞）。
+这类写法已全部替换为 `downgrade()`；CI 有检查，`scripts/check_except_baseline.py`
+保证总数只降不升，新增一处就得说明理由。
+
+注意 `downgrade()` 记的是 **debug** 而不是 warning：这些降级点是设计意图，
+用 warning 会淹没真正的问题；但完全静默会让"功能悄悄失效"无从排查。
 
 ## 9. 目录摘要
 

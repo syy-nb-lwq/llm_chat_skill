@@ -2,7 +2,7 @@
 
 > 状态：P0 / P1 / P2 / P4 / P5(后端) 已落地（2026-07-22），P3 统一存储层未做
 > 范围：`core/context.py`、`core/memory.py`、`core/memory_db.py`、`core/semantic_memory.py`、`core/memory_writer.py`（新）
-> 关联任务：`docs/11` M2-01 ~ M2-09；目标架构 `docs/10 §4.3`、`§5.4`、`§6.2`、`§8`
+> 关联任务：`docs/11` M2-01 ~ M2-09；目标架构 `docs/archive/10 §4.3`、`§5.4`、`§6.2`、`§8`
 
 ---
 
@@ -37,7 +37,7 @@
 - `MemoryDB` 的 SQLite schema、FTS5 虚表、向量 BLOB 存储、**中文字段不转义**（M0-05 已修）
 - `SemanticMemoryStore` 的混合检索骨架、用户维度索引 `idx_memories_user`
 - `infra/embedding.py` 的三种 provider（openai / local / mock），mock 可离线跑
-- `docs/10 §8` 已经把分层记忆、写入策略、召回策略、遗忘纠错写清楚了
+- `docs/archive/10 §8` 已经把分层记忆、写入策略、召回策略、遗忘纠错写清楚了
 
 **缺的是"接线"和"统一模型"，不是底层组件。**
 
@@ -97,7 +97,7 @@ class MemoryItem:
     updated_at: str = ...
 ```
 
-字段与 `docs/10 §6.2` 对齐，额外补了 `importance` 和 `source_execution_id`。
+字段与 `docs/archive/10 §6.2` 对齐，额外补了 `importance` 和 `source_execution_id`。
 `MemoryEntry` 保留为 sqlite 层的读写 DTO，由 Repository 做双向转换。
 
 ### 2.3 统一存储层（M2-01）
@@ -133,7 +133,7 @@ core/memory_repository.py（新增）
 
 ### 2.4 写入管线（把语义记忆接到主链）
 
-这是 **R1（最大断点）**。按 `docs/10 §8.2`：
+这是 **R1（最大断点）**。按 `docs/archive/10 §8.2`：
 
 ```
 一轮对话结束 (Agent.handle 返回)
@@ -387,7 +387,7 @@ CREATE TABLE sessions (
 | "这个偏好已经变了" | 新记忆 `supersedes_id=旧id`，旧记忆 `status=superseded`（保留可追溯） |
 | "仅在这个项目用" | `scope=project`, `project_id=当前项目` |
 
-**删除必须同步清理索引**——否则删掉的记忆还会被向量检索召回（`docs/10 §8.4` 明确要求）。
+**删除必须同步清理索引**——否则删掉的记忆还会被向量检索召回（`docs/archive/10 §8.4` 明确要求）。
 
 ### 2.10 实现说明（P0 / P1 / P4 / P5，2026-07-22 已完成）
 
@@ -408,7 +408,7 @@ CREATE TABLE sessions (
 
 #### 2026-07-22 追加：检索链路的两个致命断点
 
-评审（见 [14-架构评审与改造建议.md](./14-架构评审与改造建议.md)）时挖出两个
+评审（见 [14-架构评审与改造建议.md](./archive/14-架构评审与改造建议.md)）时挖出两个
 **会静默坏掉**的断点，都在检索链路上：
 
 **① 合成向量当语义用 —— 检索比不检索更差。**

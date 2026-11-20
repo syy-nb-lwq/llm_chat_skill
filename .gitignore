@@ -55,3 +55,7 @@ dist/
 
 # Skills 数据文件（会被提交）
 # skills/*.md
+
+# pytest 临时输出（本地排查用）
+.pytest_*.txt
+.pytest_tmp/
