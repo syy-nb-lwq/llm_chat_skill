@@ -10,7 +10,7 @@
 关键点:意图与规划**解耦**。意图错了不再污染规划,规划错了也不再回写意图,
 两者可以分别评估、分别优化。
 """
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from contextvars import ContextVar
 
 from core.agent_base import BaseAgent
@@ -279,57 +279,15 @@ class ManagerAgent(BaseAgent):
         """
         self.logger.info("Manager", "开始意图识别和任务规划")
 
-        # ===== 结构守卫(0 次 LLM,只处理空输入这类结构事实) =====
-        intent_result = self.intent_detector.detect(user_input)
-        label = intent_result.label
-
-        if label is not None:
-            self.logger.info(
-                "Manager", f"结构守卫定案: {label.value} ({intent_result.detail})"
-            )
-            decided = self._plan_from_label(
-                label,
-                detail=intent_result.detail,
-                context=context,
-                layer="guard",
-                confidence=intent_result.confidence,
-                slots=intent_result.entities,
-            )
-            if decided is not None:
-                return decided
+        # ===== L0 结构守卫(0 次 LLM) =====
+        decided = self._guard_plan(user_input, context)
+        if decided is not None:
+            return decided
 
         # ===== L1 判别层(一次 LLM 调用,闭集分类) =====
-        decision = await self._l1_classify(user_input, context)
-        if decision is not None:
-            if decision.confidence < self._l1_threshold:
-                # 低置信:不放弃,带 L1 结果升级 L2 兜底
-                # 宁可多调一次工具,也不要漏答(D4)
-                self.logger.info(
-                    "Manager",
-                    f"L1 置信不足({decision.confidence:.2f},"
-                    f"判为 {decision.label.value}),升级 L2 兜底",
-                )
-            elif decision.label is not IntentLabel.TASK:
-                # 非任务类意图:高置信可直接定案
-                self.logger.info(
-                    "Manager",
-                    f"L1 定案: {decision.label.value} (置信度 {decision.confidence})",
-                )
-                decided = self._plan_from_label(
-                    decision.label,
-                    detail=decision.reason or f"L1 判别为 {decision.label.value}",
-                    context=context,
-                    layer="L1",
-                    confidence=decision.confidence,
-                    slots=decision.slots,
-                )
-                if decided is not None:
-                    return decided
-            else:
-                self.logger.info(
-                    "Manager",
-                    f"L1 判为 task (置信度 {decision.confidence}),进入 L2 规划",
-                )
+        decision, decided = await self._l1_plan(user_input, context)
+        if decided is not None:
+            return decided
 
         # ===== L2 规划层 =====
         plan = await self._llm_plan(
@@ -347,6 +305,91 @@ class ManagerAgent(BaseAgent):
             return plan
 
         # 规划也没产出 → 兜底
+        return self._fallback_plan(decision)
+
+    def _guard_plan(
+        self, user_input: str, context: Optional[Context]
+    ) -> Optional[PlanResult]:
+        """L0 结构守卫：只判断"不需理解语义就能确定"的事（0 次 LLM）。
+
+        现在只有一条规则：空输入 → 澄清。
+
+        **刻意没有任何"猜用户怎么说"的规则** —— 那种规则会静默地判错，
+        而且会抢在 L1 前面把话拿走（真机基线：加规则的 94.7% vs 只留空输入
+        守卫的 97.7%）。想加规则进来，先拿基线说话。
+
+        Returns:
+            定案则返回 `PlanResult`，未定案返回 `None`（继续走 L1）。
+        """
+        intent_result = self.intent_detector.detect(user_input)
+        label = intent_result.label
+        if label is None:
+            return None
+
+        self.logger.info(
+            "Manager", f"结构守卫定案: {label.value} ({intent_result.detail})"
+        )
+        return self._plan_from_label(
+            label,
+            detail=intent_result.detail,
+            context=context,
+            layer="guard",
+            confidence=intent_result.confidence,
+            slots=intent_result.entities,
+        )
+
+    async def _l1_plan(
+        self, user_input: str, context: Optional[Context]
+    ) -> Tuple[Optional[IntentDecision], Optional[PlanResult]]:
+        """L1 判别层：**意图的唯一裁决者**。
+
+        一次 LLM 调用做闭集分类（6 标签）。三种出口：
+
+        - 置信度 < 阈值 → **不定案**，把判断一起升级到 L2 兜底
+          （宁可多调一次工具，也不要漏答）；
+        - 置信度够 + 非 task → 直接定案；
+        - 置信度够 + task → 不定案，交给 L2 规划"怎么做"。
+
+        Returns:
+            `(decision, decided)` —— `decided` 非空表示已定案；
+            `decision` 无论如何都返回，供 L2 当强约束注入提示词。
+        """
+        decision = await self._l1_classify(user_input, context)
+        if decision is None:
+            return None, None
+
+        if decision.confidence < self._l1_threshold:
+            # 低置信:不放弃,带 L1 结果升级 L2 兜底(D4)
+            self.logger.info(
+                "Manager",
+                f"L1 置信不足({decision.confidence:.2f},"
+                f"判为 {decision.label.value}),升级 L2 兜底",
+            )
+            return decision, None
+
+        if decision.label is IntentLabel.TASK:
+            self.logger.info(
+                "Manager",
+                f"L1 判为 task (置信度 {decision.confidence}),进入 L2 规划",
+            )
+            return decision, None
+
+        self.logger.info(
+            "Manager",
+            f"L1 定案: {decision.label.value} (置信度 {decision.confidence})",
+        )
+        return decision, self._plan_from_label(
+            decision.label,
+            detail=decision.reason or f"L1 判别为 {decision.label.value}",
+            context=context,
+            layer="L1",
+            confidence=decision.confidence,
+            slots=decision.slots,
+        )
+
+    @staticmethod
+    def _fallback_plan(decision: Optional[IntentDecision]) -> PlanResult:
+        """L2 也没产出计划时的兜底：当成"直接回答"，不要卡住用户。"""
         return PlanResult(
             intent=IntentType.TASK,
             intent_detail="无法规划出具体动作,直接回答",
@@ -430,6 +473,7 @@ class ManagerAgent(BaseAgent):
                     token.var.reset(token)
                 except Exception as exc:
                     downgrade(exc, where='agents/manager.py')
+
     async def _llm_plan_inner(
         self,
         user_input: str,
@@ -444,9 +488,48 @@ class ManagerAgent(BaseAgent):
         **不再输出意图** —— 意图由 L0/L1 判定,这里只负责"怎么做"。
         `intent_hint` 是 L1 的判别结果,作为强约束注入提示词。
         `profile_block` 是调用方(Agent)本轮已取好的画像,空则自己取。
-        """
-        skills = self.skill_store.list_all()
 
+        两步：先问模型（`_ask_planner`），再把模型的话翻成 `PlanResult`
+        （`_build_plan_result`）。中间不掺业务判断，各自可单独测。
+        """
+        enriched_input, llm_plan, error = await self._ask_planner(
+            user_input,
+            context,
+            session_id=session_id,
+            intent_hint=intent_hint,
+            profile_block=profile_block,
+            prior_findings=prior_findings,
+        )
+        if llm_plan is None:
+            return PlanResult(
+                intent=IntentType.TASK,
+                intent_detail=f"LLM 调用失败: {(error or '')[:50]}",
+                selected_skill=None,
+                tool_tasks=[],
+                intent_layer="L2",
+                intent_uncertain=True,
+            )
+        return self._build_plan_result(
+            llm_plan, enriched_input=enriched_input, intent_hint=intent_hint
+        )
+
+    async def _ask_planner(
+        self,
+        user_input: str,
+        context: Optional[Context],
+        *,
+        session_id: str,
+        intent_hint: Optional[IntentDecision],
+        profile_block: str,
+        prior_findings: str,
+    ) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """拼提示词、调规划模型。
+
+        Returns:
+            `(enriched_input, llm_plan, error)` —— `llm_plan` 为 None 表示调用失败，
+            `error` 带原始信息（会进 PlanResult.intent_detail，便于排查）。
+            返回值里带上 `enriched_input` 是因为后面判"召回准不准"要用同一份输入。
+        """
         # 读取历史教训 hints,拼到 user_input 前面
         enriched_input = await self._enrich_with_hints(
             user_input, session_id=session_id
@@ -473,45 +556,53 @@ class ManagerAgent(BaseAgent):
                 _current_planning_input.reset(_plan_token)
         except Exception as e:
             self.logger.error("Manager", f"LLM 规划失败: {e}")
-            return PlanResult(
-                intent=IntentType.TASK,
-                intent_detail=f"LLM 调用失败: {str(e)[:50]}",
-                selected_skill=None,
-                tool_tasks=[],
-                intent_layer="L2",
-                intent_uncertain=True,
-            )
+            return enriched_input, None, str(e)
+        return enriched_input, llm_plan, ""
 
+    def _resolve_skill(self, skill_name: str, enriched_input: str) -> Optional[Skill]:
+        """把模型给的技能名解析成技能对象。解析不了返回 None（不抛）。"""
+        if not skill_name:
+            return None
         selected_skill = None
-        skill_name = llm_plan.get("selected_skill") or ""
-        if skill_name:
-            for s in skills:
-                if s.name == skill_name:
-                    selected_skill = s
-                    break
-            if selected_skill is None:
-                self.logger.warning(
-                    "Manager", f"选了不存在的技能: {skill_name}"
-                )
-            else:
-                # 选了但**不在召回详情里** → 它只有名字，没有方法细节。
-                # 记一笔，用来量"召回准不准"（docs/18 F0-3 的观测点）。
-                try:
-                    recalled = {
-                        s.name
-                        for s in self.skill_store.match(
-                            enriched_input, self.SKILL_DETAIL_TOP_K
-                        )
-                    }
-                except Exception:
-                    recalled = set()
-                if skill_name not in recalled:
-                    self.logger.info(
-                        "Manager",
-                        f"选中的技能未进入召回 top-{self.SKILL_DETAIL_TOP_K}: {skill_name}"
-                        f"(只有目录信息,没有方法细节)",
-                    )
+        for s in self.skill_store.list_all():
+            if s.name == skill_name:
+                selected_skill = s
+                break
+        if selected_skill is None:
+            self.logger.warning("Manager", f"选了不存在的技能: {skill_name}")
+            return None
 
+        # 选了但**不在召回详情里** → 它只有名字,没有方法细节。
+        # 记一笔,用来量"召回准不准"(docs/18 F0-3 的观测点)。
+        try:
+            recalled = {
+                s.name
+                for s in self.skill_store.match(enriched_input, self.SKILL_DETAIL_TOP_K)
+            }
+        except Exception:
+            recalled = set()
+        if skill_name not in recalled:
+            self.logger.info(
+                "Manager",
+                f"选中的技能未进入召回 top-{self.SKILL_DETAIL_TOP_K}: {skill_name}"
+                f"(只有目录信息,没有方法细节)",
+            )
+        return selected_skill
+
+    def _build_plan_result(
+        self,
+        llm_plan: Dict[str, Any],
+        *,
+        enriched_input: str,
+        intent_hint: Optional[IntentDecision],
+    ) -> PlanResult:
+        """把规划模型的输出翻成 `PlanResult`。
+
+        四条出口（顺序即优先级）：重试 → 有工具任务 → 只有技能 → 直答/澄清。
+        """
+        selected_skill = self._resolve_skill(
+            llm_plan.get("selected_skill") or "", enriched_input
+        )
         plan_detail = llm_plan.get("plan_detail", "") or ""
         if selected_skill:
             self.logger.info("Manager", f"选择技能: {selected_skill.name}")
@@ -617,7 +708,6 @@ class ManagerAgent(BaseAgent):
             intent_uncertain=uncertain,
             intent_slots=slots,
         )
-
 
     def _build_user_prompt(
         self,

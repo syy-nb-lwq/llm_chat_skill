@@ -17,6 +17,7 @@ from core.identity import IdentityContext
 from core.memory import get_memory_store
 from core.memorykit import get_memory
 from core.session_config import session_restore_limit
+from core.turn_context import TurnContext
 from infra.config import config
 from core.events import (
     EV_CLARIFICATION_REQUEST,
@@ -627,15 +628,14 @@ class Agent:
         except Exception as exc:
             self.logger.warning("Agent", f"会话摘要滚动失败: {exc}")
 
-    async def _begin_turn(self, user_input: str) -> tuple:
+    async def _begin_turn(self, tc: TurnContext) -> None:
         """一轮的准备工作 —— 身份、执行上下文、工作记忆、画像、trace。
 
         这些都是 `handle` 的**前置副作用**（contextvar、Context、异步写画像），
-        每轮只做一次。拆出来是为了让 `handle` 只表达"这一轮怎么走"。
-
-        Returns:
-            (profile_block, capability_block, trace, pending_async)
+        每轮只做一次。结果全部写进 `tc`，后面的 stage 只读 `tc`，
+        不再靠局部变量在函数之间传递。
         """
+        user_input = tc.user_input
         # M0-01:每次 handle 生成新的 execution_id,同 session 多轮不互相覆盖
         self.identity = IdentityContext(
             session_id=self.session_id,
@@ -693,9 +693,6 @@ class Agent:
         # 所以在这里就异步起,让它和后面的规划/执行并行跑完。
         self._schedule_memory_write(user_input)
 
-        # 异步回调串行队列:保证按 emit 顺序执行,而不依赖 task 调度
-        pending_async: list = []
-
         # ===== 用户纠正检测 =====
         # 本轮输入可能是在纠正**上一条**回答 —— 那是自演化唯一的 ground truth,
         # 必须接进去,否则 critic 永远只知道"工具调没调通"。
@@ -703,8 +700,11 @@ class Agent:
         if signal is not None:
             fut = self._apply_correction(signal)
             if fut is not None:
-                pending_async.append(fut)
-        return profile_block, capability_block, trace, pending_async
+                tc.pending_async.append(fut)
+
+        tc.profile_block = profile_block
+        tc.capability_block = capability_block
+        tc.trace = trace
 
     def _make_emitter(self, on_event, pending_async: list):
         """把一轮的事件派发器做成闭包。
@@ -780,7 +780,6 @@ class Agent:
         emit,
     ) -> str:
         """流式生成回答，同时记录「首 token 延迟」与「生成长度」。"""
-        """流式生成回答,同时记录「首 token 延迟」与「生成长度」。"""
         from core.trace import STAGE_FIRST_TOKEN, STAGE_GENERATE
 
         buf = []
@@ -801,19 +800,7 @@ class Agent:
             trace.since(STAGE_GENERATE, gen_start)
         return self._ensure_answer("".join(buf))
 
-    async def _handle_quick_intents(
-        self,
-        user_input: str,
-        plan,
-        *,
-        profile_block: str,
-        capability_block: str,
-        goal_note: str,
-        trace,
-        turn_start: float,
-        emit,
-        pending_async: list,
-    ):
+    async def _handle_quick_intents(self, tc: TurnContext) -> Optional[str]:
         """处理不需要跑工具链的三种意图：闲聊 / 教导 / 重试。
 
         返回 `None` 表示"不属于快捷意图，继续走正常工具链"；
@@ -823,6 +810,16 @@ class Agent:
         是最容易独立测试的 stage —— 不需要跑 goal loop 就能验证行为。
         """
         from core.trace import STAGE_PLAN  # noqa: F401 - 保持与 handle 的导入时机一致
+
+        user_input = tc.user_input
+        plan = tc.plan
+        profile_block = tc.profile_block
+        capability_block = tc.capability_block
+        goal_note = ""
+        trace = tc.trace
+        turn_start = tc.turn_start
+        emit = tc.emit
+        pending_async = tc.pending_async
 
         intent_type = plan.intent
 
@@ -895,354 +892,380 @@ class Agent:
         user_input: str,
         on_event: Optional[Callable] = None,
     ) -> str:
-        start = time.time()
-        # trace 用单调时钟算耗时(perf_counter),不能和 wall clock 混用
-        turn_start = time.perf_counter()
+        """跑一轮对话。
 
-        profile_block, capability_block, trace, pending_async = await self._begin_turn(
-            user_input
+        这里只表达"这一轮怎么走"：准备 → 规划 → 分流 → 执行 → 生成 → 落库 → 收尾。
+        每一步的实现都在对应的 stage 方法里，跨 stage 的状态全在 `TurnContext` 上 ——
+        不再靠闭包捕获十几个局部变量（那正是它以前拆不动的原因）。
+        """
+        tc = TurnContext(
+            user_input=user_input,
+            start=time.time(),
+            turn_start=time.perf_counter(),
         )
-        emit = self._make_emitter(on_event, pending_async)
+        await self._begin_turn(tc)
+        tc.emit = self._make_emitter(on_event, tc.pending_async)
+        self._install_global_emitter(tc)
 
-        # 把 emitter 放进上下文 —— 工具（如 run_subagents）和子智能体
-        # 深处没有 on_event 参数可传，靠这个把进度事件推出来。
-        #
-        # 注意 `emit` 是**同步**函数（它把协程塞进 pending_async 再统一 await），
-        # 而 event_bus 需要 async 接口，所以这里包一层。
+        try:
+            await self._plan_turn(tc)
+
+            # 意图不明 → 进 L3 澄清层:问一句,而不是硬猜
+            if tc.plan.intent == IntentType.CLARIFY:
+                tc.answer = await self._handle_clarification(tc)
+                return tc.answer
+
+            # 本轮正常推进 → 澄清计数归零。
+            # 限制的是**连续**澄清:用户答完能问出结果,就允许下一轮再问。
+            self._reset_clarify_state()
+
+            # 快捷意图：闲聊 / 教导 / 重试 各自是一个 stage
+            quick = await self._handle_quick_intents(tc)
+            if quick is not None:
+                # finally 里的 _finish_trace 用 `ans` 记 reply_chars ——
+                # 快捷意图的回答必须回填，否则 trace 显示"回复 0 字"。
+                tc.answer = quick
+                return tc.answer
+
+            await self._execute_goal_loop(tc)
+            tc.answer = await self._synthesize(tc)
+            self._persist_turn(tc)
+            return tc.answer
+
+        except Exception as e:
+            self.logger.error("Agent", f"ERROR: {e}")
+            tc.emit(EV_ERROR, {"message": str(e)})
+            tc.error = str(e)
+            raise
+        finally:
+            await self._end_turn(tc)
+
+    def _install_global_emitter(self, tc: TurnContext) -> None:
+        """把 emitter 放进执行上下文。
+
+        工具（如 run_subagents）和子智能体深处没有 `on_event` 参数可传，
+        靠这个把进度事件推出来。
+
+        注意 `tc.emit` 是**同步**函数（它把协程塞进 `pending_async` 再统一 await），
+        而 event_bus 需要 async 接口，所以这里包一层。
+        """
         try:
             from core.event_bus import set_emitter
 
             async def _async_emit(event: str, payload: dict):
-                emit(event, payload)
+                tc.emit(event, payload)
 
             set_emitter(_async_emit)
         except Exception as exc:
             downgrade(exc, where='core/agent.py')
-        ans = ""       # 本轮最终回答(finally 里用来记长度)
-        # 目标循环"没做完"的说明（空 = 已完成或还没跑到循环）。
-        # 必须在 _answer_stream 定义/调用之前初始化 —— 闲聊路径也会用到它。
-        goal_note = ""
-        trace_error = ""
+
+    def _reset_clarify_state(self) -> None:
+        """本轮正常推进 → 澄清计数归零。
+
+        限制的是**连续**澄清：用户答完能问出结果，就允许下一轮再问。
+        """
+        self.context.metadata["clarify_round"] = 0
+        self.context.metadata.pop("clarify_question", None)
+        self.context.metadata.pop("clarify_options", None)
+
+    async def _plan_turn(self, tc: TurnContext) -> None:
+        """阶段 1：意图规划。结果写回 `tc.plan`。"""
+        emit = tc.emit
+        emit(EV_THINKING, {"stage": "planning"})
+        plan_start = time.perf_counter()
+        plan = await self.manager.plan(
+            tc.user_input,
+            self.context,
+            session_id=self.session_id,
+            profile_block=tc.profile_block,
+        )
+        tc.plan = plan
+
+        if tc.trace is not None:
+            from core.trace import STAGE_PLAN
+
+            tc.trace.since(STAGE_PLAN, plan_start)
+            tc.trace.intent_layer = plan.intent_layer or ""
+            tc.trace.intent = str(getattr(plan.intent, "value", plan.intent))
+            tc.trace.intent_confidence = float(plan.intent_confidence or 0.0)
+
+        # 工作记忆：计划进工作台，供重规划 / 回答 / 重试读取
+        if self.working is not None:
+            self.working.set_plan(plan)
+
+    async def _execute_goal_loop(self, tc: TurnContext) -> None:
+        """阶段 3：执行工具链（含重规划）。
+
+        一轮规划常常做不完:要造工具、要先查再算、要失败重来。
+        循环由规划层的 `goal_done` 驱动 —— 它说"够了"就停,
+        所以「你好」「算 1+1」这类请求行为和以前完全一样(只跑一轮)。
+        """
+        from core.goal_runner import run_goal_loop
+
+        emit = tc.emit
+        emit(EV_PLAN, {
+            "intent": tc.plan.intent,
+            "skill": tc.skill_name,
+            "tasks": tc.plan.tool_tasks,
+        })
+
+        # 提取实体,供 Skill DAG 的 params 用 (${user_input.city})
+        tc.entities = self._extract_entities(tc.user_input)
+
+        # 让子智能体知道"这是谁在问"、"前面聊到哪了"
         try:
-            # ===== 意图规划(统一入口) =====
-            emit(EV_THINKING, {"stage": "planning"})
-            plan_start = time.perf_counter()
-            plan = await self.manager.plan(
-                user_input,
-                self.context,
-                session_id=self.session_id,
-                profile_block=profile_block,
+            from core.subagents import set_current_context
+
+            # 共享主对话上下文 —— 否则子智能体不知道"发"指的是什么。
+            # 给**快照**而不是本体:子智能体是并发跑的(gather),
+            # 共享本体会看到互相穿插的消息列表。快照不带 sink,
+            # 也不会把子智能体看到的东西再落一遍库。
+            set_current_context(self.context.snapshot())
+        except Exception as exc:
+            downgrade(exc, where='core/agent.py')
+
+        tools_start = time.perf_counter()
+        goal = await run_goal_loop(
+            first_plan=tc.plan,
+            plan_fn=lambda prior: self._replan(tc, prior),
+            execute_fn=lambda p: self._run_plan_tasks(tc, p),
+            emit=emit,
+            enabled=self._goal_loop_enabled(),
+            max_rounds=self._goal_max_rounds(),
+            budget_s=self._goal_budget_s(),
+            is_clarify=lambda p: getattr(p, "intent", None) == IntentType.CLARIFY,
+        )
+        tc.goal = goal
+        tc.tool_results = goal.tool_results
+
+        # 工作记忆：本轮工具返回 + 最终计划（回答/重试都从这里取，不再靠局部变量传递）
+        if self.working is not None:
+            self.working.set_tool_results(tc.tool_results)
+            self.working.set_plan(tc.plan)
+        emit(EV_THINKING, {"stage": "goal_loop_done", **goal.to_dict()})
+
+        # 存储本次 tool_tasks 用于重试
+        # 独立字段,不挂在 messages[-1] 上 —— 挂消息会挂错
+        # (写到这里时最后一条还是用户消息),而且空列表会被
+        # 当成"没有记录",导致重试重跑更早一轮的旧工具。
+        self.context.set_last_tool_tasks(tc.plan.tool_tasks)
+
+        if tc.trace is not None:
+            from core.trace import STAGE_TOOLS
+
+            tc.trace.since(STAGE_TOOLS, tools_start)
+            tc.trace.tool_count = len(tc.tool_results)
+            tc.trace.tool_failed = sum(
+                1 for r in tc.tool_results.values() if not getattr(r, "success", True)
             )
-            if trace is not None:
-                from core.trace import STAGE_PLAN
 
-                trace.since(STAGE_PLAN, plan_start)
-                trace.intent_layer = plan.intent_layer or ""
-                trace.intent = str(getattr(plan.intent, "value", plan.intent))
-                trace.intent_confidence = float(plan.intent_confidence or 0.0)
+    async def _run_plan_tasks(self, tc: TurnContext, plan) -> Dict:
+        """执行一份计划里的工具任务（`run_goal_loop` 每轮的 execute_fn）。
 
-            # 工作记忆：计划进工作台，供重规划 / 回答 / 重试读取
-            if self.working is not None:
-                self.working.set_plan(plan)
+        DAG 优先：如果启用了 Skill DAG 且计划关联到了带结构化 steps 的技能，
+        先用 `DAGExecutor` 把 `skill.steps` 翻成 ToolTask；翻不出来再退回
+        规划层给的 `tool_tasks`。
+        """
+        emit = tc.emit
+        results: Dict = {}
+        if not plan.tool_tasks:
+            return results
+        emit(EV_THINKING, {"stage": "tools_running", "count": len(plan.tool_tasks)})
 
-            # 根据意图类型决定后续流程
-            intent_type = plan.intent
+        async def on_tool_event(event: str, payload: dict):
+            emit(event, payload)
 
-            # 意图不明 → 进 L3 澄清层:问一句,而不是硬猜
-            if intent_type == IntentType.CLARIFY:
-                return await self._handle_clarification(
-                    user_input,
-                    plan,
-                    emit,
-                    lambda: self._drain_pending(pending_async),
-                )
+        planned_tasks: List[ToolTask] = []
+        used_dag = False
+        if self.dag_enabled and plan.selected_skill and plan.selected_skill.has_structured_steps():
+            skill_tasks, issues = self.dag.skill_to_tasks(plan.selected_skill)
+            for i in issues:
+                emit(EV_THINKING, {"stage": "dag_skip", "issue": i})
+            if skill_tasks:
+                planned_tasks = skill_tasks
+                used_dag = True
+                emit(EV_THINKING, {
+                    "stage": "skill_dag_used",
+                    "skill": plan.selected_skill.name,
+                    "count": len(planned_tasks),
+                })
 
-            # 本轮正常推进 → 澄清计数归零。
-            # 限制的是**连续**澄清:用户答完能问出结果,就允许下一轮再问。
-            self.context.metadata["clarify_round"] = 0
-            self.context.metadata.pop("clarify_question", None)
-            self.context.metadata.pop("clarify_options", None)
-
-            # 快捷意图：闲聊 / 教导 / 重试 各自是一个 stage（实现见独立方法）
-            quick = await self._handle_quick_intents(
-                user_input, plan,
-                profile_block=profile_block,
-                capability_block=capability_block,
-                goal_note=goal_note,
-                trace=trace,
-                turn_start=turn_start,
-                emit=emit,
-                pending_async=pending_async,
-            )
-            if quick is not None:
-                # finally 里的 _finish_trace 用 `ans` 记 reply_chars ——
-                # 快捷意图的回答必须回填，否则 trace 显示"回复 0 字"。
-                ans = quick
-                return ans
-
-            # 技能执行(正常流程)
-            skill_name = plan.selected_skill.name if plan.selected_skill else None
-            emit(EV_PLAN, {
-                "intent": plan.intent,
-                "skill": skill_name,
-                "tasks": plan.tool_tasks,
-            })
-
-            # 提取实体,供 Skill DAG 的 params 用 (${user_input.city})
-            entities = self._extract_entities(user_input)
-
-            # ===== 目标循环 =====
-            #
-            # 一轮规划常常做不完:要造工具、要先查再算、要失败重来。
-            # 循环由规划层的 `goal_done` 驱动 —— 它说"够了"就停,
-            # 所以「你好」「算 1+1」这类请求行为和以前完全一样(只跑一轮)。
-            from core.goal_runner import run_goal_loop
-
-            # 最后一轮实际执行的 ToolTask 列表（critic 需要它拿真实工具名）
-            planned_holder: Dict[str, List[ToolTask]] = {"tasks": []}
-
-            async def _run_plan_tasks(p) -> Dict:
-                """执行一份计划里的工具任务。"""
-                results: Dict = {}
-                if not p.tool_tasks:
-                    return results
-                emit(EV_THINKING, {"stage": "tools_running", "count": len(p.tool_tasks)})
-
-                async def on_tool_event(event: str, payload: dict):
-                    emit(event, payload)
-
-                # 如果启用了 Skill DAG 且 plan 关联到了带结构化 steps 的 skill,
-                # 优先用 DAGExecutor 把 skill.steps 翻成 ToolTask。
-                planned_tasks: List[ToolTask] = []
-                used_dag = False
-                if self.dag_enabled and p.selected_skill and p.selected_skill.has_structured_steps():
-                    skill_tasks, issues = self.dag.skill_to_tasks(p.selected_skill)
-                    for i in issues:
-                        emit(EV_THINKING, {"stage": "dag_skip", "issue": i})
-                    if skill_tasks:
-                        planned_tasks = skill_tasks
-                        used_dag = True
-                        emit(EV_THINKING, {
-                            "stage": "skill_dag_used",
-                            "skill": p.selected_skill.name,
-                            "count": len(planned_tasks),
-                        })
-
-                if not used_dag:
-                    for i, t in enumerate(p.tool_tasks):
-                        task_id = t.get("id") or f"t{i+1}"
-                        planned_tasks.append(ToolTask(
-                            id=task_id,
-                            type=t.get("type", ""),
-                            params=t.get("params", {}),
-                            depends_on=t.get("depends_on", []) or [],
-                            retry=int(t.get("retry", 0) or 0),
-                            timeout_s=int(t.get("timeout_s", 30) or 30),
-                            fallback_to=t.get("fallback_to"),
-                        ))
-                planned_holder["tasks"] = planned_tasks
-                return await self.learning.execute_dag(
-                    planned_tasks, on_tool_event,
-                    user_input={"text": user_input, **entities}
-                )
-
-            # 记录"最近一次的 plan" —— 重规划后回答要用最新的技能
-            active = {"plan": plan}
-
-            async def _replan(prior_findings: str):
-                # 上一轮的结论进工作记忆，重规划时回灌（goal_runner 没给就用已记的）
-                if self.working is not None:
-                    if prior_findings:
-                        self.working.add_finding(prior_findings)
-                    prior_findings = prior_findings or self.working.findings_text()
-                new_plan = await self.manager.plan(
-                    user_input,
-                    self.context,
-                    session_id=self.session_id,
-                    profile_block=profile_block,
-                    prior_findings=prior_findings,
-                )
-                active["plan"] = new_plan
-                return new_plan
-
-            # 让子智能体知道"这是谁在问"、"前面聊到哪了"
-            try:
-                from core.subagents import set_current_context
-
-                # 共享主对话上下文 —— 否则子智能体不知道"发"指的是什么。
-                # 给**快照**而不是本体:子智能体是并发跑的(gather),
-                # 共享本体会看到互相穿插的消息列表。快照不带 sink,
-                # 也不会把子智能体看到的东西再落一遍库。
-                set_current_context(self.context.snapshot())
-            except Exception as exc:
-                downgrade(exc, where='core/agent.py')
-            tools_start = time.perf_counter()
-            goal = await run_goal_loop(
-                first_plan=plan,
-                plan_fn=_replan,
-                execute_fn=_run_plan_tasks,
-                emit=emit,
-                enabled=self._goal_loop_enabled(),
-                max_rounds=self._goal_max_rounds(),
-                budget_s=self._goal_budget_s(),
-                is_clarify=lambda p: getattr(p, "intent", None) == IntentType.CLARIFY,
-            )
-            tool_results = goal.tool_results
-            plan = active["plan"]
-            # 工作记忆：本轮工具返回 + 最终计划（回答/重试都从这里取，不再靠局部变量传递）
-            if self.working is not None:
-                self.working.set_tool_results(tool_results)
-                self.working.set_plan(plan)
-            emit(EV_THINKING, {"stage": "goal_loop_done", **goal.to_dict()})
-
-            # 存储本次 tool_tasks 用于重试
-            # 独立字段,不挂在 messages[-1] 上 —— 挂消息会挂错
-            # (写到这里时最后一条还是用户消息),而且空列表会被
-            # 当成"没有记录",导致重试重跑更早一轮的旧工具。
-            self.context.set_last_tool_tasks(plan.tool_tasks)
-
-            if trace is not None:
-                from core.trace import STAGE_TOOLS
-
-                trace.since(STAGE_TOOLS, tools_start)
-                trace.tool_count = len(tool_results)
-                trace.tool_failed = sum(
-                    1 for r in tool_results.values() if not getattr(r, "success", True)
-                )
-
-            # 生成回答
-            # 没真的做完时,要把原因交给回答层 —— 不能说得像全成了
-            if not goal.completed:
-                goal_note = (
-                    f"注意：这一轮没有完全完成目标（{goal.explanation}，"
-                    f"共跑了 {goal.rounds} 轮）。回答时必须如实说明"
-                    f"哪些部分没做成、卡在哪,不要把未完成说成已完成。"
-                )
-                emit(EV_THINKING, {"stage": "goal_incomplete", "detail": goal_note})
-            else:
-                goal_note = ""
-            emit(EV_THINKING, {"stage": "synthesizing"})
-            try:
-                ans = await self._stream_answer(user_input, tool_results, plan.selected_skill, profile_block=profile_block, capability_block=capability_block, goal_note=goal_note, trace=trace, turn_start=turn_start, emit=emit)
-            except Exception:
-                ans = await self.orchestrator.orchestrate(
-                    user_input, tool_results, plan.selected_skill, self.context,
-                    profile_block=profile_block,
-                    capability_block=capability_block,
-                    goal_note=goal_note,
-                )
-                emit(EV_MESSAGE_DELTA, {"delta": ans})
-
-            ans = self._ensure_answer(ans)
-            # 本轮的工具计划跟着这条助手消息一起落库 —— 会话恢复后
-            # 才能知道上一轮调了哪些工具(重试要用)。
-            self.context.add_assistant_message(ans, tool_tasks=plan.tool_tasks)
-            # 把本轮产物一起给前端 —— 否则"生成的视频/报表"做出来了用户也看不到
-            emit(EV_MESSAGE_FINAL, {
-                "content": ans,
-                "artifacts": self._collect_artifacts(tool_results),
-            })
-
-            duration = (time.time() - start) * 1000
-            self.logger.info("Agent", f"DONE: {duration:.0f}ms")
-
-            # ExecutionCritic 异步评估,不阻塞响应
-            execution_context = build_execution_context(
-                trace_id=self.trace_id,
-                scenario=plan.selected_skill.name if plan.selected_skill else "",
-                intent=plan.intent,
-                selected_skill=plan.selected_skill.name if plan.selected_skill else None,
-                tool_results=tool_results,
-                latency_ms=duration,
-                # M0-02:传入任务规格,让 critic 拿到真实工具名/retry/fallback
-                task_specs={
-                    t.id: {
-                        "type": t.type,
-                        "retry": t.retry,
-                        "timeout_s": t.timeout_s,
-                        "fallback_to": t.fallback_to,
-                    }
-                    for t in planned_holder["tasks"]
-                },
-                # M0-01:四级标识
-                execution_id=self.execution_id,
-                turn_id=self.turn_id,
-                session_id=self.identity.session_id if self.identity else self.session_id,
-            )
-            # 工具自修复：自己造的工具反复失败 → 让它自己修一版
-            # （后台跑，不阻塞回答；只动 agent 自己造的，内置源码不碰）
-            pending_async.append(asyncio.ensure_future(self._repair_tools()))
-
-            # 方法论自增长：**只有真的做完了**才沉淀经验
-            # （失败的轨迹没有复用价值；提炼本身在后台跑，不阻塞回答）
-            if goal.completed:
-                pending_async.append(asyncio.ensure_future(
-                    self._harvest_skill(
-                        user_input, tool_results, goal.rounds,
-                        planned_holder["tasks"],
-                    )
+        if not used_dag:
+            for i, t in enumerate(plan.tool_tasks):
+                task_id = t.get("id") or f"t{i+1}"
+                planned_tasks.append(ToolTask(
+                    id=task_id,
+                    type=t.get("type", ""),
+                    params=t.get("params", {}),
+                    depends_on=t.get("depends_on", []) or [],
+                    retry=int(t.get("retry", 0) or 0),
+                    timeout_s=int(t.get("timeout_s", 30) or 30),
+                    fallback_to=t.get("fallback_to"),
                 ))
+        tc.planned_tasks = planned_tasks
+        return await self.learning.execute_dag(
+            planned_tasks, on_tool_event,
+            user_input={"text": tc.user_input, **tc.entities}
+        )
 
-            # 异步执行 critic,收集到 pending_async 末尾 await
-            pending_async.append(asyncio.ensure_future(
-                self._evaluate_with_skill_quality(execution_context)
-            ))
-            # 存住这一轮的执行上下文 —— 下一轮用户如果纠正,
-            # 就能拿它重评(docs/14 §2.3)
-            self._last_exec_ctx = execution_context
-            if execution_context.execution_id:
-                self._exec_ctxs[execution_context.execution_id] = execution_context
-                # 只留最近 20 轮,别无限涨
-                while len(self._exec_ctxs) > 20:
-                    self._exec_ctxs.popitem(last=False)
+    async def _replan(self, tc: TurnContext, prior_findings: str):
+        """目标没做完 → 带着上一轮的结论重新规划，并更新 `tc.plan`。"""
+        # 上一轮的结论进工作记忆，重规划时回灌（goal_runner 没给就用已记的）
+        if self.working is not None:
+            if prior_findings:
+                self.working.add_finding(prior_findings)
+            prior_findings = prior_findings or self.working.findings_text()
+        new_plan = await self.manager.plan(
+            tc.user_input,
+            self.context,
+            session_id=self.session_id,
+            profile_block=tc.profile_block,
+            prior_findings=prior_findings,
+        )
+        tc.plan = new_plan
+        return new_plan
 
-            return ans
+    async def _synthesize(self, tc: TurnContext) -> str:
+        """阶段 4：生成回答、落库、把产物推给前端。"""
+        emit = tc.emit
+        goal_note = ""
+        # 没真的做完时,要把原因交给回答层 —— 不能说得像全成了
+        if tc.goal is not None and not tc.goal.completed:
+            goal_note = (
+                f"注意：这一轮没有完全完成目标（{tc.goal.explanation}，"
+                f"共跑了 {tc.goal.rounds} 轮）。回答时必须如实说明"
+                f"哪些部分没做成、卡在哪,不要把未完成说成已完成。"
+            )
+            emit(EV_THINKING, {"stage": "goal_incomplete", "detail": goal_note})
+        emit(EV_THINKING, {"stage": "synthesizing"})
+        try:
+            ans = await self._stream_answer(
+                tc.user_input, tc.tool_results, tc.skill,
+                profile_block=tc.profile_block,
+                capability_block=tc.capability_block,
+                goal_note=goal_note,
+                trace=tc.trace,
+                turn_start=tc.turn_start,
+                emit=emit,
+            )
+        except Exception:
+            # 流式通道挂了就退到非流式一次性生成 —— 用户至少能拿到答案
+            ans = await self.orchestrator.orchestrate(
+                tc.user_input, tc.tool_results, tc.skill, self.context,
+                profile_block=tc.profile_block,
+                capability_block=tc.capability_block,
+                goal_note=goal_note,
+            )
+            emit(EV_MESSAGE_DELTA, {"delta": ans})
 
-        except Exception as e:
-            self.logger.error("Agent", f"ERROR: {e}")
-            emit(EV_ERROR, {"message": str(e)})
-            trace_error = str(e)
-            raise
-        finally:
-            # 还原执行上下文（子智能体各自设置自己的 agent_id）
-            try:
-                from core.exec_context import reset_exec_context
+        ans = self._ensure_answer(ans)
+        # 本轮的工具计划跟着这条助手消息一起落库 —— 会话恢复后
+        # 才能知道上一轮调了哪些工具(重试要用)。
+        self.context.add_assistant_message(ans, tool_tasks=tc.plan.tool_tasks)
+        # 把本轮产物一起给前端 —— 否则"生成的视频/报表"做出来了用户也看不到
+        emit(EV_MESSAGE_FINAL, {
+            "content": ans,
+            "artifacts": self._collect_artifacts(tc.tool_results),
+        })
 
-                reset_exec_context(self._exec_tokens)
-            except Exception as exc:
-                downgrade(exc, where='core/agent.py')
-            # 统一 await 所有异步 emit,保证事件按 emit 顺序完成
-            if pending_async:
-                results = await asyncio.gather(*pending_async, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, Exception):
-                        self.logger.warning("Agent", f"emit task failed: {r}")
-            if trace is not None:
-                trace.reply_chars = len(ans)
-                self._finish_trace(trace, turn_start, error=trace_error)
+        tc.duration_ms = (time.time() - tc.start) * 1000
+        self.logger.info("Agent", f"DONE: {tc.duration_ms:.0f}ms")
+        return ans
 
-            # 工作记忆收尾：失败先落盘取证，然后清空。
-            # **必须在这里做** —— 它是一轮的生命周期边界，而不是 GC 的事。
-            try:
-                dumped = self.mem.end_turn(
-                    self.working,
-                    failed=bool(trace_error),
-                    reason=(trace_error or "")[:200],
+    def _persist_turn(self, tc: TurnContext) -> None:
+        """阶段 5：把这一轮的轨迹交给后台（critic / 技能收割 / 工具自修复）。
+
+        全部挂到 `pending_async`，由 `_end_turn` 统一 await —— 不阻塞回答。
+        """
+        execution_context = build_execution_context(
+            trace_id=self.trace_id,
+            scenario=tc.skill_name or "",
+            intent=tc.plan.intent,
+            selected_skill=tc.skill_name,
+            tool_results=tc.tool_results,
+            latency_ms=tc.duration_ms,
+            # M0-02:传入任务规格,让 critic 拿到真实工具名/retry/fallback
+            task_specs={
+                t.id: {
+                    "type": t.type,
+                    "retry": t.retry,
+                    "timeout_s": t.timeout_s,
+                    "fallback_to": t.fallback_to,
+                }
+                for t in tc.planned_tasks
+            },
+            # M0-01:四级标识
+            execution_id=self.execution_id,
+            turn_id=self.turn_id,
+            session_id=self.identity.session_id if self.identity else self.session_id,
+        )
+        # 工具自修复：自己造的工具反复失败 → 让它自己修一版
+        # （后台跑，不阻塞回答；只动 agent 自己造的，内置源码不碰）
+        tc.pending_async.append(asyncio.ensure_future(self._repair_tools()))
+
+        # 方法论自增长：**只有真的做完了**才沉淀经验
+        # （失败的轨迹没有复用价值；提炼本身在后台跑，不阻塞回答）
+        if tc.goal is not None and tc.goal.completed:
+            tc.pending_async.append(asyncio.ensure_future(
+                self._harvest_skill(
+                    tc.user_input, tc.tool_results, tc.goal.rounds,
+                    tc.planned_tasks,
                 )
-                if dumped:
-                    self.logger.info("Agent", f"本轮失败，工作记忆已落盘: {dumped}")
-            except Exception as exc:
-                self.logger.warning("Agent", f"工作记忆收尾失败: {exc}")
-            finally:
-                self.working = None
+            ))
 
-    async def _handle_clarification(
-        self,
-        user_input: str,
-        plan,
-        emit,
-        drain,
-    ) -> str:
+        # 异步执行 critic,收集到 pending_async 末尾 await
+        tc.pending_async.append(asyncio.ensure_future(
+            self._evaluate_with_skill_quality(execution_context)
+        ))
+        # 存住这一轮的执行上下文 —— 下一轮用户如果纠正,
+        # 就能拿它重评(docs/14 §2.3)
+        self._last_exec_ctx = execution_context
+        if execution_context.execution_id:
+            self._exec_ctxs[execution_context.execution_id] = execution_context
+            # 只留最近 20 轮,别无限涨
+            while len(self._exec_ctxs) > 20:
+                self._exec_ctxs.popitem(last=False)
+
+    async def _end_turn(self, tc: TurnContext) -> None:
+        """轮末收尾：还原执行上下文、drain 事件、收 trace、收工作记忆。
+
+        **不管这一轮成功还是抛异常，都必须走这里** —— 它是生命周期边界。
+        """
+        # 还原执行上下文（子智能体各自设置自己的 agent_id）
+        try:
+            from core.exec_context import reset_exec_context
+
+            reset_exec_context(self._exec_tokens)
+        except Exception as exc:
+            downgrade(exc, where='core/agent.py')
+
+        # 统一 await 所有异步 emit,保证事件按 emit 顺序完成
+        if tc.pending_async:
+            results = await asyncio.gather(*tc.pending_async, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    self.logger.warning("Agent", f"emit task failed: {r}")
+
+        if tc.trace is not None:
+            tc.trace.reply_chars = len(tc.answer)
+            self._finish_trace(tc.trace, tc.turn_start, error=tc.error)
+
+        # 工作记忆收尾：失败先落盘取证，然后清空。
+        # **必须在这里做** —— 它是一轮的生命周期边界，而不是 GC 的事。
+        try:
+            dumped = self.mem.end_turn(
+                self.working,
+                failed=bool(tc.error),
+                reason=(tc.error or "")[:200],
+            )
+            if dumped:
+                self.logger.info("Agent", f"本轮失败，工作记忆已落盘: {dumped}")
+        except Exception as exc:
+            self.logger.warning("Agent", f"工作记忆收尾失败: {exc}")
+        finally:
+            self.working = None
+
+    async def _handle_clarification(self, tc: TurnContext) -> str:
         """L3 澄清:问一句带候选项的问题。
 
         约束(docs/12 §2.6):
@@ -1251,6 +1274,14 @@ class Agent:
         - 澄清轮**不进 critic、不写长期记忆** —— 它不是一次任务执行
         """
         from core.clarifier import detect_missing_slot, get_clarifier
+
+        user_input = tc.user_input
+        plan = tc.plan
+        emit = tc.emit
+
+        async def drain() -> None:
+            """把澄清事件推完之后再返回 —— 与其它 stage 的事件顺序语义一致。"""
+            await self._drain_pending(tc.pending_async)
 
         clarifier = get_clarifier()
         round_index = int(self.context.metadata.get("clarify_round", 0)) + 1
