@@ -141,6 +141,21 @@
 - 验证流水线 → `skills/validator.py`
 - 发布确认 API → `backend/main.py /api/teachings/*`
 
+## 5b. 回答流过滤（`core/answer_filter.py`）
+
+回答是逐 token 流式推给前端的（`_stream_answer` → `EV_MESSAGE_DELTA`），
+模型偶尔会幻觉出 `<tool_call>` / `<function>` 这类标签写进正文 —— 本系统
+**根本不用文本标记做工具调用**（规划走 JSON schema），这些纯属模型从训练数据
+学来的坏习惯。一旦流出去，用户看到的就是半截标签 + 代码而不是答案。
+
+两道防线：
+
+1. `OrchestratorAgent._BASE_PROMPT` 明确禁止输出工具调用标签 / 参数 JSON / 内部过程标记
+2. `ToolCallFilter` 是**跨 token 有状态**的过滤器：`<tool_call>` 会被切成
+   `<tool` + `_call>`，所以遇到"疑似标签前缀"先 hold 住，确认是标签就丢弃到闭标签，
+   确认不是就原样放行；流结束把还在 hold 的非标签内容放出去。
+   `_stream_answer` 用它包住流式输出，非流式兜底路径用 `filter_answer()` 一次性清洗。
+
 ## 6. 当前问题
 
 - `ManagerAgent` 仍较依赖 prompt + JSON 输出稳定性

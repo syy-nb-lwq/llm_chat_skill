@@ -839,20 +839,31 @@ class Agent:
         """流式生成回答，同时记录「首 token 延迟」与「生成长度」。"""
         from core.trace import STAGE_FIRST_TOKEN, STAGE_GENERATE
 
+        from core.answer_filter import ToolCallFilter
+
         buf = []
         gen_start = time.perf_counter()
         first_seen = False
+        # 跨 token 过滤模型幻觉出来的 <tool_call> 等标记，避免把内部标记
+        # 当正文推给用户（实机踩过：报销表那次输出了半截 tool_call + 代码）。
+        answer_filter = ToolCallFilter()
         async for d in self.orchestrator.stream(
             user_input, tool_results, skill, self.context,
             profile_block=profile_block,
             capability_block=capability_block,
             goal_note=goal_note,
         ):
-            if trace is not None and not first_seen:
-                trace.since(STAGE_FIRST_TOKEN, turn_start)
-                first_seen = True
-            buf.append(d)
-            emit(EV_MESSAGE_DELTA, {"delta": d})
+            for safe in answer_filter.feed(d):
+                if not safe:
+                    continue
+                if trace is not None and not first_seen:
+                    trace.since(STAGE_FIRST_TOKEN, turn_start)
+                    first_seen = True
+                buf.append(safe)
+                emit(EV_MESSAGE_DELTA, {"delta": safe})
+        for safe in answer_filter.flush():
+            buf.append(safe)
+            emit(EV_MESSAGE_DELTA, {"delta": safe})
         if trace is not None:
             trace.since(STAGE_GENERATE, gen_start)
         return self._ensure_answer("".join(buf))
@@ -1207,12 +1218,15 @@ class Agent:
             )
         except Exception:
             # 流式通道挂了就退到非流式一次性生成 —— 用户至少能拿到答案
+            from core.answer_filter import filter_answer
+
             ans = await self.orchestrator.orchestrate(
                 tc.user_input, tc.tool_results, tc.skill, self.context,
                 profile_block=tc.profile_block,
                 capability_block=tc.capability_block,
                 goal_note=goal_note,
             )
+            ans = filter_answer(ans)  # 同样挡住幻觉的 tool_call 标记
             emit(EV_MESSAGE_DELTA, {"delta": ans})
 
         ans = self._ensure_answer(ans)

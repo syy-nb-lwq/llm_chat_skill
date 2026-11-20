@@ -886,10 +886,10 @@ def test_draft_origin_scrubs_secrets(drafts):
         GOOD_PAYLOAD, user_input="x", tool_results=_results(2),
         task_specs=_specs("web_search", "web_fetch"),
     )
-    dirty = "用这个 key sk-abcdefghijklmnopqrstuvwxyz123456 调 http://192.168.1.10:9000/v1 生成"
+    dirty = "用这个 key sk-abcdefgh12345678 调 http://192.168.1.10:9000/v1 生成"
     draft_id = drafts.save(skill, origin=dirty)
     saved = drafts.list()[0]["origin"]
-    assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in saved
+    assert "sk-abcdefgh12345678" not in saved
     assert "192.168.1.10" not in saved
     assert "已省略" in saved
     # 非敏感上下文仍保留，界面能看出这条草稿讲什么

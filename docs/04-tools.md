@@ -151,3 +151,24 @@ LearningAgent.execute_tool()
 - `ToolHub.health_summary()` 汇总 `total_sources / connected / failed / disconnected / has_failures`
 - `GET /api/health` 暴露 `tool_sources` 聚合字段 + `sources` 详情;顶层 `status` 在 `has_failures=True` 时降级为 `degraded`
 - `connect_all()` 单源失败不影响其他源,失败状态被显式记录
+
+
+## 代码缩进自动修复（`try_repair_indentation`）
+
+规划层把 `python_exec` 的代码作为 **JSON 字符串**的 `code` 字段输出。
+JSON 字符串里没有编辑器的缩进对齐，模型偶发会让某一行行首多一个空格：
+
+```python
+print("日期列:", date_col)   # 顶层
+# 2. 定位合计行
+ total = None                # ← 多一个空格，注释不参与缩进判定
+```
+
+结果 `ast.parse` 抛 `IndentationError: unexpected indent`，整段代码**一行都不执行**。
+实机踩过（2026-11-20 报销表加行那次，报"第 34 行"）。
+
+`tools/python_exec.py::try_repair_indentation()` 在静态检查**之前**做保守修复：
+只处理"前一有效代码行没有以 `:` 结尾（没开块）、当前行却突然更深缩进"的孤立行，
+把它的缩进拉回上一行级别。合法的 `for/if/def` 块内缩进不会被误伤（上一行必以 `:` 结尾）。
+最多迭代 8 次；修不动就原样交给 `check_code` 正常拦截。修复记录写进结果的
+`meta["indent_fixed"]`，便于观测。

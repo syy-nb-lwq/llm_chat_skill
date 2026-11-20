@@ -129,6 +129,91 @@ def _workspace_dir() -> Path:
     return root
 
 
+#: 缩进自动修复最多迭代几次（防止死循环 / 越修越坏）
+_MAX_INDENT_FIXES = 8
+
+
+def _indent_of(line: str) -> int:
+    """行首空白的字符数（tab 算 1，够用）。"""
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def try_repair_indentation(code: str) -> tuple:
+    """保守修复 LLM 生成代码里**孤立的缩进错误**。
+
+    ## 为什么需要
+
+    规划层把整段 Python 塞进 JSON 的 `code` 字符串字段。JSON 字符串里没有
+    编辑器的缩进对齐，模型偶发会让某一行行首多出一个空格，例如：
+
+        print("日期列:", date_col)   # 顶层，无缩进
+        # 2. 定位合计行
+         total = None                # <-- 行首多一个空格
+
+    第 2 行是注释（不参与缩进判定），于是 Python 看到顶层代码后面突然出现
+    缩进语句 → `IndentationError: unexpected indent`，整段代码一行都不执行。
+    实机踩过（2026-11-20 报销表加行那次，第 34 行）。
+
+    ## 修复判据（宁可少修，不可误伤）
+
+    只处理一种情况：出错行 `cur` 的缩进 ** > ** 前一个"有效代码行" `prev` 的缩进，
+    且 `prev` **没有开启代码块**（不以 `:` 结尾）。这说明 cur 是孤立冒出来的，
+    不是合法的块内缩进。此时把 cur 的缩进拉回 prev 级别。
+
+    合法的 for/if/def 块内缩进不会被误伤 —— 它们的上一行必然以 `:` 结尾。
+
+    注释行与空行不参与判定（Python 缩进规则里它们不占层级）。
+
+    Returns:
+        `(修复后的 code, 修复说明列表)`。修不动就原样返回，说明列表为空。
+    """
+    lines = code.split("\n")
+    fixes: List[str] = []
+
+    for _ in range(_MAX_INDENT_FIXES):
+        try:
+            ast.parse("\n".join(lines))
+            break  # 已经能解析
+        except IndentationError as exc:
+            # 只修 "unexpected indent"；其它缩进错误（如 unindent 不匹配）不碰
+            if "unexpected indent" not in str(exc.msg):
+                break
+            lineno = exc.lineno or 0
+            if not (1 <= lineno <= len(lines)):
+                break
+            cur = lines[lineno - 1]
+            cur_indent = _indent_of(cur)
+            stripped = cur.strip()
+
+            # 找前一个有效代码行（跳过空行和纯注释）
+            prev_idx = lineno - 2
+            while prev_idx >= 0:
+                prev_line = lines[prev_idx]
+                if prev_line.strip() and not prev_line.lstrip().startswith("#"):
+                    break
+                prev_idx -= 1
+            if prev_idx < 0:
+                break
+            prev = lines[prev_idx]
+            prev_indent = _indent_of(prev)
+
+            # 核心判据：prev 没开启块，cur 却比它缩进更深 → cur 是孤立错误
+            if prev.rstrip().endswith(":"):
+                break  # 前面开了块，cur 的缩进可能是合法的
+            if cur_indent <= prev_indent:
+                break
+            if not stripped:
+                break
+
+            lines[lineno - 1] = " " * prev_indent + stripped
+            fixes.append(f"第 {lineno} 行：行首多余空格已校正（{cur_indent} → {prev_indent}）")
+        except SyntaxError:
+            # 其它语法错误不归缩进修复管
+            break
+
+    return "\n".join(lines), fixes
+
+
 def check_code(code: str) -> List[Finding]:
     """静态检查:返回**结构化问题列表**(空 = 通过)。
 
@@ -460,6 +545,16 @@ class PythonExecTool(Tool):
         except Exception:
             timeout_s = self.timeout_s
 
+        # --- 缩进自动修复（在静态检查之前）---
+        #
+        # 模型把代码塞进 JSON 字符串时偶发行首多空格 → IndentationError，
+        # 整段不执行。能确定性修复的先修掉，修不了再交给下面的 check_code 阻断。
+        indent_fixes: List[str] = []
+        if code:
+            code, indent_fixes = try_repair_indentation(code)
+            if indent_fixes:
+                self.logger.info("PythonExec", f"缩进自动修复: {indent_fixes}")
+
         # --- 静态检查 ---
         #
         # 拦截判断只看 severity。历史实现按中文文案前缀筛（"禁止"/"语法错误"），
@@ -601,7 +696,11 @@ class PythonExecTool(Tool):
                     f"执行超时({timeout_s}s)" if timed_out
                     else (stderr.strip()[:2000] if proc.returncode != 0 else "")
                 ),
-                meta={"duration_ms": duration_ms, "workdir": str(workdir)},
+                meta={
+                    "duration_ms": duration_ms,
+                    "workdir": str(workdir),
+                    "indent_fixed": indent_fixes,
+                },
             )
         except Exception as exc:
             # 执行环境本身出错（建目录、写脚本、起进程……）—— 返回结构化失败，

@@ -15,7 +15,9 @@ import time
 
 import pytest
 
-from tools.python_exec import PythonExecTool, blocking_findings, check_code, static_check
+from tools.python_exec import (
+    PythonExecTool, blocking_findings, check_code, static_check, try_repair_indentation,
+)
 from tools.script_writer import ListScriptsTool, WriteScriptTool, safe_name
 
 
@@ -513,3 +515,51 @@ async def test_workspace_prefix_is_stripped_from_artifacts(exec_tool):
     paths = [a["path"] for a in r.data["artifacts"]]
     assert "output/v.mp4" in paths, f"多套了一层 workspace/：{paths}"
     assert not any(p.startswith("workspace/") for p in paths), paths
+
+
+# === INDENT REPAIR TESTS ===
+
+
+def test_repairs_real_world_orphan_indent():
+    """本案：注释后一行孤立多空格 → IndentationError，整段没执行。
+    修复后能解析，且其它行不变。"""
+    import ast
+    bad = 'print("日期列:", date_col)\n\n# 2. 定位合计行\n total = None\n'
+    fixed, fixes = try_repair_indentation(bad)
+    ast.parse(fixed)
+    assert len(fixes) == 1 and "第 4 行" in fixes[0]
+    assert fixed.split("\n")[-2] == "total = None"
+
+
+def test_does_not_touch_valid_blocks():
+    """合法的 for/if 块内缩进绝不能被误伤。"""
+    for code in (
+        "for i in range(3):\n    print(i)\nprint('done')\n",
+        "x = 1\nif x:\n    print(x)\n    print('yes')\n",
+        "def f():\n    return 1\n",
+    ):
+        fixed, fixes = try_repair_indentation(code)
+        assert fixed == code, fixes
+        assert fixes == []
+
+
+def test_repairs_multiple_orphan_lines():
+    import ast
+    fixed, fixes = try_repair_indentation("a = 1\n b = 2\n c = 3\nd = 4\n")
+    ast.parse(fixed)
+    assert len(fixes) == 2
+
+
+def test_leaves_other_syntax_errors_alone():
+    """不是缩进问题就不碰，交给 check_code 正常拦截。"""
+    bad = "def f(:\n    pass\n"
+    fixed, fixes = try_repair_indentation(bad)
+    assert fixed == bad and fixes == []
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_repairs_indent_before_check(exec_tool):
+    """端到端：execute() 在静态检查前先修缩进，代码得以执行。"""
+    result = await exec_tool.execute(code="x = 1\n y = 2\nprint(x + y)\n")
+    assert result.success is True
+    assert getattr(result, "meta", {}).get("indent_fixed") or "3" in str(result.data)
