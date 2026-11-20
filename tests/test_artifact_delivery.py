@@ -7,7 +7,6 @@
 2. **一条长回答推 1594 次 `message_delta`** —— 每个都 publish + 等 ACK,
    日志里刷出 1594 条"推送事件超时"。
 """
-import asyncio
 import time
 
 import pytest

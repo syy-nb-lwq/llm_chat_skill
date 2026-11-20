@@ -35,9 +35,8 @@ agent 的"我有什么"完全依赖**对话历史**。而上下文只恢复最�
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
-from infra.logger import get_logger
 
 
 #: 最多列多少个文件

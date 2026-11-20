@@ -1,12 +1,9 @@
 """MCP 工具协议单元测试"""
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from tools.mcp_client import (
     ToolDefinition,
     ToolResult,
     MCPServerConfig,
-    MCPClient,
     TransportType,
     get_mcp_client,
     reset_mcp_client,

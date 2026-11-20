@@ -1,7 +1,7 @@
 """Skill Manager 测试"""
 import pytest
 from agents.skill_manager import (
-    SkillManagerAgent, get_skill_manager,
+    get_skill_manager,
     SkillRetrievalAgent, SkillOrganizerAgent
 )
 

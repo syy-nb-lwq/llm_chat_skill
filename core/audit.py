@@ -35,7 +35,6 @@ append_jsonl("tools.jsonl", {"event": EVENT_TOOL_PUBLISHED, "name": "bmi_calc"})
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional

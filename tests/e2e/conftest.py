@@ -8,10 +8,9 @@
 """
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pytest
 

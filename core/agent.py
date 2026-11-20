@@ -18,6 +18,16 @@ from core.memory import get_memory_store
 from core.memorykit import get_memory
 from core.session_config import session_restore_limit
 from infra.config import config
+from core.events import (
+    EV_CLARIFICATION_REQUEST,
+    EV_ERROR,
+    EV_MESSAGE_DELTA,
+    EV_MESSAGE_FINAL,
+    EV_PLAN,
+    EV_SKILL_LEARNED,
+    EV_TEACHING_INTERACTIVE,
+    EV_THINKING,
+)
 from infra.logger import get_logger
 
 
@@ -97,6 +107,8 @@ class Agent:
         self.mem = get_memory()
         #: 本轮的工作记忆，在 handle() 里 begin_turn 创建
         self.working = None
+        #: 执行上下文的 contextvar token（轮末 reset 用），由 _begin_turn 设置
+        self._exec_tokens: tuple = ()
 
         # 会话持久化(短期记忆):仅在服务端会话里开启
         self.persist_session = bool(persist_session)
@@ -615,15 +627,15 @@ class Agent:
         except Exception as exc:
             self.logger.warning("Agent", f"会话摘要滚动失败: {exc}")
 
-    async def handle(
-        self,
-        user_input: str,
-        on_event: Optional[Callable] = None,
-    ) -> str:
-        start = time.time()
-        # trace 用单调时钟算耗时(perf_counter),不能和 wall clock 混用
-        turn_start = time.perf_counter()
+    async def _begin_turn(self, user_input: str) -> tuple:
+        """一轮的准备工作 —— 身份、执行上下文、工作记忆、画像、trace。
 
+        这些都是 `handle` 的**前置副作用**（contextvar、Context、异步写画像），
+        每轮只做一次。拆出来是为了让 `handle` 只表达"这一轮怎么走"。
+
+        Returns:
+            (profile_block, capability_block, trace, pending_async)
+        """
         # M0-01:每次 handle 生成新的 execution_id,同 session 多轮不互相覆盖
         self.identity = IdentityContext(
             session_id=self.session_id,
@@ -638,13 +650,13 @@ class Agent:
         try:
             from core.exec_context import set_exec_context
 
-            _exec_tokens = set_exec_context(
+            self._exec_tokens = set_exec_context(
                 session_id=self.session_id,
                 execution_id=self.execution_id,
                 agent_id="main",
             )
         except Exception:
-            _exec_tokens = ()
+            self._exec_tokens = ()
 
         # 工作记忆：这一轮的工作台（计划 / 工具结果 / 结论）。
         # 一轮一个，轮末在 finally 里 end_turn —— 不清就是内存泄漏。
@@ -692,7 +704,16 @@ class Agent:
             fut = self._apply_correction(signal)
             if fut is not None:
                 pending_async.append(fut)
+        return profile_block, capability_block, trace, pending_async
 
+    def _make_emitter(self, on_event, pending_async: list):
+        """把一轮的事件派发器做成闭包。
+
+        规则：
+        - 同步 `on_event`：直接调
+        - 异步 `on_event`：把协程挂到 `pending_async`，由 `_drain_pending` 按顺序 await
+          （不能 ensure_future 直接调度，否则回调会并发执行、事件乱序）
+        """
         def emit(event: str, payload: dict):
             """派发事件。
             - 同步 on_event: 直接调用
@@ -733,6 +754,67 @@ class Agent:
                 pending_async.append(_deferred())
             except Exception:
                 pass
+        return emit
+
+    async def _drain_pending(self, pending_async: list) -> None:
+        """按 emit 顺序串行 await 所有 pending 任务。"""
+        while pending_async:
+            batch = pending_async[:]
+            pending_async.clear()
+            for coro in batch:
+                try:
+                    await asyncio.ensure_future(coro)
+                except Exception:
+                    pass
+
+    async def _stream_answer(
+        self,
+        user_input: str,
+        tool_results: dict,
+        skill,
+        *,
+        profile_block: str,
+        capability_block: str,
+        goal_note: str,
+        trace,
+        turn_start: float,
+        emit,
+    ) -> str:
+        """流式生成回答，同时记录「首 token 延迟」与「生成长度」。"""
+        """流式生成回答,同时记录「首 token 延迟」与「生成长度」。"""
+        from core.trace import STAGE_FIRST_TOKEN, STAGE_GENERATE
+
+        buf = []
+        gen_start = time.perf_counter()
+        first_seen = False
+        async for d in self.orchestrator.stream(
+            user_input, tool_results, skill, self.context,
+            profile_block=profile_block,
+            capability_block=capability_block,
+            goal_note=goal_note,
+        ):
+            if trace is not None and not first_seen:
+                trace.since(STAGE_FIRST_TOKEN, turn_start)
+                first_seen = True
+            buf.append(d)
+            emit(EV_MESSAGE_DELTA, {"delta": d})
+        if trace is not None:
+            trace.since(STAGE_GENERATE, gen_start)
+        return self._ensure_answer("".join(buf))
+
+    async def handle(
+        self,
+        user_input: str,
+        on_event: Optional[Callable] = None,
+    ) -> str:
+        start = time.time()
+        # trace 用单调时钟算耗时(perf_counter),不能和 wall clock 混用
+        turn_start = time.perf_counter()
+
+        profile_block, capability_block, trace, pending_async = await self._begin_turn(
+            user_input
+        )
+        emit = self._make_emitter(on_event, pending_async)
 
         # 把 emitter 放进上下文 —— 工具（如 run_subagents）和子智能体
         # 深处没有 on_event 参数可传，靠这个把进度事件推出来。
@@ -749,39 +831,6 @@ class Agent:
         except Exception:
             pass
 
-        async def _drain_pending():
-            """按 emit 顺序串行 await 所有 pending 任务。"""
-            while pending_async:
-                batch = pending_async[:]
-                pending_async.clear()
-                for coro in batch:
-                    try:
-                        await asyncio.ensure_future(coro)
-                    except Exception:
-                        pass
-
-        async def _answer_stream(tool_results: dict, skill=None):
-            """流式生成回答,同时记录「首 token 延迟」与「生成长度」。"""
-            from core.trace import STAGE_FIRST_TOKEN, STAGE_GENERATE
-
-            buf = []
-            gen_start = time.perf_counter()
-            first_seen = False
-            async for d in self.orchestrator.stream(
-                user_input, tool_results, skill, self.context,
-                profile_block=profile_block,
-                capability_block=capability_block,
-                goal_note=goal_note,
-            ):
-                if trace is not None and not first_seen:
-                    trace.since(STAGE_FIRST_TOKEN, turn_start)
-                    first_seen = True
-                buf.append(d)
-                emit("message_delta", {"delta": d})
-            if trace is not None:
-                trace.since(STAGE_GENERATE, gen_start)
-            return self._ensure_answer("".join(buf))
-
         ans = ""       # 本轮最终回答(finally 里用来记长度)
         # 目标循环"没做完"的说明（空 = 已完成或还没跑到循环）。
         # 必须在 _answer_stream 定义/调用之前初始化 —— 闲聊路径也会用到它。
@@ -789,7 +838,7 @@ class Agent:
         trace_error = ""
         try:
             # ===== 意图规划(统一入口) =====
-            emit("thinking", {"stage": "planning"})
+            emit(EV_THINKING, {"stage": "planning"})
             plan_start = time.perf_counter()
             plan = await self.manager.plan(
                 user_input,
@@ -815,7 +864,10 @@ class Agent:
             # 意图不明 → 进 L3 澄清层:问一句,而不是硬猜
             if intent_type == IntentType.CLARIFY:
                 return await self._handle_clarification(
-                    user_input, plan, emit, _drain_pending
+                    user_input,
+                    plan,
+                    emit,
+                    lambda: self._drain_pending(pending_async),
                 )
 
             # 本轮正常推进 → 澄清计数归零。
@@ -826,47 +878,47 @@ class Agent:
 
             # 闲聊意图:直接回答,不记录到记忆
             if intent_type == IntentType.CHITCHAT:
-                emit("thinking", {"stage": "chitchat", "detail": plan.intent_detail})
-                ans = await _answer_stream({}, None)
+                emit(EV_THINKING, {"stage": "chitchat", "detail": plan.intent_detail})
+                ans = await self._stream_answer(user_input, {}, None, profile_block=profile_block, capability_block=capability_block, goal_note=goal_note, trace=trace, turn_start=turn_start, emit=emit)
                 self.context.add_assistant_message(ans)
-                emit("message_final", {"content": ans})
+                emit(EV_MESSAGE_FINAL, {"content": ans})
                 # 等异步 on_event 完成,保证事件按 emit 顺序排干
-                await _drain_pending()
+                await self._drain_pending(pending_async)
                 # 闲聊不进行 ExecutionCritic 评估,避免污染记忆库
                 return ans
 
             # 教导意图:进入技能学习流程
             if intent_type == IntentType.TEACH:
-                emit("thinking", {"stage": "teaching_detect"})
+                emit(EV_THINKING, {"stage": "teaching_detect"})
                 ok, result, skill = await self.trainer.teach(user_input)
                 
                 if ok and skill:
                     # 技能创建成功
-                    emit("skill_learned", {
+                    emit(EV_SKILL_LEARNED, {
                         "name": skill.name,
                         "version": skill.version,
                         "message": result,
                     })
                     self.context.add_assistant_message(result)
-                    emit("message_final", {"content": result})
-                    await _drain_pending()
+                    emit(EV_MESSAGE_FINAL, {"content": result})
+                    await self._drain_pending(pending_async)
                     return result
 
                 # 需要交互式教导
                 if result and not ok:
-                    emit("teaching_interactive", {"questions": result})
+                    emit(EV_TEACHING_INTERACTIVE, {"questions": result})
                     # 使用 LLM 补充信息并完成教导
                     complete_msg = await self._complete_teaching(user_input, result)
                     self.context.add_assistant_message(complete_msg)
-                    emit("message_final", {"content": complete_msg})
-                    await _drain_pending()
+                    emit(EV_MESSAGE_FINAL, {"content": complete_msg})
+                    await self._drain_pending(pending_async)
                     return complete_msg
                 
                 # 教导失败,继续后续流程
 
             # 重试意图:重新执行上次的任务
             if intent_type == IntentType.RETRY:
-                emit("thinking", {"stage": "retry"})
+                emit(EV_THINKING, {"stage": "retry"})
                 # 从 context 中获取上一次的 tool_tasks
                 last_tasks = self._get_last_tool_tasks()
                 if last_tasks:
@@ -875,23 +927,23 @@ class Agent:
                     plan.tool_tasks = last_tasks
                 elif last_tasks is not None:
                     # 空列表 = 上一轮确实没有需要执行的工具(不是"没记录")
-                    emit("thinking", {"stage": "no_retry_history"})
+                    emit(EV_THINKING, {"stage": "no_retry_history"})
                     ans = "上一轮没有需要执行的工具,无法重试"
                     self.context.add_assistant_message(ans)
-                    emit("message_final", {"content": ans})
-                    await _drain_pending()
+                    emit(EV_MESSAGE_FINAL, {"content": ans})
+                    await self._drain_pending(pending_async)
                     return ans
                 else:
-                    emit("thinking", {"stage": "no_retry_history"})
+                    emit(EV_THINKING, {"stage": "no_retry_history"})
                     ans = "没有找到上次的执行记录,无法重试"
                     self.context.add_assistant_message(ans)
-                    emit("message_final", {"content": ans})
-                    await _drain_pending()
+                    emit(EV_MESSAGE_FINAL, {"content": ans})
+                    await self._drain_pending(pending_async)
                     return ans
 
             # 技能执行(正常流程)
             skill_name = plan.selected_skill.name if plan.selected_skill else None
-            emit("plan", {
+            emit(EV_PLAN, {
                 "intent": plan.intent,
                 "skill": skill_name,
                 "tasks": plan.tool_tasks,
@@ -915,7 +967,7 @@ class Agent:
                 results: Dict = {}
                 if not p.tool_tasks:
                     return results
-                emit("thinking", {"stage": "tools_running", "count": len(p.tool_tasks)})
+                emit(EV_THINKING, {"stage": "tools_running", "count": len(p.tool_tasks)})
 
                 async def on_tool_event(event: str, payload: dict):
                     emit(event, payload)
@@ -927,11 +979,11 @@ class Agent:
                 if self.dag_enabled and p.selected_skill and p.selected_skill.has_structured_steps():
                     skill_tasks, issues = self.dag.skill_to_tasks(p.selected_skill)
                     for i in issues:
-                        emit("thinking", {"stage": "dag_skip", "issue": i})
+                        emit(EV_THINKING, {"stage": "dag_skip", "issue": i})
                     if skill_tasks:
                         planned_tasks = skill_tasks
                         used_dag = True
-                        emit("thinking", {
+                        emit(EV_THINKING, {
                             "stage": "skill_dag_used",
                             "skill": p.selected_skill.name,
                             "count": len(planned_tasks),
@@ -1003,7 +1055,7 @@ class Agent:
             if self.working is not None:
                 self.working.set_tool_results(tool_results)
                 self.working.set_plan(plan)
-            emit("thinking", {"stage": "goal_loop_done", **goal.to_dict()})
+            emit(EV_THINKING, {"stage": "goal_loop_done", **goal.to_dict()})
 
             # 存储本次 tool_tasks 用于重试
             # 独立字段,不挂在 messages[-1] 上 —— 挂消息会挂错
@@ -1028,12 +1080,12 @@ class Agent:
                     f"共跑了 {goal.rounds} 轮）。回答时必须如实说明"
                     f"哪些部分没做成、卡在哪,不要把未完成说成已完成。"
                 )
-                emit("thinking", {"stage": "goal_incomplete", "detail": goal_note})
+                emit(EV_THINKING, {"stage": "goal_incomplete", "detail": goal_note})
             else:
                 goal_note = ""
-            emit("thinking", {"stage": "synthesizing"})
+            emit(EV_THINKING, {"stage": "synthesizing"})
             try:
-                ans = await _answer_stream(tool_results, plan.selected_skill)
+                ans = await self._stream_answer(user_input, tool_results, plan.selected_skill, profile_block=profile_block, capability_block=capability_block, goal_note=goal_note, trace=trace, turn_start=turn_start, emit=emit)
             except Exception:
                 ans = await self.orchestrator.orchestrate(
                     user_input, tool_results, plan.selected_skill, self.context,
@@ -1041,14 +1093,14 @@ class Agent:
                     capability_block=capability_block,
                     goal_note=goal_note,
                 )
-                emit("message_delta", {"delta": ans})
+                emit(EV_MESSAGE_DELTA, {"delta": ans})
 
             ans = self._ensure_answer(ans)
             # 本轮的工具计划跟着这条助手消息一起落库 —— 会话恢复后
             # 才能知道上一轮调了哪些工具(重试要用)。
             self.context.add_assistant_message(ans, tool_tasks=plan.tool_tasks)
             # 把本轮产物一起给前端 —— 否则"生成的视频/报表"做出来了用户也看不到
-            emit("message_final", {
+            emit(EV_MESSAGE_FINAL, {
                 "content": ans,
                 "artifacts": self._collect_artifacts(tool_results),
             })
@@ -1110,7 +1162,7 @@ class Agent:
 
         except Exception as e:
             self.logger.error("Agent", f"ERROR: {e}")
-            emit("error", {"message": str(e)})
+            emit(EV_ERROR, {"message": str(e)})
             trace_error = str(e)
             raise
         finally:
@@ -1118,7 +1170,7 @@ class Agent:
             try:
                 from core.exec_context import reset_exec_context
 
-                reset_exec_context(_exec_tokens)
+                reset_exec_context(self._exec_tokens)
             except Exception:
                 pass
             # 统一 await 所有异步 emit,保证事件按 emit 顺序完成
@@ -1167,7 +1219,7 @@ class Agent:
         slots = dict(plan.intent_slots or {})
         slot = detect_missing_slot(slots)
 
-        emit("thinking", {"stage": "clarifying", "round": round_index})
+        emit(EV_THINKING, {"stage": "clarifying", "round": round_index})
 
         request = await clarifier.clarify(
             user_input,
@@ -1188,7 +1240,7 @@ class Agent:
             )
             ans = self._ensure_answer(ans)
             self.context.add_assistant_message(ans)
-            emit("message_final", {"content": ans})
+            emit(EV_MESSAGE_FINAL, {"content": ans})
             await drain()
             return ans
 
@@ -1206,9 +1258,9 @@ class Agent:
         text = request.to_text()
         self.context.add_assistant_message(text)
         # 顺序:先 delta 让前端建出气泡,再挂澄清选项,最后定稿
-        emit("message_delta", {"delta": text})
-        emit("clarification_request", request.to_dict())
-        emit("message_final", {"content": text})
+        emit(EV_MESSAGE_DELTA, {"delta": text})
+        emit(EV_CLARIFICATION_REQUEST, request.to_dict())
+        emit(EV_MESSAGE_FINAL, {"content": text})
         await drain()
         # 澄清轮不进 critic:这里直接返回,不追加 critic 任务
         return text
@@ -1284,7 +1336,7 @@ class Agent:
             return response
         except Exception as e:
             self.logger.error("Agent", f"交互式教导失败: {e}")
-            return f"好的，请继续告诉我更多信息。"
+            return "好的，请继续告诉我更多信息。"
 
     async def _finish_teaching(self, user_input: str) -> str:
         """完成教导: 根据收集的信息创建技能"""

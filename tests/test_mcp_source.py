@@ -13,7 +13,6 @@ import pytest
 
 from tools.sources.base import SourceType
 from tools.sources.mcp_source import (
-    MCPSource,
     create_mcp_source,
     parse_mcp_servers,
     parse_server_command,
@@ -236,7 +235,6 @@ def test_get_tool_schema_handles_raw_dict():
 
 
 def test_get_tool_schema_missing_returns_none():
-    from tools.sources.mcp_source import MCPSource
 
     source = create_mcp_source(name="x")
     assert source.get_tool_schema("nope") is None
@@ -522,7 +520,6 @@ async def test_concurrent_requests_do_not_conflict(monkeypatch):
     原实现是"发请求 → 直接读一行 → 当作响应",没有专职读协程,
     也没有按 id 分发。
     """
-    import tools.sources.mcp_source as mod
 
     source = create_mcp_source(name="x")
 
@@ -584,7 +581,6 @@ async def test_concurrent_calls_get_their_own_responses(monkeypatch):
     这比"不报错"更重要:串台的话,agent 拿到的是别的工具的返回值,
     而且完全察觉不到 —— 表现为"答案莫名其妙"。
     """
-    import tools.sources.mcp_source as mod
 
     source = create_mcp_source(name="x")
 

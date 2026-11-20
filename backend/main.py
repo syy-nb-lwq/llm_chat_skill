@@ -3,7 +3,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -291,30 +291,6 @@ async def get_features():
     }
 
 
-# ===== 用户（本地单用户，兼容旧端点） =====
-
-_LOCAL_USER = {"id": "local", "tenant_id": "default", "display_name": "本地用户"}
-
-
-@app.get("/api/users")
-async def list_users():
-    """本地单用户：始终只有一个人。"""
-    return {"users": [_LOCAL_USER]}
-
-
-@app.post("/api/users")
-async def create_user(payload: Optional[dict] = None):
-    """兼容旧调用：不创建用户，始终返回同一个本地用户。"""
-    return dict(_LOCAL_USER)
-
-
-@app.delete("/api/users/{user_id}")
-@require_auth
-async def delete_user(user_id: str):
-    """兼容旧调用：本地用户不可删除。"""
-    return {"deleted": user_id}
-
-
 # ===== 会话内容(短期记忆) =====
 
 
@@ -350,8 +326,7 @@ async def get_my_session_messages(request: Request, limit: int = 200):
     """
     from core.memorykit import get_memory
 
-    identity = _resolve_user_and_session(request)
-    session_id = identity["session_id"]
+    session_id = _session_id_from_request(request)
     if not session_id:
         # 还没拿到 session_id（首轮连接）—— 空历史比 400 更合适
         return {"session_id": "", "messages": [], "count": 0}
@@ -1126,23 +1101,9 @@ _PROFILE_LABELS = {
 }
 
 
-def _resolve_user_id(request: Request) -> str:
-    """本地单用户，恒返回固定值（兼容旧调用）。"""
-    return "local"
-
-
-def _resolve_user_and_session(request: Request) -> dict:
-    """从 query 参数取 session_id（本地单用户，无令牌）。
-
-    Returns:
-        {"user_id": "local", "session_id": str, "client_id": str}
-    """
-    session_id = (request.query_params.get("session_id") or "").strip()
-    return {
-        "user_id": "local",
-        "session_id": session_id,
-        "client_id": session_id,
-    }
+def _session_id_from_request(request: Request) -> str:
+    """从 query 参数取 session_id（本地单用户，无令牌、无租户）。"""
+    return (request.query_params.get("session_id") or "").strip()
 
 
 @app.get("/api/memory/overview")
@@ -1164,11 +1125,9 @@ async def memory_overview(request: Request):
     import json as _json
     from pathlib import Path as _Path
 
-    identity = _resolve_user_and_session(request)
-    session_id = identity["session_id"]
-    user_id = "local"
+    session_id = _session_id_from_request(request)
 
-    out: Dict[str, Any] = {"user_id": user_id, "session_id": session_id}
+    out: Dict[str, Any] = {"session_id": session_id}
 
     # ---------- 短期记忆：本会话最近的消息 ----------
     short: Dict[str, Any] = {"count": 0, "recent": []}
@@ -1225,8 +1184,6 @@ async def memory_overview(request: Request):
             try:
                 raw = _json.loads(f.read_text(encoding="utf-8"))
             except Exception:
-                continue
-            if raw.get("user_id") and raw.get("user_id") != user_id:
                 continue
             mine.append(raw)
         lessons["count"] = len(mine)
@@ -1304,7 +1261,6 @@ async def get_profile(request: Request):
     """
     from core.semantic_memory import get_semantic_memory
 
-    user_id = _resolve_user_id(request)
     store = get_semantic_memory()
 
     entries = store.get_profile(limit=100)
@@ -1324,7 +1280,6 @@ async def get_profile(request: Request):
         })
 
     return {
-        "user_id": user_id,
         "entries": items,
         "count": len(items),
         # 正在注入的画像块(用户能直观看到"生效中的"内容)
@@ -1342,7 +1297,6 @@ async def forget_profile_entry(entry_id: str, request: Request):
     """
     from core.semantic_memory import get_semantic_memory
 
-    user_id = _resolve_user_id(request)
     store = get_semantic_memory()
 
     # **先确认这条属于该用户** —— 不然可以拿别的用户的 entry_id 来删
@@ -1357,7 +1311,7 @@ async def forget_profile_entry(entry_id: str, request: Request):
     ok = store.forget(entry_id)
     if not ok:
         raise HTTPException(status_code=404, detail="画像条目不存在")
-    return {"forgotten": entry_id, "user_id": user_id}
+    return {"forgotten": entry_id}
 
 
 @app.delete("/api/memory/profile")
@@ -1365,7 +1319,6 @@ async def forget_all_profile(request: Request):
     """「忘掉关于我的一切」:清空当前用户的全部画像。"""
     from core.semantic_memory import get_semantic_memory
 
-    user_id = _resolve_user_id(request)
     store = get_semantic_memory()
 
     entries = store.get_profile(limit=1000)
@@ -1377,7 +1330,6 @@ async def forget_all_profile(request: Request):
             failed.append(e.id)
 
     return {
-        "user_id": user_id,
         "forgotten": len(forgotten),
         "failed": len(failed),
     }

@@ -15,7 +15,6 @@ import pytest
 
 from core.exec_context import (
     ExecContext,
-    current_scope_key,
     get_exec_context,
     reset_exec_context,
     set_exec_context,

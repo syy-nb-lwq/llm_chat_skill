@@ -13,7 +13,6 @@
 4. 失败/未完成必须**出现在给模型和用户的文字里**，不能被吞掉
 """
 import asyncio
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
@@ -588,7 +587,6 @@ async def test_subagent_receives_main_context(monkeypatch):
     子智能体只拿到「提交视频生成任务」一句，既不知道是哪个视频，
     也不知道前面建了哪些文件、试过哪些接口 —— 只能从头猜。
     """
-    import agents.learning as learning_mod
     import agents.manager as manager_mod
     import core.subagents as sa
 

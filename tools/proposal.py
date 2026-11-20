@@ -207,10 +207,10 @@ class ToolProposal:
                 pass
         self.visibility = (self.visibility or VISIBILITY_GLOBAL).strip().lower()
 
-    def is_visible_to(self, user_id: str = "", agent_id: str = "") -> bool:
+    def is_visible_to(self, agent_id: str = "") -> bool:
         """这个工具对某个调用者可见吗？
 
-        本地单用户：owner/tenant 可见性都退化为按 agent_id 判断。
+        本地单用户，没有 owner/tenant 维度 —— 可见性只按 agent_id 判断。
         - `global`：都可见（当前默认）
         - `owner`/`tenant`：只对创建它的智能体可见
         """

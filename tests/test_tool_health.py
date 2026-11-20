@@ -15,7 +15,6 @@
 4. **申报**：`report_capability_gap` 让 agent 主动说"我缺什么"
 5. **修复**：agent 自己造的工具反复失败 → 自动出 v2（内置源码绝不碰）
 """
-import json
 
 import pytest
 

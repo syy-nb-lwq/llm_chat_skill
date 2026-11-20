@@ -3,7 +3,6 @@ import asyncio
 import json
 import shlex
 import sys
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from tools.base import ToolParam, ToolResult, ToolSchema
@@ -278,8 +277,6 @@ class MCPSource(ToolSourceBase):
 
     async def _connect_stdio(self, server_path: str) -> bool:
         """通过 stdio 连接 MCP 服务器"""
-        import os
-        import sys
 
         # 启动 MCP 服务器进程
         cmd = parse_server_command(server_path)

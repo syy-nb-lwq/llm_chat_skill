@@ -2,7 +2,7 @@
 import pytest
 
 from tools.base import Tool, ToolResult, ToolSchema, ToolParam
-from tools.hub import ToolHub, ToolInfo, get_tool_hub, reset_tool_hub
+from tools.hub import ToolInfo, get_tool_hub, reset_tool_hub
 from tools.sources.base import SourceType, ToolSource
 from tools.sources.python_source import PythonSource, create_python_source
 

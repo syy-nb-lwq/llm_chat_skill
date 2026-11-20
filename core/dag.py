@@ -1,9 +1,9 @@
 """技能 DAG 执行器 - 把 Skill.steps 转成 ToolTask,交给 Learning 执行"""
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from agents.learning import ToolTask
 from infra.logger import get_logger
-from skills.models import Skill, SkillStep
+from skills.models import Skill
 from tools.base import ToolResult
 
 

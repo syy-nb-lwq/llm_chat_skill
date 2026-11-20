@@ -82,7 +82,7 @@
 </template>
 
 <script>
-import { API_BASE, apiFetch } from '../config'  // M0-04 / C-01
+import { memoryApi, patchesApi } from '../api/client'  // C-01
 
 export default {
   name: 'PatchReview',
@@ -101,8 +101,7 @@ export default {
     async loadPatches() {
       this.loading = true
       try {
-        const res = await fetch(`${API_BASE}/api/patches`)
-        const data = await res.json()
+        const data = await patchesApi.list()
         this.patches = data.patches || []
       } catch (e) {
         console.error('加载 patches 失败:', e)
@@ -113,9 +112,7 @@ export default {
 
     async loadStats() {
       try {
-        const res = await fetch(`${API_BASE}/api/memory/stats`)
-        const data = await res.json()
-        this.stats = data
+        this.stats = await memoryApi.stats()
       } catch (e) {
         console.error('加载统计失败:', e)
       }
@@ -123,22 +120,7 @@ export default {
 
     async approve(patchId) {
       try {
-        const res = await apiFetch(`${API_BASE}/api/patches/${patchId}/approve`, {
-          method: 'POST',
-        })
-        if (!res.ok) {
-          // 后端会返回结构化的校验失败原因
-          const body = await res.text()
-          let msg = body
-          try {
-            const parsed = JSON.parse(body)
-            const detail = parsed.detail || {}
-            msg = detail.message || (typeof detail === 'string' ? detail : body)
-            if (detail.issues) msg += '\n' + detail.issues.join('\n')
-          } catch (e) { /* 不是 JSON,原样展示 */ }
-          throw new Error(msg)
-        }
-        const data = await res.json()
+        const data = await patchesApi.approve(patchId)
         this.loadPatches()
         this.loadStats()
         // 回归样例没过时给出提示(发布已执行,但风险偏高)
@@ -150,16 +132,23 @@ export default {
           )
         }
       } catch (e) {
-        alert('批准失败: ' + e.message)
+        // 后端会返回结构化的校验失败原因，优先展示 detail
+        let msg = e.message
+        if (e.body) {
+          try {
+            const parsed = JSON.parse(e.body)
+            const detail = parsed.detail || {}
+            msg = detail.message || (typeof detail === 'string' ? detail : e.message)
+            if (detail.issues) msg += '\n' + detail.issues.join('\n')
+          } catch (ignored) { /* 不是 JSON,用 e.message */ }
+        }
+        alert('批准失败: ' + msg)
       }
     },
 
     async reject(patchId) {
       try {
-        const res = await apiFetch(`${API_BASE}/api/patches/${patchId}/reject`, {
-          method: 'POST',
-        })
-        if (!res.ok) throw new Error(await res.text())
+        await patchesApi.reject(patchId)
         this.loadPatches()
       } catch (e) {
         alert('拒绝失败: ' + e.message)

@@ -1,11 +1,10 @@
 """Semantic Memory 系统单元测试"""
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch, MagicMock
 
-from core.memory_db import MemoryDB, MemoryEntry, get_memory_db, reset_memory_db
+from core.memory_db import MemoryDB, reset_memory_db
 from core.semantic_memory import SemanticMemoryStore, get_semantic_memory, reset_semantic_memory
-from infra.embedding import MockEmbedding, BaseEmbeddingService
+from infra.embedding import MockEmbedding
 
 
 class TestMemoryDB:

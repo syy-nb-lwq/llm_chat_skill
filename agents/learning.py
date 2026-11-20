@@ -3,10 +3,16 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from infra.logger import get_logger, redact_secrets
 from tools.base import ToolResult
+from core.events import (
+    EV_ERROR,
+    EV_TOOL_CALL,
+    EV_TOOL_ERROR,
+    EV_TOOL_RESULT,
+)
 from tools.hub import get_tool_hub
 
 
@@ -208,7 +214,7 @@ class LearningAgent:
                     task_id=task_id,
                 )
                 if on_event:
-                    await on_event("tool_result", {
+                    await on_event(EV_TOOL_RESULT, {
                         "task_id": task_id or tool_type,
                         "tool": tool_type,
                         "data": result.data,
@@ -235,7 +241,7 @@ class LearningAgent:
             ),
         )
         if on_event:
-            await on_event("tool_error", {
+            await on_event(EV_TOOL_ERROR, {
                 "task_id": task_id or tool_type,
                 "tool": tool_type,
                 "error": last_err,
@@ -291,7 +297,7 @@ class LearningAgent:
         if _has_cycle(tasks):
             self.logger.error("Learning", "DAG 存在循环依赖")
             if on_event:
-                await on_event("error", {"message": "DAG 存在循环依赖"})
+                await on_event(EV_ERROR, {"message": "DAG 存在循环依赖"})
             return {}
 
         # 校验依赖完整性:找不到的依赖视为错误,不进入 pending
@@ -342,7 +348,7 @@ class LearningAgent:
                     resolved = resolve_params(task.params, results)
                     del pending[task_id]
                     if on_event:
-                        await on_event("tool_call", {
+                        await on_event(EV_TOOL_CALL, {
                             "task_id": task.id,
                             "tool": task.type,
                             "params": resolved,
@@ -370,7 +376,7 @@ class LearningAgent:
                     )
                     results[task_id] = skipped
                     if on_event:
-                        await on_event("tool_error", {
+                        await on_event(EV_TOOL_ERROR, {
                             "task_id": task_id,
                             "tool": task.type,
                             "error": "skipped due to upstream failure",

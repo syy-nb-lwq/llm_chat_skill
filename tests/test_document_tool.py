@@ -9,9 +9,7 @@
 import pytest
 
 from tools.document import (
-    DocBlock,
     Locator,
-    ParseResult,
     detect_format,
     parse_block_range,
     parse_document,

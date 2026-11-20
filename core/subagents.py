@@ -32,11 +32,11 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from contextvars import ContextVar
 
+from core.events import EV_SUBAGENT_DONE, EV_SUBAGENT_PROGRESS, EV_SUBAGENT_SPAWNED
 from infra.logger import get_logger
 
 
@@ -375,7 +375,7 @@ class SubAgentPool:
         task.status = STATUS_RUNNING
         task.started_at = time.time()
         task.progress = "启动"
-        await self._emit(on_event, "subagent_spawned", task)
+        await self._emit(on_event, EV_SUBAGENT_SPAWNED, task)
 
         # 子智能体有自己的 agent 身份 —— 工具调用按它记账，
         # 将来还能按 agent 隔离工作区（见 core/exec_context.py）。
@@ -413,7 +413,7 @@ class SubAgentPool:
             except Exception:
                 pass
             task.finished_at = time.time()
-            await self._emit(on_event, "subagent_done", task)
+            await self._emit(on_event, EV_SUBAGENT_DONE, task)
 
     async def _execute(self, task: SubAgentTask, *, on_event=None) -> None:
         """子智能体主循环：规划 → 执行工具 → 多轮，直到完成或用尽轮次。"""
@@ -443,7 +443,7 @@ class SubAgentPool:
         for round_no in range(1, max_rounds + 1):
             task.rounds = round_no
             task.progress = f"第 {round_no} 轮规划"
-            await self._emit(on_event, "subagent_progress", task)
+            await self._emit(on_event, EV_SUBAGENT_PROGRESS, task)
 
             # 把已有发现拼进目标，让模型知道已经查到什么
             enriched = goal_text
@@ -519,7 +519,7 @@ class SubAgentPool:
             last_action_sig = sig
 
             task.progress = f"第 {round_no} 轮执行 {len(tasks)} 个工具"
-            await self._emit(on_event, "subagent_progress", task)
+            await self._emit(on_event, EV_SUBAGENT_PROGRESS, task)
 
             # **必须转成 ToolTask**：`plan.tool_tasks` 是 dict，
             # 而 `execute_dag()` 要的是 ToolTask 对象。

@@ -13,7 +13,6 @@
 **它验证的是"管线通不通",不是"模型准不准"。**
 准确率仍然需要真实模型 —— 那件事没法用替身代替。
 """
-import asyncio
 import json
 import os
 import subprocess

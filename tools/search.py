@@ -30,9 +30,8 @@ DeepSeek 还有 **Fetch API**(`POST /v1/tools/fetch`),抓网页转 Markdown —�
 from __future__ import annotations
 
 import html
-import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import httpx
 

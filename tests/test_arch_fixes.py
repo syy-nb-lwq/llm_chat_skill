@@ -7,8 +7,6 @@
 - 4.2 没有分阶段耗时 → "慢"只能靠猜
 - 3.1 SQLite 裸 connect → 多用户并发写 database is locked
 """
-import json
-import sqlite3
 import tempfile
 import threading
 from pathlib import Path

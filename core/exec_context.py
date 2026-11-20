@@ -35,7 +35,7 @@ import hashlib
 import re
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 #: 当前这一轮的会话 / 执行 / 子智能体
 _session_id: ContextVar[str] = ContextVar("dsh_exec_session", default="")

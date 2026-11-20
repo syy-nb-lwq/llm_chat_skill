@@ -285,7 +285,6 @@ def reset_singletons(monkeypatch, session_db_store, long_term_db, mem_store_base
     )
 
     # 清理 backend/skills 残留文件
-    import shutil
     backend_skills = Path(__file__).parent.parent / "backend" / "skills"
     if backend_skills.exists():
         for f in backend_skills.glob("*.md"):

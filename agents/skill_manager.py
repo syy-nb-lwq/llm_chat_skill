@@ -11,8 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from core.agent_base import BaseAgent
-from skills.manager import get_skill_store, Skill, SkillStore
-from skills.models import SkillStep
+from skills.manager import get_skill_store, Skill
 
 
 @dataclass

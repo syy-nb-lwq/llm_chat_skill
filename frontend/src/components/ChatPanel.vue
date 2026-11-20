@@ -73,7 +73,7 @@
 
 <script>
 import MarkdownIt from 'markdown-it'
-import { API_BASE } from '../config'
+import { apiUrl } from '../api/client'
 import { wsService } from '../websocket'
 
 export default {
@@ -103,10 +103,9 @@ export default {
     // 产物链接（本地单用户，无令牌）
     artifactUrl(artifact, download = false) {
       const base = artifact.url || `/api/artifacts/${artifact.path}`
-      const parts = []
-      if (download) parts.push('download=true')
-      const qs = parts.length ? `?${parts.join('&')}` : ''
-      return `${API_BASE}${base}${qs}`
+      // 后端偶尔返回绝对地址（外部产物），直接用，不要再拼 base
+      if (/^https?:\/\//i.test(base)) return base
+      return apiUrl(base, download ? { download: true } : {})
     },
 
     formatSize(bytes) {

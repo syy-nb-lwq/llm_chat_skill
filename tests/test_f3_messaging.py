@@ -9,12 +9,10 @@
 - 有失败语义：对方已完成 / 在跑 / 已死
 - 有审计：每条消息落盘
 """
-import json
 
 import pytest
 
 from core.agentkit.messaging import (
-    MAIN_AGENT_IDS,
     MessageBus,
     MessageKind,
     MessageRejected,

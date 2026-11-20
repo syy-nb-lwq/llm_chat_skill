@@ -33,14 +33,12 @@ pdfplumber 对这类文件返回 **0 个字符**。
 """
 from __future__ import annotations
 
-import os
 import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
 
 

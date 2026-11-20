@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from core.intent_labels import (
-    INTENT_RESULT_SCHEMA,
     IntentLabel,
     build_intent_prompt,
     build_system_prompt,

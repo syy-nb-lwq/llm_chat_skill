@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
@@ -130,7 +130,6 @@ class PublishArtifactTool(Tool):
         )
 
     async def execute(self, path: str = "", name: str = "") -> ToolResult:
-        import os
 
         raw = (path or "").strip().strip('"').strip("'")
         if not raw:

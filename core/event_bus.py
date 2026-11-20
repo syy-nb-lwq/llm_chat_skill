@@ -27,7 +27,7 @@ emitter，`emit()` 就静默跳过（不能让观测失败影响业务）。
 from __future__ import annotations
 
 from contextvars import ContextVar
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from infra.logger import get_logger
 

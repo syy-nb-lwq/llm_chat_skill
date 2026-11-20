@@ -6,7 +6,6 @@
     python scripts/trace_report.py --by-layer     # 按意图层分组
 """
 import argparse
-import json
 import statistics
 import sys
 from collections import defaultdict

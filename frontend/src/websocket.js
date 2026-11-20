@@ -5,6 +5,7 @@
 //       {"request": {"method": "notify", ...}} (服务端推送)
 
 import { WS_BASE } from './config'  // M0-04
+import { EV } from './events'
 
 class WsService {
   constructor() {
@@ -159,7 +160,7 @@ class WsService {
                 this._emit(eventName, eventPayload, data)
               }
             } else if (topic.startsWith(`log/${this.clientId}`)) {
-              this._emit('log', payload, data)
+              this._emit(EV.LOG, payload, data)
             }
           }
         } catch (e) {
@@ -169,7 +170,7 @@ class WsService {
 
       this.ws.onerror = (error) => {
         console.error('[WS] Error:', error)
-        this._emit('error', { message: '连接错误' })
+        this._emit(EV.ERROR, { message: '连接错误' })
       }
 
       this.ws.onclose = (event) => {
@@ -192,7 +193,7 @@ class WsService {
         }
 
         if (!this._isManualClose) {
-          this._emit('disconnected', {})
+          this._emit(EV.DISCONNECTED, {})
           this._scheduleReconnect()
         }
       }

@@ -5,6 +5,14 @@ from typing import Any
 
 from fastapi_websocket_pubsub import PubSubEndpoint, ALL_TOPICS
 
+from core.events import (
+    EV_CONNECTED,
+    EV_ERROR,
+    EV_FEEDBACK_ACK,
+    EV_MESSAGE_DELTA,
+    EV_PONG,
+    EV_RESET_ACK,
+)
 from infra.logger import get_logger
 
 
@@ -140,7 +148,7 @@ class DeltaCoalescer:
         self._size = 0
         self._last_flush = time.monotonic()
         self.pushes_out += 1
-        await push_event(self.client_id, "message_delta", {"delta": text})
+        await push_event(self.client_id, EV_MESSAGE_DELTA, {"delta": text})
 
 
 # ===== 业务处理器 (统一一个分发器) =====
@@ -161,7 +169,7 @@ async def dispatcher(subscription, data: Any):
                 conn_id,
                 (data or {}).get("session_id", ""),
             )
-            await push_event(conn_id, "connected", identity.to_payload())
+            await push_event(conn_id, EV_CONNECTED, identity.to_payload())
             logger.info("ws_manager", f"Client initialized: {identity.client_id}")
             return
 
@@ -171,7 +179,7 @@ async def dispatcher(subscription, data: Any):
 
             identity = sessions.resolve_identity(conn_id)
             if identity is None:
-                await push_event(conn_id, "error", {"message": "连接未初始化"})
+                await push_event(conn_id, EV_ERROR, {"message": "连接未初始化"})
                 return
             session = await sessions.get_or_create(
                 identity.client_id,
@@ -179,7 +187,7 @@ async def dispatcher(subscription, data: Any):
             )
             user_input = (data or {}).get("content", "")
             if not user_input.strip():
-                await push_event(conn_id, "error", {"message": "content 为空"})
+                await push_event(conn_id, EV_ERROR, {"message": "content 为空"})
                 return
 
             # 流式增量合并后再推 —— 一条长回答会产生上千个 delta,
@@ -193,7 +201,7 @@ async def dispatcher(subscription, data: Any):
                     # 这一轮在 Session 的 worker 里跑，dispatcher 的 try/except
                     # 已经兜不到了，必须就地报给前端
                     logger.error("ws", f"处理 chat 失败: {exc}")
-                    await push_event(conn_id, "error", {"message": str(exc)})
+                    await push_event(conn_id, EV_ERROR, {"message": str(exc)})
                 finally:
                     # 必须收尾:最后一点没攒够的增量要发出去,
                     # 否则前端会永远缺一小段(通常正好是回答的最后一句)。
@@ -210,7 +218,7 @@ async def dispatcher(subscription, data: Any):
             # 一次 60s 的回答会把其他人的 ping/init 一起卡住。
             if not session.submit(run_turn):
                 await push_event(
-                    conn_id, "error", {"message": "会话已回收，请刷新页面重试"}
+                    conn_id, EV_ERROR, {"message": "会话已回收，请刷新页面重试"}
                 )
             return
 
@@ -220,7 +228,7 @@ async def dispatcher(subscription, data: Any):
 
             identity = sessions.resolve_identity(conn_id)
             if identity is None:
-                await push_event(conn_id, "error", {"message": "连接未初始化"})
+                await push_event(conn_id, EV_ERROR, {"message": "连接未初始化"})
                 return
             session = await sessions.get_or_create(
                 identity.client_id,
@@ -231,17 +239,17 @@ async def dispatcher(subscription, data: Any):
                 # reset 也排队：不能在一轮回答跑到一半时清空 Context
                 async with session.lock:
                     session.agent.reset()
-                await push_event(conn_id, "reset_ack", identity.to_payload())
+                await push_event(conn_id, EV_RESET_ACK, identity.to_payload())
 
             if not session.submit(run_reset):
                 await push_event(
-                    conn_id, "error", {"message": "会话已回收，请刷新页面重试"}
+                    conn_id, EV_ERROR, {"message": "会话已回收，请刷新页面重试"}
                 )
             return
 
         if topic.startswith("ping/"):
             conn_id = topic[5:]
-            await push_event(conn_id, "pong", {})
+            await push_event(conn_id, EV_PONG, {})
             return
 
         if topic.startswith("feedback/"):
@@ -251,7 +259,7 @@ async def dispatcher(subscription, data: Any):
 
             identity = sessions.resolve_identity(conn_id)
             if identity is None:
-                await push_event(conn_id, "error", {"message": "连接未初始化"})
+                await push_event(conn_id, EV_ERROR, {"message": "连接未初始化"})
                 return
             session = await sessions.get_or_create(
                 identity.client_id,
@@ -267,7 +275,7 @@ async def dispatcher(subscription, data: Any):
                     ok = session.agent.apply_explicit_feedback(
                         execution_id, accepted, comment
                     )
-                await push_event(conn_id, "feedback_ack", {
+                await push_event(conn_id, EV_FEEDBACK_ACK, {
                     "execution_id": execution_id,
                     "accepted": accepted,
                     "ok": ok,
@@ -275,7 +283,7 @@ async def dispatcher(subscription, data: Any):
 
             if not session.submit(run_feedback):
                 await push_event(
-                    conn_id, "error", {"message": "会话已回收，请刷新页面重试"}
+                    conn_id, EV_ERROR, {"message": "会话已回收，请刷新页面重试"}
                 )
             return
     except Exception as e:
@@ -285,7 +293,7 @@ async def dispatcher(subscription, data: Any):
             parts = topic.split("/", 1)
             if parts[0] in ("init", "chat", "reset", "ping", "feedback"):
                 client_id = parts[1]
-                await push_event(client_id, "error", {"message": str(e)})
+                await push_event(client_id, EV_ERROR, {"message": str(e)})
 
 
 # ===== 注册订阅 =====

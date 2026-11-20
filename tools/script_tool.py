@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import ast
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema

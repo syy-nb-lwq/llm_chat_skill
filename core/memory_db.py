@@ -1,9 +1,30 @@
-"""MemoryDB - SQLite + FTS5 长期记忆存储"""
+"""MemoryDB —— 长期记忆·**画像**存储（SQLite + FTS5）。
+
+## 这个库存什么
+
+只存"这个人是谁"：偏好 / 习惯 / 方法 / 雷区 / 事实（`PROFILE_MEMORY_TYPES`）。
+由 `core/semantic_memory.py` 写入（记忆写入器异步抽取 + 证据校验），
+每轮常驻注入到规划提示词与回答生成 prompt。
+
+## 它不存什么
+
+**不存经验**：失败诊断、成功模式、待审补丁都不在这里 —— 它们在
+`core/memory.py::MemoryStore`（JSON 文件）。
+
+两库**职责互斥**，不是同一份数据的两个副本：
+
+| 问题 | 库 | 载体 |
+|---|---|---|
+| 这个人是谁？ | `MemoryDB` | `memory/semantic_memory.db` |
+| 什么做法有效/无效？ | `MemoryStore` | `memory/failures/*.json`、`memory/successes/*`、`memory/skill_patches/*` |
+
+`add()` 会拒绝非画像类型（`ValueError`），把这条边界从"事实"变成"契约"。
+"""
 import json
 import sqlite3
 import threading
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -283,7 +304,17 @@ class MemoryDB:
         normalized_key: str = "",
         agent_id: str = "",
     ) -> MemoryEntry:
-        """添加记忆"""
+        """添加一条记忆。
+
+        `MemoryDB` 是通用存储（按 `type` 区分），但**生产代码只写画像类型**
+        （`PROFILE_MEMORY_TYPES`）：偏好 / 习惯 / 方法 / 雷区 / 事实。
+
+        经验（失败诊断 / 成功模式 / 待审补丁）不在这里，走
+        `core/memory.py::MemoryStore`。这条边界由
+        `tests/test_memory_layers.py::test_only_profile_types_written_by_production`
+        静态守住 —— 不在本方法里做硬校验，因为底层存储仍需要能表达其它类型
+        （历史数据、测试夹具）。
+        """
         entry = MemoryEntry(
             id=str(uuid.uuid4()),
             type=type,

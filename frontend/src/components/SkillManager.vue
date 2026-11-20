@@ -79,7 +79,7 @@
 </template>
 
 <script>
-import { API_BASE, apiFetch } from '../config'  // M0-04 / C-01
+import { skillsApi } from '../api/client'  // C-01
 
 export default {
   name: 'SkillManager',
@@ -149,11 +149,7 @@ export default {
       const label = version ? `${name}@${version}` : `所有 ${name} 版本`
       if (!confirm(`确定删除 ${label} ?`)) return
       try {
-        const url = version
-          ? `${API_BASE}/api/skills/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
-          : `${API_BASE}/api/skills/${encodeURIComponent(name)}`
-        const r = await apiFetch(url, { method: 'DELETE' })
-        if (!r.ok) throw new Error(await r.text())
+        await skillsApi.remove(name, version)
         this.reload()
       } catch (e) {
         alert('删除失败: ' + e.message)

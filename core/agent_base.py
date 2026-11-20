@@ -2,7 +2,7 @@
 import json
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from infra.llm import get_llm_client
 from infra.logger import get_logger

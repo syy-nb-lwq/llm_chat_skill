@@ -52,6 +52,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from core.events import (
+    EV_GOAL_CONTINUE,
+    EV_GOAL_PREP_ONLY,
+    EV_GOAL_ROUND,
+    EV_GOAL_STOP,
+)
 from infra.logger import get_logger
 
 
@@ -248,7 +254,7 @@ async def run_goal_loop(
 
     for round_no in range(1, max(1, int(max_rounds)) + 1):
         result.rounds = round_no
-        await _emit("goal_round", {
+        await _emit(EV_GOAL_ROUND, {
             "round": round_no,
             "max_rounds": max_rounds,
             "plan_detail": getattr(plan, "intent_detail", "") or "",
@@ -289,7 +295,7 @@ async def run_goal_loop(
             and round_no < max_rounds
         ):
             goal_done = False
-            await _emit("goal_prep_only", {
+            await _emit(EV_GOAL_PREP_ONLY, {
                 "round": round_no,
                 "tools": [str((t or {}).get("type")) for t in tasks],
                 "reason": "这一轮只是准备好了工具/脚本,还没用它完成任务",
@@ -310,7 +316,7 @@ async def run_goal_loop(
 
         # 还没完 → 带着已知结果再规划一轮
         remaining = (getattr(plan, "remaining_note", "") or "").strip()
-        await _emit("goal_continue", {
+        await _emit(EV_GOAL_CONTINUE, {
             "round": round_no,
             "next_round": round_no + 1,
             "remaining": remaining,
@@ -334,5 +340,5 @@ async def run_goal_loop(
 
     result.findings = prior_findings
     result.elapsed_ms = (time.perf_counter() - started) * 1000
-    await _emit("goal_stop", result.to_dict())
+    await _emit(EV_GOAL_STOP, result.to_dict())
     return result

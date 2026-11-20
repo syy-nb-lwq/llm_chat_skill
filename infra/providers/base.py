@@ -1,6 +1,6 @@
 """Base Provider 抽象接口"""
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, AsyncIterator, Any
+from typing import List, Dict, Optional, AsyncIterator
 from dataclasses import dataclass
 
 

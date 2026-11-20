@@ -79,7 +79,7 @@
 </template>
 
 <script>
-import { API_BASE, apiFetch } from '../config'
+import { featuresApi, memoryApi, reflectionsApi } from '../api/client'
 
 export default {
   name: 'EvolutionDashboard',
@@ -101,17 +101,13 @@ export default {
       this.loading = true
       this.error = ''
       try {
-        const [featureRes, statsRes] = await Promise.all([
-          fetch(`${API_BASE}/api/features`),
-          fetch(`${API_BASE}/api/memory/stats`),
+        const [featureData, statsData] = await Promise.all([
+          featuresApi.list(),
+          memoryApi.stats(),
         ])
 
-        if (!featureRes.ok) throw new Error(await featureRes.text())
-        if (!statsRes.ok) throw new Error(await statsRes.text())
-
-        const featureData = await featureRes.json()
         this.selfEvolutionEnabled = !!featureData.self_evolution_enabled
-        this.stats = await statsRes.json()
+        this.stats = statsData
 
         await this.loadReflectionReports()
       } catch (e) {
@@ -127,30 +123,24 @@ export default {
         return
       }
 
-      const res = await fetch(`${API_BASE}/api/reflections`)
-      if (!res.ok) {
-        if (res.status === 403) {
+      try {
+        const data = await reflectionsApi.list()
+        this.reflectionReports = data.reflections || []
+      } catch (e) {
+        // 403 = 自演化关闭，不该当成错误弹给用户
+        if (e.status === 403) {
           this.reflectionReports = []
           return
         }
-        throw new Error(await res.text())
+        throw e
       }
-
-      const data = await res.json()
-      this.reflectionReports = data.reflections || []
     },
 
     async toggleFeature() {
       this.loading = true
       this.error = ''
       try {
-        const res = await apiFetch(`${API_BASE}/api/features/self-evolution`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: this.selfEvolutionEnabled, persist: true }),
-        })
-        if (!res.ok) throw new Error(await res.text())
-        const data = await res.json()
+        const data = await featuresApi.toggleSelfEvolution(this.selfEvolutionEnabled, true)
         this.selfEvolutionEnabled = !!data.self_evolution_enabled
         await this.loadReflectionReports()
       } catch (e) {
@@ -165,8 +155,7 @@ export default {
       this.loading = true
       this.error = ''
       try {
-        const res = await apiFetch(`${API_BASE}/api/reflections/request`, { method: 'POST' })
-        if (!res.ok) throw new Error(await res.text())
+        await reflectionsApi.request()
         await this.refresh()
       } catch (e) {
         this.error = `请求复盘失败: ${e.message}`

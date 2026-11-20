@@ -30,6 +30,9 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio
 
+      - name: Verify dependency consistency
+        run: pip check
+
       - name: Create dummy .env
         run: |
           cat > .env <<EOF
@@ -43,26 +46,29 @@ jobs:
         run: pytest -v --tb=short
 
   lint:
-    name: 语法 / import 检查
+    name: ruff + 契约一致性
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: |
-          python -c "
-          import ast, sys
-          from pathlib import Path
-          ok = True
-          for f in Path('.').rglob('*.py'):
-              if any(p in f.parts for p in ('.git', '__pycache__', 'tests', 'docs')):
-                  continue
-              try:
-                  ast.parse(f.read_text(encoding='utf-8'))
-              except SyntaxError as e:
-                  print(f'✗ {f}: {e}')
-                  ok = False
-          sys.exit(0 if ok else 1)
-          "
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff
+        run: ruff check . --output-format=github
+
+      # 事件名是前后端唯一契约，events.js 必须能从 core/events.py 原样生成。
+      # 手改 events.js 或只改一端，这一步会红。
+      - name: 事件契约（events.js 与 core/events.py 同源）
+        run: python scripts/gen_events_js.py --check
+
+      # requirements.txt 的上下界必须能被当前解释器解析（防止写成非法版本号）
+      - name: 依赖声明可解析
+        run: python -m pip install --dry-run -r requirements.txt
+
+      # 棘轮：except Exception 只能减少不能增加。清理一处后跑 --update 下调基线。
+      - name: 异常处理棘轮
+        run: python scripts/check_except_baseline.py

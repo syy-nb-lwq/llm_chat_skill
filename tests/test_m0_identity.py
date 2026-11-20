@@ -7,9 +7,6 @@
 - build_execution_context 透传 identity
 """
 import asyncio
-import json
-import time
-from pathlib import Path
 
 import pytest
 
@@ -87,7 +84,6 @@ async def test_agent_handle_unique_execution_id_per_call(monkeypatch, stub_inten
     """同 session 多次 handle 必须生成不同 execution_id。"""
     from infra.llm import LLMClient
     from core.agent import Agent
-    from agents import manager as mgr_mod
 
     stub_intent("chitchat")   # 意图由 L1 判;测试里要"走直答"就 stub L1
 

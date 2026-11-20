@@ -9,8 +9,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
-from pathlib import Path
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from infra.logger import get_logger
 

@@ -2,8 +2,8 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from infra.providers.base import BaseProvider, ChatDelta, ChatMessage
-from infra.providers.manager import ProviderManager, get_provider_manager, reset_provider_manager
+from infra.providers.base import BaseProvider, ChatDelta
+from infra.providers.manager import get_provider_manager, reset_provider_manager
 from infra.providers.openai import OpenAIProvider
 from infra.providers.anthropic import AnthropicProvider
 from infra.providers.local import LocalProvider

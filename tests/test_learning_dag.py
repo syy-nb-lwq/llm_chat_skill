@@ -1,5 +1,4 @@
 """Learning DAG 执行测试"""
-import asyncio
 import pytest
 
 from agents.learning import LearningAgent, ToolTask, resolve_params

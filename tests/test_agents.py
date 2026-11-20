@@ -1,7 +1,6 @@
 """Agent 单元测试 - mock LLM,不依赖真实 API"""
 import asyncio
 import json
-from typing import Any, Dict
 
 import pytest
 
@@ -117,7 +116,6 @@ async def test_manager_l1_unavailable_degrades_without_tools(monkeypatch):
 async def test_orchestrator_stream(monkeypatch):
     _patch_llm(monkeypatch, ["ok"])
     from agents.orchestrator import OrchestratorAgent
-    from tools.base import ToolResult
     o = OrchestratorAgent()
     chunks = []
     async for c in o.stream("hello", {}, None):
@@ -196,7 +194,6 @@ async def test_manager_plan_passes_context_to_llm(monkeypatch):
             async for c in self._stream(messages):
                 yield c
 
-    from core.agent_base import get_llm_client as gab_g
     monkeypatch.setattr("infra.llm.get_llm_client", lambda: CapturingLLM())
     monkeypatch.setattr("core.agent_base.get_llm_client", lambda: CapturingLLM())
     from infra import llm as _l
@@ -273,7 +270,6 @@ async def test_agent_handle_async_on_event_preserves_order(monkeypatch, stub_int
     _patch_llm(monkeypatch, [plan_json])
 
     # 让 manager.should_answer_directly 为 True,走直答分支(最快路径,无工具)
-    from agents import manager as mgr_mod
     stub_intent("chitchat")   # 意图由 L1 判;走直答就 stub L1
 
     a = Agent(session_id="t")
@@ -299,7 +295,6 @@ async def test_agent_handle_async_on_event_preserves_order(monkeypatch, stub_int
 async def test_agent_handle_drains_pending_async_on_exception(monkeypatch, stub_intent):
     """handle 异常时,pending 的异步 emit 也要被 drain(不能泄漏)"""
     from core.agent import Agent
-    from agents import manager as mgr_mod
     from infra.llm import LLMClient
 
     # 走直答路径

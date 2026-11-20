@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tools.base import Tool, ToolResult, ToolSchema
-from tools.hub import ToolHub, get_tool_hub, reset_tool_hub
+from tools.hub import ToolHub, reset_tool_hub
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
 
 

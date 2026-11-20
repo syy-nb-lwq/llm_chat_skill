@@ -1,0 +1,29 @@
+# ruff 配置 —— 目的不是"一次修完 29k 行"，而是**挡住新增的低级错误**。
+#
+# 规则集刻意保守：语法错、未定义名、未使用导入、无效比较。
+# 更激进的规则（BLE001 裸 except、TRY、PLR 复杂度）等这批清完再逐步开，
+# 否则一次性冒出 2900 条告警，没人会看。
+target-version = "py310"
+line-length = 110
+
+[lint]
+select = [
+    "E4",  # import 相关（重复导入 / 一行多导入）
+    "E7",  # 语句级问题（分号连写等）
+    "E9",  # 运行时错误（语法错）
+    "F",   # pyflakes：未定义名 / 未使用导入 / f-string 无占位符
+]
+ignore = [
+    # 项目大量使用 sys.path.insert(...) 之后再 import，这是有意的入口写法
+    "E402",
+    # l / I / O 这类单字母变量在脚本与测试里可接受，改名收益低于噪音
+    "E741",
+]
+
+[lint.per-file-ignores]
+# 测试里大量"为副作用赋值"：monkeypatch 目标、探测依赖是否可用、构造后只读断言
+"tests/**" = ["F841"]
+"scripts/**" = ["F841"]
+
+[format]
+quote-style = "double"

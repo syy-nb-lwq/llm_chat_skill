@@ -20,7 +20,7 @@ from core.agentkit.context import (
     ContextBlock,
 )
 from core.agentkit.memory import MemoryFacade, MemoryPermissionError
-from core.agentkit.roles import RoleProfile, ToolGrant, default_roles
+from core.agentkit.roles import default_roles
 from core.exec_context import reset_exec_context, set_exec_context
 
 

@@ -12,7 +12,7 @@
 """
 import pytest
 
-from core.skill_quality import SkillQuality, SkillQualityStore
+from core.skill_quality import SkillQualityStore
 
 
 @pytest.fixture
@@ -233,8 +233,6 @@ def test_publish_records_sample_run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sq, "get_skill_quality_store", lambda: store)
     # 让被引用处拿到新单例
-    import core.critic as critic_mod
-    import backend.main as bm
 
     # 直接验证 critic 的记账分支
     report = type("R", (), {"total": 3, "passed": 1, "cases": []})()
@@ -386,7 +384,6 @@ async def test_end_to_end_sample_run_to_demotion(tmp_path, echo_tool):
     qstore = SkillQualityStore(base_path=tmp_path / "q")
     import core.skill_quality as sq
 
-    import builtins
 
     orig = sq.get_skill_quality_store
     sq.get_skill_quality_store = lambda: qstore

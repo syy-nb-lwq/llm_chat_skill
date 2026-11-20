@@ -30,7 +30,7 @@ class TestSkillLoading:
         skills = store.list_all()
         
         for skill in skills:
-            assert skill.name, f"技能缺少 name"
+            assert skill.name, "技能缺少 name"
             assert skill.capability, f"技能 {skill.name} 缺少 capability"
             assert skill.method, f"技能 {skill.name} 缺少 method"
             print(f"✓ {skill.name} 字段完整")

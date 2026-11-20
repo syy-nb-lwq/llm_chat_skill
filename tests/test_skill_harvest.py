@@ -15,12 +15,11 @@
 """
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 
 import pytest
 
 from core.skill_harvest import (
-    MIN_DISTINCT_TOOLS,
     HarvestResult,
     SkillDraftStore,
     _build_trajectory,

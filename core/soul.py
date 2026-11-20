@@ -2,7 +2,6 @@
 
 参考 OpenClaw 的 SOUL.md 设计,用配置文件定义 Agent 的身份、性格和行为风格。
 """
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -26,10 +25,10 @@ class Soul:
     def to_system_prompt(self) -> str:
         """转换为 system prompt"""
         lines = [
-            f"# 身份",
+            "# 身份",
             f"你是 {self.name}。",
             "",
-            f"# 性格",
+            "# 性格",
             f"{self.personality}",
             "",
         ]

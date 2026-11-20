@@ -33,8 +33,7 @@ agent 想: "这需要一个查价格的接口"
 """
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema

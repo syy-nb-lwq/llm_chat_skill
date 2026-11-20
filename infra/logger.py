@@ -2,7 +2,6 @@
 import logging
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 

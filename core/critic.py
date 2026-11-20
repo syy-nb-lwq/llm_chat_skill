@@ -1,11 +1,9 @@
 """ExecutionCritic - 执行批评器:在每次 DAG 执行后评估结果质量"""
-import asyncio
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from core.memory import FailureRecord, MemoryStore, SkillPatch, get_memory_store
+from core.memory import MemoryStore, SkillPatch, get_memory_store
 from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
 from tools.base import ToolResult
@@ -491,7 +489,8 @@ class ExecutionCritic:
                 temperature=0.3,
             )
             # 尝试解析 JSON
-            import json, re
+            import json
+            import re
             m = re.search(r"\{[\s\S]*\}", response)
             if m:
                 return json.loads(m.group())
@@ -509,7 +508,7 @@ class ExecutionCritic:
             f"场景: {context.scenario}",
             f"意图: {context.intent}",
             f"技能: {context.selected_skill}",
-            f"执行结果:",
+            "执行结果:",
         ]
 
         for t in context.tasks:

@@ -1,5 +1,4 @@
 """Skill 加载器 - 从 YAML/MD 文件加载技能"""
-import re
 from pathlib import Path
 from typing import Dict, List
 

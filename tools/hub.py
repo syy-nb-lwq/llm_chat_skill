@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from infra.logger import get_logger
 from tools.base import Tool, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
+from core.events import EV_TOOL_CALL, EV_TOOL_RESULT
 from tools.validation import validate_params
 
 
@@ -295,11 +296,11 @@ class ToolHub:
             )
             if on_event:
                 await on_event(
-                    "tool_call",
+                    EV_TOOL_CALL,
                     {"tool": tool_name, "params": params, "source": tool_info.source_name},
                 )
                 await on_event(
-                    "tool_result",
+                    EV_TOOL_RESULT,
                     {
                         "tool": tool_name,
                         "result": None,
@@ -324,13 +325,13 @@ class ToolHub:
         if source is None or tool_info.source_type == SourceType.PYTHON:
             if on_event:
                 await on_event(
-                    "tool_call",
+                    EV_TOOL_CALL,
                     {"tool": tool_name, "params": params, "source": tool_info.source_name},
                 )
             result = await self._call_instance(tool_info.instance, params)
             if on_event:
                 await on_event(
-                    "tool_result",
+                    EV_TOOL_RESULT,
                     {
                         "tool": tool_name,
                         "result": result.data if result.success else None,
@@ -342,7 +343,7 @@ class ToolHub:
 
         if on_event:
             await on_event(
-                "tool_call",
+                EV_TOOL_CALL,
                 {"tool": tool_name, "params": params, "source": tool_info.source_name},
             )
 
@@ -353,7 +354,7 @@ class ToolHub:
 
         if on_event:
             await on_event(
-                "tool_result",
+                EV_TOOL_RESULT,
                 {
                     "tool": tool_name,
                     "result": result.data if result.success else None,

@@ -9,8 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 from core.agent_base import BaseAgent
 from skills.manager import get_skill_store, SkillStore

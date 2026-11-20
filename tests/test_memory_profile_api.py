@@ -46,10 +46,11 @@ def _add_profile(content, mtype="preference"):
 # ============================================================
 
 def test_profile_is_open(client_with_profile):
-    """本地单用户：画像接口无需令牌。"""
+    """本地单用户：画像接口无需令牌，也不再带 user_id（该维度已移除）。"""
     resp = client_with_profile.get("/api/memory/profile")
     assert resp.status_code == 200
-    assert resp.json()["user_id"] == "local"
+    assert "user_id" not in resp.json()
+    assert "entries" in resp.json()
 
 
 # ============================================================
@@ -64,7 +65,7 @@ def test_profile_lists_entries(client_with_profile):
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] == 2
-    assert data["user_id"] == "local"
+    assert "user_id" not in data
     labels = {e["label"] for e in data["entries"]}
     assert labels == {"偏好", "雷区"}
 

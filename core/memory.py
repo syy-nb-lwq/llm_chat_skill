@@ -1,7 +1,26 @@
-"""MemoryStore - 跨 Session 长期记忆,让 Agent 记住历史失败和成功经验"""
+"""MemoryStore —— 长期记忆·**经验**存储（JSON 文件，跨会话）。
+
+## 这个库存什么
+
+"什么做法有效 / 什么做法会失败"：
+
+- 失败诊断（`memory/failures/*.json`）—— critic 每轮评估后写入
+- 成功模式（`memory/successes/*.json`）
+- 待审补丁（`memory/skill_patches/*.json`）—— 自演化产出的技能改进
+
+## 它不存什么
+
+**不存画像**：偏好 / 习惯 / 方法 / 雷区 / 事实在
+`core/memory_db.py::MemoryDB`（SQLite），由 `semantic_memory` 管理。
+
+两个库职责互斥（见 `MemoryDB` 的模块文档）。之所以是两种载体：
+经验要"按人可读的诊断原文"逐条审阅（JSON 直接打开就能看），
+画像要"按语义检索 + 去重 + 置信度合并"（SQLite + FTS + 向量）。
+
+公共入口统一在 `core/memorykit/long_term.py`；业务代码不应该直接 import 本模块。
+"""
 import json
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional

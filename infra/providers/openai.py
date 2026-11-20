@@ -1,6 +1,6 @@
 """OpenAI Provider"""
 from typing import List, Dict, Optional, AsyncIterator
-from openai import AsyncOpenAI, APIError, APITimeoutError, RateLimitError
+from openai import AsyncOpenAI
 
 from infra.providers.base import BaseProvider, ChatDelta
 

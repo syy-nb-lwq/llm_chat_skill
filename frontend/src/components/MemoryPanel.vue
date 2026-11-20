@@ -119,8 +119,9 @@
 </template>
 
 <script>
-import { API_BASE } from '../config'
+import { memoryApi } from '../api/client'
 import { wsService } from '../websocket'
+import { EV } from '../events'
 
 export default {
   name: 'MemoryPanel',
@@ -159,33 +160,26 @@ export default {
       this.refresh()
     } else {
       // 身份是 WS 连接后签发的 —— 连上再拉
-      wsService.on('connected', this.refresh)
+      wsService.on(EV.CONNECTED, this.refresh)
     }
   },
   beforeUnmount() {
-    wsService.off('connected', this.refresh)
+    wsService.off(EV.CONNECTED, this.refresh)
   },
   methods: {
-    _sessionQuery() {
-      return this.sessionId ? `session_id=${encodeURIComponent(this.sessionId)}` : ''
-    },
-
     async refresh() {
       if (!this.sessionId) return
       this.loading = true
       this.error = ''
       try {
-        const res = await fetch(`${API_BASE}/api/memory/profile?${this._sessionQuery()}`)
-        if (!res.ok) throw new Error(await res.text())
-        const data = await res.json()
+        const data = await memoryApi.profile(this.sessionId)
         this.entries = data.entries || []
         this.injectedBlock = data.injected_block || ''
         this.injectedChars = data.injected_chars || 0
 
         // 全景是"锦上添花"：拿不到不影响画像列表
         try {
-          const ov = await fetch(`${API_BASE}/api/memory/overview?${this._sessionQuery()}`)
-          if (ov.ok) this.overview = await ov.json()
+          this.overview = await memoryApi.overview(this.sessionId)
         } catch (e) {
           this.overview = null
         }
@@ -206,10 +200,7 @@ export default {
       this.loading = true
       this.error = ''
       try {
-        const res = await fetch(`${API_BASE}/api/memory/profile/${encodeURIComponent(entry.id)}?${this._sessionQuery()}`, {
-          method: 'DELETE',
-        })
-        if (!res.ok) throw new Error(await res.text())
+        await memoryApi.forget(this.sessionId, entry.id)
         // 本地先移除,再刷新 —— 界面立刻响应
         this.entries = this.entries.filter((e) => e.id !== entry.id)
         await this.refresh()
@@ -225,10 +216,7 @@ export default {
       this.loading = true
       this.error = ''
       try {
-        const res = await fetch(`${API_BASE}/api/memory/profile?${this._sessionQuery()}`, {
-          method: 'DELETE',
-        })
-        if (!res.ok) throw new Error(await res.text())
+        await memoryApi.forgetAll(this.sessionId)
         this.entries = []
         await this.refresh()
       } catch (e) {

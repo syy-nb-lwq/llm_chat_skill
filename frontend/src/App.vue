@@ -58,7 +58,8 @@
 
 <script>
 import { wsService } from './websocket'
-import { API_BASE } from './config'  // M0-04
+import { EV } from './events'
+import { sessionApi, skillsApi, toolsApi } from './api/client'
 import ToolList from './components/ToolList.vue'
 import SkillList from './components/SkillList.vue'
 import SkillManager from './components/SkillManager.vue'
@@ -90,20 +91,18 @@ export default {
     this.loadData()
   },
   beforeUnmount() {
-    wsService.off('connected', this.handleConnected)
-    wsService.off('disconnected', this.handleDisconnected)
-    wsService.off('skill_learned', this.handleSkillLearned)
+    wsService.off(EV.CONNECTED, this.handleConnected)
+    wsService.off(EV.DISCONNECTED, this.handleDisconnected)
+    wsService.off(EV.SKILL_LEARNED, this.handleSkillLearned)
   },
   methods: {
     async loadData() {
       this.loading = true
       try {
-        const [toolsRes, skillsRes] = await Promise.all([
-          fetch(`${API_BASE}/api/tools`),
-          fetch(`${API_BASE}/api/skills`)
+        const [toolsData, skillsData] = await Promise.all([
+          toolsApi.list(),
+          skillsApi.list(),
         ])
-        const toolsData = await toolsRes.json()
-        const skillsData = await skillsRes.json()
         this.tools = toolsData.tools || []
         this.skills = skillsData.skills || []
       } catch (e) {
@@ -121,13 +120,7 @@ export default {
       const session = wsService.session
       if (!session || !session.session_id) return
       try {
-        const sid = encodeURIComponent(session.session_id)
-        const res = await fetch(`${API_BASE}/api/session/messages?session_id=${sid}`)
-        if (!res.ok) {
-          // 404/400 都只是“还没历史”，不打扰用户
-          return
-        }
-        const data = await res.json()
+        const data = await sessionApi.messages(session.session_id)
         const restored = (data.messages || [])
           .filter((m) => m.role === 'user' || m.role === 'assistant')
           .map((m) => ({ role: m.role, content: m.content || '' }))
@@ -138,39 +131,41 @@ export default {
           this.pendingIndex = -1
         }
       } catch (e) {
+        // 404/400 都只是“还没历史”，不打扰用户
+        if (e.status === 404 || e.status === 400) return
         console.warn('[History] 恢复失败:', e)
       }
     },
 
     initWebSocket() {
-      wsService.on('connected', () => {
+      wsService.on(EV.CONNECTED, () => {
         this.isConnected = true
         // 身份签发后立刻恢复历史 —— 否则一刷新页面，之前的对话就“消失”了。
         // 会话内容本来就是全量保留在 memory/sessions.db 里的，
         // 只是前端从来没去取过。
         this.loadHistory()
       })
-      wsService.on('disconnected', () => { this.isConnected = false })
+      wsService.on(EV.DISCONNECTED, () => { this.isConnected = false })
 
       // 流转事件
-      wsService.on('thinking', (payload) => this.handleThinking(payload))
-      wsService.on('plan', (payload) => this.handlePlan(payload))
-      wsService.on('tool_call', (payload) => this.handleToolCall(payload))
-      wsService.on('tool_result', (payload) => this.handleToolResult(payload))
-      wsService.on('tool_error', (payload) => this.handleToolError(payload))
+      wsService.on(EV.THINKING, (payload) => this.handleThinking(payload))
+      wsService.on(EV.PLAN, (payload) => this.handlePlan(payload))
+      wsService.on(EV.TOOL_CALL, (payload) => this.handleToolCall(payload))
+      wsService.on(EV.TOOL_RESULT, (payload) => this.handleToolResult(payload))
+      wsService.on(EV.TOOL_ERROR, (payload) => this.handleToolError(payload))
 
       // 消息事件
-      wsService.on('message_delta', (payload) => this.handleMessageDelta(payload))
-      wsService.on('message_final', (payload) => this.handleMessageFinal(payload))
+      wsService.on(EV.MESSAGE_DELTA, (payload) => this.handleMessageDelta(payload))
+      wsService.on(EV.MESSAGE_FINAL, (payload) => this.handleMessageFinal(payload))
 
       // 技能学习事件
-      wsService.on('skill_learned', (payload) => this.handleSkillLearned(payload))
+      wsService.on(EV.SKILL_LEARNED, (payload) => this.handleSkillLearned(payload))
 
       // 意图不明时的澄清请求(带候选项)
-      wsService.on('clarification_request', (payload) => this.handleClarification(payload))
+      wsService.on(EV.CLARIFICATION_REQUEST, (payload) => this.handleClarification(payload))
 
       // 错误
-      wsService.on('error', (payload) => this.handleError(payload))
+      wsService.on(EV.ERROR, (payload) => this.handleError(payload))
 
       wsService.connect()
     },

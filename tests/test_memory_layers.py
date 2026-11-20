@@ -15,7 +15,6 @@ from core.memorykit import (
     get_memory,
     reset_memory,
 )
-from core.memorykit.working import MAX_VALUE_CHARS
 
 
 # ============================================================
@@ -198,3 +197,63 @@ def test_reset_memory_clears_current_turn():
     assert get_current_working() is not None
     reset_memory()
     assert get_current_working() is None
+
+
+# ===== 存储边界：画像库与经验库互斥 =====
+
+def test_two_stores_do_not_mix(tmp_path):
+    """画像是画像、经验是经验 —— 写进一边的东西不会出现在另一边。
+
+    这条边界不靠"底层硬校验"守着（`MemoryDB` 仍是通用存储，要能表达历史类型），
+    而靠**职责划分 + 行为断言**：两个库各存各的，没有同一份数据的两个副本。
+    """
+    from core.memory import MemoryStore
+    from core.memory_db import MemoryDB
+
+    json_store = MemoryStore(base_path=tmp_path / "json")
+    db = MemoryDB(tmp_path / "semantic.db")
+
+    json_store.record_failure(
+        trace_id="e9",
+        scenario="web_fetch",
+        intent="EXECUTE",
+        selected_skill="",
+        success_rate=0.0,
+        fallback_count=0,
+        latency_ms=1200,
+        diagnosis="请求被反爬拦截，未换 UA",
+        execution_id="e9",
+    )
+    db.add(type="preference", content="喜欢要点式回答")
+
+    # 经验只在 JSON：SQLite 的画像里没有这条诊断
+    sqlite_texts = [e.content for e in db.get_recent(limit=50)]
+    assert not any("反爬" in t for t in sqlite_texts), sqlite_texts
+
+    # 画像只在 SQLite：JSON 的失败经验里没有偏好
+    diagnoses = [f.diagnosis for f in json_store.get_recent_failures(top_k=50)]
+    assert not any("要点式" in d for d in diagnoses), diagnoses
+
+
+def test_memory_store_holds_experience_not_profile(tmp_path):
+    """经验库的记录类型是失败/成功/补丁，不含画像类型。"""
+    from core.memory import MemoryStore
+
+    store = MemoryStore(base_path=tmp_path)
+    store.record_failure(
+        trace_id="e1",
+        scenario="web_fetch",
+        intent="EXECUTE",
+        selected_skill="",
+        success_rate=0.0,
+        fallback_count=0,
+        latency_ms=1200,
+        diagnosis="请求被反爬拦截，未换 UA",
+        execution_id="e1",
+    )
+    failures = store.get_recent_failures(top_k=5)
+    assert failures, "失败经验应落进 JSON 经验库"
+    assert all(hasattr(f, "diagnosis") for f in failures)
+
+
+# ===== 存储边界：画像库与经验库互斥 =====

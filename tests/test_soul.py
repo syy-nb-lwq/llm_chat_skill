@@ -1,7 +1,5 @@
 """Soul 身份系统单元测试"""
-import pytest
 from pathlib import Path
-from unittest.mock import patch
 
 from core.soul import Soul, SoulLoader, get_soul_loader, reset_soul_loader
 

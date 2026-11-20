@@ -13,11 +13,10 @@
 **目录没了应该被当成"没有记录",而不是"崩溃"。**
 日志清理、部署脚本、磁盘清理都可能删掉它 —— 不该要求运维知道这个内部结构。
 """
-import json
 
 import pytest
 
-from core.memory import MemoryStore, SuccessRecord
+from core.memory import MemoryStore
 
 
 @pytest.fixture

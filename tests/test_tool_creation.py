@@ -14,8 +14,6 @@ create_tool 提案 → 静态校验 → 风险分级 → 跑测试用例 → 发
    委托给 `PythonSource`,而源里没有动态创建的工具 → "工具不存在"。
 3. **重启后工具消失** —— 必须启动时从账本恢复,否则"能力自增长"是假的。
 """
-import asyncio
-import json
 
 import pytest
 
@@ -29,7 +27,6 @@ from tools.proposal import (
     approve,
     assess_risk,
     build_tool,
-    can_auto_publish,
     normalize_params,
     publish,
     reject,
@@ -549,8 +546,12 @@ def test_list_proposals_api(api_client):
 
 def test_list_proposals_filter_by_status(api_client):
     c, store = api_client
-    a = _http(name="a_tool"); a.status = STATUS_PENDING; store.save(a)
-    b = _http(name="b_tool"); b.status = STATUS_PUBLISHED; store.save(b)
+    a = _http(name="a_tool")
+    a.status = STATUS_PENDING
+    store.save(a)
+    b = _http(name="b_tool")
+    b.status = STATUS_PUBLISHED
+    store.save(b)
 
     assert c.get("/api/tool-proposals?status=pending").json()["count"] == 1
     assert c.get("/api/tool-proposals?status=published").json()["count"] == 1

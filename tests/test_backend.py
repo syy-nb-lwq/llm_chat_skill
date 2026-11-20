@@ -241,7 +241,7 @@ def test_websocket_init_and_ping_via_client():
     import asyncio
     import time
     from unittest.mock import MagicMock
-    from backend.websocket_handler import dispatcher, push_event
+    from backend.websocket_handler import dispatcher
     from backend.session import sessions
 
     conn_id = f"test-cid-{int(time.time()*1000)}"
@@ -298,7 +298,6 @@ def test_websocket_init_and_ping_via_client():
 
             # 5) chat: 把 agent 的 handle 替换为 stub
             from core.agent import Agent
-            from agents import manager as mgr_mod
             # 让 LLM 完全 stub,避免 chat 路径真正发请求
             from infra.llm import LLMClient
             from core.agent_base import get_llm_client as gab_g

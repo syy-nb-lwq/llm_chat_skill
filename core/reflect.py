@@ -1,6 +1,6 @@
 """SelfReflectLoop - 主动反思循环:在低负载时主动复盘近期经验,生成洞察"""
 import asyncio
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
