@@ -16,12 +16,7 @@
 
     <div v-if="error" class="error">{{ error }}</div>
 
-    <div v-if="!sessionId" class="hint-box">
-      <p>连接后即可查看系统记住的关于你的信息。</p>
-    </div>
-
-    <template v-else>
-      <!-- 正在注入的内容:让用户看清"什么在影响我的回答" -->
+    <!-- 正在注入的内容:让用户看清"什么在影响我的回答" -->
       <div v-if="injectedBlock" class="injected-box">
         <div class="injected-title">此刻正在影响你回答的内容</div>
         <pre class="injected-content">{{ injectedBlock }}</pre>
@@ -122,7 +117,6 @@
           只显示前 {{ visibleEntries.length }} 条 —— 共 {{ entries.length }} 条。
         </p>
       </template>
-    </template>
   </div>
 </template>
 
@@ -153,38 +147,39 @@ export default {
       // 只展示画像时，用户会以为"系统什么都没记" —— 其实别的层有数据
       overview: null,
       // 保存 WS 监听函数引用，卸载时才能精确移除。
-      // 之前直接传 this.refresh 给 on()，_emit 裸调用 cb() 时 this 指向丢失，
-      // refresh 里 this.sessionId 报错被 catch 吞掉 —— 面板永远空白。
       onConnected: null,
+      // session_id 存进响应式 data，而不是从 wsService.session 现读。
+      // wsService 不是 Vue 响应式对象：从它派生的 computed 会被缓存成挂载时的
+      // 旧值（通常是空），connected 后 Vue 察觉不到变化 → watch 不触发、
+      // refresh 里 if(!sessionId) 直接 return → 面板永远空白。
+      // 正确做法和 App.vue 一致：connected 回调从 payload 取 session_id 写进 data。
+      sessionId: '',
     }
   },
   computed: {
-    sessionId() {
-      return (wsService.session && wsService.session.session_id) || ''
-    },
     visibleEntries() {
       if (this.filter === 'all') return this.entries
       return this.entries.filter((e) => e.type === this.filter)
     },
   },
-  watch: {
-    // 会话身份是 WS 连上后才签发的，且本组件用 v-show 常驻挂载。
-    // 监听 sessionId 变化，无论 WS 在挂载前还是挂载后连上都能加载，
-    // 也避免只靠一次性 connected 事件的竞态（事件先发过就再也收不到）。
-    sessionId(val) {
-      if (val) this.refresh()
-    },
-  },
   mounted() {
-    if (this.sessionId) {
+    // 本组件用 v-show 常驻挂载，WS 可能在挂载前后任一时刻连上。
+    // 两种情况都要覆盖：
+    //   1) 已连上 → 从 wsService 直接取（此时 session 已签发）
+    //   2) 未连上 → 监听 connected，从 payload 取 session_id（和 App.vue 一致）
+    this.onConnected = (payload) => {
+      this.sessionId = (payload && payload.session_id) || ''
       this.refresh()
-    } else {
-      // 身份是 WS 连接后签发的 —— 连上再拉。
-      // 必须用箭头函数绑定 this：wsService._emit 是裸调用 cb()，
-      // 直接传 this.refresh 会丢失 this 指向、报错被吞、面板空白。
-      this.onConnected = () => this.refresh()
-      wsService.on(EV.CONNECTED, this.onConnected)
     }
+    wsService.on(EV.CONNECTED, this.onConnected)
+
+    const sid = wsService.session && wsService.session.session_id
+    if (sid) {
+      this.sessionId = sid
+      this.refresh()
+    }
+    // 注意：即使 sessionId 为空也照常 refresh —— 后端 /api/memory/profile
+    // 返回的是全部画像，不按会话过滤，没有 id 也能显示。
   },
   beforeUnmount() {
     if (this.onConnected) {
@@ -193,7 +188,8 @@ export default {
   },
   methods: {
     async refresh() {
-      if (!this.sessionId) return
+      // 不因 sessionId 为空而跳过：后端 profile/overview 返回全局数据，
+      // 不按会话过滤。这道闸曾导致面板空白。
       this.loading = true
       this.error = ''
       try {
