@@ -514,30 +514,57 @@ class Agent:
             lines.append(f"{role}：{content[:160]}")
         return "\n".join(lines)
 
-    def _schedule_memory_write(self, user_input: str) -> None:
-        """异步写用户画像,**不阻塞本轮响应**。
+    def _schedule_memory_write(self, user_input: str, answer: str = "") -> None:
+        """把这一轮交给长期记忆管线(**异步**,不阻塞回答)。
 
-        docs/13 §2.4:写入必须异步且失败只记日志 —— 记忆是"锦上添花",
-        不能因为它把回答拖慢或拖垮。
+        这里**不再每轮抽一条**。单句抽取的毛病是结构性的：一句话就足以
+        生成一条"用户偏好"，而多轮才看得出来的模式反而永远沉淀不下来
+        （用户原话：「记忆的总结不要是单独记住一句话，而是综合来看才能沉淀」）。
+
+        现在的分工：
+
+        - 用户明确说「记住…」→ 立即单条写入。结论的合法性就来自这句话，
+          不该让他等攒满一段。
+        - 其余 → 进累积窗口（`core/digest_window`），攒满一段再整体归纳。
+          归纳出来的每条结论都必须有跨轮证据（`core/profile_digest`）。
         """
         if not self.persist_memory or not user_input:
             return
-        try:
-            context = self._memory_context(user_input)
-            task = asyncio.create_task(
-                # 长期记忆的唯一写入口（LLM 抽取 + 证据校验，在后台跑）
+
+        from core.digest_window import window_for
+        from core.memory_writer import has_explicit_remember
+
+        if has_explicit_remember(user_input):
+            self._spawn_memory_task(
                 self.mem.long_term.record_turn(
                     user_input,
                     session_id=self.session_id,
                     turn_id=self.turn_id,
-                    context=context,
+                    context=self._memory_context(user_input),
                 )
             )
-        except Exception as exc:
-            self.logger.warning("Agent", f"调度画像写入失败: {exc}")
             return
 
-        # 持引用防止被 GC,并吞掉异常(内部已记录日志)
+        batch = window_for(self.session_id).add(user_input, answer)
+        if not batch:
+            return
+        self._spawn_memory_task(
+            self.mem.long_term.digest(batch, session_id=self.session_id)
+        )
+
+    def _spawn_memory_task(self, coro) -> None:
+        """把记忆写入的协程挂到后台：持引用防 GC，异常只记日志。
+
+        `docs/13 §2.4`：记忆是锦上添花，不能因为它把回答拖慢或拖垮。
+        """
+        try:
+            task = asyncio.create_task(coro)
+        except (RuntimeError, TypeError) as exc:
+            # 起不来就把协程关掉，否则会留下 "never awaited" 告警
+            coro.close()
+            self.logger.warning("Agent", f"调度记忆写入失败: {exc}")
+            return
+
         self._memory_tasks.add(task)
 
         def _done(t: asyncio.Task) -> None:
@@ -546,7 +573,7 @@ class Agent:
                 return
             exc = t.exception()
             if exc is not None:
-                self.logger.warning("Agent", f"画像写入异常: {exc}")
+                self.logger.warning("Agent", f"记忆写入异常: {exc}")
 
         task.add_done_callback(_done)
 
@@ -716,10 +743,6 @@ class Agent:
         # 分阶段耗时记录(产品化的最低观测要求,见 core/trace.py)
         trace = self._new_trace()
         trace.profile_chars = len(profile_block or "")
-
-        # 用户画像写入(长期记忆):只依赖用户这句话,和本轮结果无关,
-        # 所以在这里就异步起,让它和后面的规划/执行并行跑完。
-        self._schedule_memory_write(user_input)
 
         # ===== 用户纠正检测 =====
         # 本轮输入可能是在纠正**上一条**回答 —— 那是自演化唯一的 ground truth,
@@ -1205,6 +1228,13 @@ class Agent:
 
         全部挂到 `pending_async`，由 `_end_turn` 统一 await —— 不阻塞回答。
         """
+        # 长期记忆：把「这一问 + 这一答」交进累积窗口。
+        #
+        # 为什么放在轮末而不是轮首：归纳要看的是"用户问了什么、助手答了什么、
+        # 他接着又怎么纠正" —— 这些在本轮结束前才齐。轮首只有一句提问，
+        # 那正是"记住一句话"的做法。
+        self._schedule_memory_write(tc.user_input, tc.answer)
+
         execution_context = build_execution_context(
             trace_id=self.trace_id,
             scenario=tc.skill_name or "",
@@ -1362,12 +1392,33 @@ class Agent:
         # 澄清轮不进 critic:这里直接返回,不追加 critic 任务
         return text
 
+    def _flush_digest_window(self) -> None:
+        """把窗口里剩下的轮次交出去归纳。
+
+        为什么在 reset 时一定要冲：`reset` 之后这些轮次不会再参与任何一次
+        归纳（上下文已经清空），不冲就等于白攒 —— 用户聊了三轮才说出的
+        "以后都按这个来"，会随着 reset 一起消失。
+        """
+        if not self.persist_memory:
+            return
+        # 这里不包 try：`window_for` / `flush` 都是纯内存操作（dict + list），
+        # 真正的失败点在后台 task 里，由 `_spawn_memory_task` 的 done 回调记录
+        from core.digest_window import window_for
+
+        batch = window_for(self.session_id).flush()
+        if not batch:
+            return
+        self._spawn_memory_task(
+            self.mem.long_term.digest(batch, session_id=self.session_id)
+        )
+
     def reset(self):
         """清空工作上下文。
 
         **不删除已落库的消息** —— 会话内容始终保留、可检索;
         只是把"工作上下文"的起点挪到当前位置,恢复会话时不再装回旧内容。
         """
+        self._flush_digest_window()
         self.context.clear()
         # 工作记忆跟着一起清 —— reset 的语义是"忘掉这一轮在做什么"
         if self.working is not None:

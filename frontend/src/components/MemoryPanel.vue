@@ -107,6 +107,14 @@
               </button>
             </div>
             <div class="entry-content">{{ e.content }}</div>
+            <!-- 来源：一条"综合"出来的结论必须能说清它综合了什么，
+                 否则用户没法判断它是真的反复出现，还是从一句话推出来的 -->
+            <div v-if="e.evidence_turns && e.evidence_turns.length > 1" class="entry-source">
+              综合自 {{ e.evidence_turns.length }} 轮（第 {{ e.evidence_turns.join('、') }} 轮）
+            </div>
+            <div v-else-if="e.applies_to" class="entry-source scope">
+              仅适用于 {{ e.applies_to }}
+            </div>
           </div>
         </div>
 
@@ -403,6 +411,16 @@ export default {
   line-height: 1.5;
   color: #333;
   word-break: break-word;
+}
+
+/* 来源标注：比正文更轻，但比"看不见"重要 —— 它是这条记忆的可信度凭据 */
+.entry-source {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #8a8f98;
+}
+.entry-source.scope {
+  color: #b07b2a;
 }
 
 .empty {

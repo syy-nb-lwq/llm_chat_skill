@@ -122,6 +122,17 @@ class LongTermMemory:
             context=context,
         )
 
+    async def digest(
+        self, turns, *, session_id: str = ""
+    ) -> Any:
+        """把一段连续对话归纳成画像（生产主路径）。
+
+        `turns` 是 `[{"index", "user", "assistant"}, ...]`，由
+        `core/digest_window.DigestWindow` 攒出来。归纳出的每条结论都必须
+        有跨轮证据（`core/profile_digest`），单句不足以支撑一条长期判断。
+        """
+        return await self.writer.digest_turns(turns, session_id=session_id)
+
     # ===== 经验：读 =====
 
     def hints(self, user_input: str) -> List[str]:

@@ -366,4 +366,46 @@ def _offline_profile_extractor(monkeypatch):
         return mw.extract_candidates(text)
 
     monkeypatch.setattr(mw, "_extractor", _stub)
+
+    async def _digest_stub(turns):
+        """会话归纳的离线替身：逐轮跑规则抽取。
+
+        真正的归纳（`core/profile_digest`）要打 LLM，测试里换成确定性版本。
+        这里不做跨轮合并 —— 跨轮校验本身由 `tests/test_profile_digest.py`
+        直接测 `validate_digest`，不依赖 LLM。
+        """
+        from core.memory_writer import MemoryCandidate
+
+        out = []
+        for turn in turns:
+            for cand in mw.extract_candidates(turn.get("user") or ""):
+                out.append(
+                    MemoryCandidate(
+                        type=cand.type,
+                        content=cand.content,
+                        confidence=cand.confidence,
+                        importance=cand.importance,
+                        scope=cand.scope,
+                        normalized_key=cand.normalized_key,
+                        rule="rule-digest",
+                        evidence_turns=[turn.get("index")],
+                    )
+                )
+        return out
+
+    monkeypatch.setattr(mw, "_digest_extractor", _digest_stub)
+
+    # 测试里把窗口缩到 1 轮：绝大多数用例只跑一两轮，
+    # 让它们等攒满 6 轮才沉淀，等于把记忆写入从这些用例里删掉了。
+    import core.digest_window as dw
+
+    real_window_for = dw.window_for
+    monkeypatch.setattr(
+        dw,
+        "window_for",
+        lambda session_id, size=1, keep=0: real_window_for(
+            session_id, size=1, keep=0
+        ),
+    )
+    dw.reset_windows()
     return _stub

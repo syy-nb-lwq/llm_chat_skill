@@ -287,17 +287,24 @@ def test_cleanup_never_deletes_profile(db):
 # ===== 7. 主链接入 =====
 
 @pytest.mark.asyncio
-async def test_agent_schedules_memory_write(monkeypatch):
-    """Agent.handle 会调度画像写入(不阻塞本轮)"""
+async def test_agent_digests_turn_into_memory(monkeypatch):
+    """普通一轮进累积窗口，归纳后写入 —— **不再每轮抽一句**。
+
+    这条钉的是新语义：`_schedule_memory_write` 把「这一问 + 这一答」交给
+    `digest_turns`，而不是拿用户那一句话去 `record_turn`。
+    """
     import asyncio
 
     from core import agent as agent_mod
 
-    calls = []
+    digested = []
 
     class _FakeWriter:
-        async def record_turn(self, user_input, **kwargs):
-            calls.append((user_input, kwargs))
+        async def record_turn(self, user_input, **kwargs):  # pragma: no cover
+            raise AssertionError("普通轮不该走单句抽取")
+
+        async def digest_turns(self, turns, **kwargs):
+            digested.append(turns)
             return None
 
     monkeypatch.setattr(
@@ -306,10 +313,39 @@ async def test_agent_schedules_memory_write(monkeypatch):
 
     agent = agent_mod.Agent(session_id="s1")
     assert agent.persist_memory is True
-    agent._schedule_memory_write("以后回答都用中文")
+    agent._schedule_memory_write("以后回答都用中文", "好的")
     await asyncio.sleep(0)  # 让 create_task 跑起来
-    assert calls
-    assert calls[0][0] == "以后回答都用中文"
+    assert digested
+    assert digested[0][0]["user"] == "以后回答都用中文"
+    # 归纳要看的是"用户问了什么、助手答了什么"，回答必须一起交上去
+    assert digested[0][0]["assistant"] == "好的"
+
+
+@pytest.mark.asyncio
+async def test_agent_writes_explicit_remember_immediately(monkeypatch):
+    """「记住…」不等窗口攒满 —— 用户要的就是这一句被记住。"""
+    import asyncio
+
+    from core import agent as agent_mod
+
+    calls = []
+
+    class _FakeWriter:
+        async def record_turn(self, user_input, **kwargs):
+            calls.append(user_input)
+            return None
+
+        async def digest_turns(self, turns, **kwargs):  # pragma: no cover
+            raise AssertionError("显式记住不该等归纳")
+
+    monkeypatch.setattr(
+        "core.memory_writer.get_memory_writer", lambda: _FakeWriter()
+    )
+
+    agent = agent_mod.Agent(session_id="s1")
+    agent._schedule_memory_write("记住：我叫张三，做短剧的", "好的")
+    await asyncio.sleep(0)
+    assert calls == ["记住：我叫张三，做短剧的"]
 
 
 def test_agent_skips_memory_write_when_disabled(monkeypatch):
@@ -509,3 +545,32 @@ async def test_writer_persists_applies_to(writer, db):
     entry = db.get(result.added[0])
     assert entry.metadata.get("applies_to") == "minimax"
     assert entry.tags == ["minimax"]
+
+
+@pytest.mark.asyncio
+async def test_writer_persists_evidence_turns(writer, db):
+    """归纳结论的来源轮次要落进 metadata。
+
+    面板上那句「综合自 3 轮（第 2、3、4 轮）」就靠它 —— 没有这个字段，
+    一条综合出来的结论和一条从单句抠出来的结论在界面上完全一样，
+    用户没法判断该不该信。
+    """
+    import core.memory_writer as mw
+
+    cand = mw.MemoryCandidate(
+        type="preference",
+        content="用户偏好极简回答，只要结论",
+        confidence=0.9,
+        rule="digest",
+        evidence_turns=[2, 3, 4],
+        normalized_key="preference:|用户偏好极简回答，只要结论",
+    )
+    result = mw.WriteResult()
+    await writer._write_one(
+        cand, result=result, session_id="s1", turn_id="digest-1-5"
+    )
+
+    assert len(result.added) == 1
+    entry = db.get(result.added[0])
+    assert entry.metadata.get("evidence_turns") == [2, 3, 4]
+    assert entry.metadata.get("rule") == "digest"

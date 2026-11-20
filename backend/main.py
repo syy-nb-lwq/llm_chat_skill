@@ -1284,6 +1284,7 @@ async def get_profile(request: Request):
 
     items = []
     for e in entries:
+        meta = e.metadata or {}
         items.append({
             "id": e.id,
             "type": e.type,
@@ -1293,6 +1294,11 @@ async def get_profile(request: Request):
             "importance": round(float(e.importance), 3),
             "created_at": e.created_at,
             "source_session_id": e.source_session_id or "",
+            # 这条结论是综合哪几轮对话得出来的（会话归纳才有值）。
+            # 面板上直接显示出来 —— 用户能自己判断"它是不是从一句话推的"。
+            "evidence_turns": meta.get("evidence_turns", []),
+            # 只适用于某个平台/项目时，面板上标一句，避免被当成全局结论
+            "applies_to": meta.get("applies_to", ""),
         })
 
     return {

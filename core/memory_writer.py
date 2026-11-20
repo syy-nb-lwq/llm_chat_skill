@@ -65,6 +65,11 @@ class MemoryCandidate:
     #: 这是**反幻觉的结构性保证**：模型说不出证据、或证据在原话里找不到，
     #: 整条候选直接丢弃（见 `core/profile_llm.validate_facts`）。
     evidence: str = ""
+    #: 这条结论是由哪几轮对话支撑的（会话归纳时才有值）。
+    #:
+    #: 它不只是审计信息：`applies_to` 之外，这是**第二条可追溯链** ——
+    #: 将来觉得某条画像莫名其妙，能直接回到那几轮去看用户到底说了什么。
+    evidence_turns: List[int] = field(default_factory=list)
     #: 这条只适用于哪个具体对象（产品/平台/项目/场景名），全局则为空串。
     #:
     #: 为什么必须有这个字段：用户说「minimax 我以后都用国内站」，
@@ -93,8 +98,17 @@ async def _llm_extractor(user_input: str, context: str = "") -> List["MemoryCand
     return await extract_with_llm(user_input, context=context)
 
 
+async def _llm_digest_extractor(turns) -> List["MemoryCandidate"]:
+    """会话级归纳（生产路径）。"""
+    from core.profile_digest import digest_with_llm
+
+    return await digest_with_llm(turns)
+
+
 #: 当前抽取策略（生产 = LLM；测试可替换成离线的规则版）
 _extractor = _llm_extractor
+#: 会话归纳策略（测试可替换）
+_digest_extractor = _llm_digest_extractor
 
 
 def set_extractor(fn) -> None:
@@ -103,8 +117,18 @@ def set_extractor(fn) -> None:
     _extractor = fn
 
 
+def set_digest_extractor(fn) -> None:
+    """替换会话归纳策略（主要给测试用）。"""
+    global _digest_extractor
+    _digest_extractor = fn
+
+
 def get_extractor():
     return _extractor
+
+
+def get_digest_extractor():
+    return _digest_extractor
 
 
 # ===== 规则提取（旧策略，保留但不再作为生产默认）=====
@@ -329,6 +353,15 @@ _EXPLICIT_REMEMBER = re.compile(
     r"(?:记住|记一下|记下|请记住|你要记住|帮我记住)[^\n。!?]{1,60}"
 )
 
+
+def has_explicit_remember(text: str) -> bool:
+    """用户是否明确要求「记住…」。
+
+    这类**不走累积窗口**，立即单条入库：结论的合法性就来自这句话本身
+    （"记住我叫张三"不需要多轮佐证），让用户等攒满 6 轮才记住是错的。
+    """
+    return bool(_EXPLICIT_REMEMBER.search(text or ""))
+
 #: 疑问句/元问题不当成画像(用户在问,不是在陈述)
 _QUESTION_TAIL = re.compile(r"(?:吗|呢|么|是不是|对不对|怎么样)\s*[?？]?\s*$")
 
@@ -510,6 +543,63 @@ class MemoryWriter:
             self.logger.warning("MemoryWriter", f"候选提取失败: {exc}")
             return result
 
+        await self._write_candidates(
+            candidates, result=result, session_id=session_id, turn_id=turn_id
+        )
+
+        if result.total:
+            self.logger.info(
+                "MemoryWriter",
+                f"画像写入: 新增 {len(result.added)} 条,"
+                f"取代 {len(result.superseded)} 条",
+            )
+        return result
+
+    async def digest_turns(
+        self,
+        turns,
+        *,
+        session_id: str = "",
+    ) -> WriteResult:
+        """把**一段对话**整体归纳成画像（生产主路径）。
+
+        与 `record_turn` 的区别不只是"输入变长"：归纳出来的结论必须带着
+        跨轮证据才能通过校验（见 `core/profile_digest.validate_digest`），
+        所以这里写进去的东西，天然是"综合过"的。
+
+        失败只记日志 —— 归纳不成只意味着这一段没沉淀，不能影响主流程。
+        """
+        result = WriteResult()
+        if not turns:
+            return result
+
+        # `_digest_extractor` 的异常由 `digest_with_llm` 兜住并返回空列表
+        # （与 `extract_with_llm` 的契约一致），这里不重复捕获
+        candidates = await _digest_extractor(turns)
+
+        # 整段对话归一个 turn_id：这批记忆共享同一个来源切片
+        turn_id = f"digest-{turns[0].get('index')}-{turns[-1].get('index')}"
+        await self._write_candidates(
+            candidates, result=result, session_id=session_id, turn_id=turn_id
+        )
+
+        if result.total:
+            self.logger.info(
+                "MemoryWriter",
+                f"会话归纳: 覆盖 {len(turns)} 轮,"
+                f"新增 {len(result.added)} 条,取代 {len(result.superseded)} 条",
+            )
+        return result
+
+    async def _write_candidates(
+        self,
+        candidates,
+        *,
+        result: "WriteResult",
+        session_id: str,
+        turn_id: str,
+    ) -> None:
+        """逐条写入。**单条失败不影响同一批的其余条目**。"""
         for candidate in candidates:
             try:
                 await self._write_one(
@@ -523,14 +613,6 @@ class MemoryWriter:
                     "MemoryWriter",
                     f"写入画像失败({candidate.type}): {exc}",
                 )
-
-        if result.total:
-            self.logger.info(
-                "MemoryWriter",
-                f"画像写入: 新增 {len(result.added)} 条,"
-                f"取代 {len(result.superseded)} 条",
-            )
-        return result
 
     async def _write_one(
         self,
@@ -563,6 +645,9 @@ class MemoryWriter:
         if candidate.applies_to:
             meta["applies_to"] = candidate.applies_to
             tags = [candidate.applies_to]
+        # 归纳来源的轮次 —— 让这条记忆可回溯到具体几轮对话
+        if candidate.evidence_turns:
+            meta["evidence_turns"] = list(candidate.evidence_turns)
 
         # 3) 去重 / 冲突检测
         existing = db.get_by_key(candidate.type, candidate.normalized_key)
