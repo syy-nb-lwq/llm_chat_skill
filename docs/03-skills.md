@@ -20,6 +20,7 @@
 - `patterns`
 - `tags`
 - `steps`
+- `required_tools`（这套技能需要的工具名清单，见下）
 - `examples`
 - `source`
 - `author`
@@ -38,6 +39,22 @@
 - `fallback`
 - `retry`
 - `timeout_s`
+
+### required_tools：技能自带的工具清单
+
+`Skill.required_tools` 声明"执行这套技能需要哪些工具"。这是技能按需加载工具的基础：
+
+- 子智能体执行任务时**先匹配技能**，用 `skill.tools_needed()` 裁剪工具表，
+  而不是把全量工具塞进上下文再从里面挑 —— 后者上下文太长，且容易工具漂移。
+- `tools_needed()`：显式 `required_tools` 优先；为空则自动从 `steps[].tool` 聚合（兼容旧技能）。
+- **与角色白名单取交集**：技能不能越权使用角色本来就不允许的工具。
+- 空清单的语义：纯判断/回答类技能本来不需要工具；旧技能提炼时遗漏了。
+  运行时无法区分，所以空清单 → 退回角色全量工具，不破坏现有行为。
+- 提炼侧负责写入：`harvest` 从真实成功的工具序列写入；`SkillTrainer` 让 LLM 抽取时
+  填 `required_tools`（纯判断技能填空数组）。
+
+`patterns` 匹配用 2-gram 部分匹配（`SkillRegistry._pattern_hit`）：中文触发词是长短语，
+用户不会一字不差复述，单纯子串包含会导致"技能名都念对了却匹配不上"。
 
 ## 2. 加载方式
 

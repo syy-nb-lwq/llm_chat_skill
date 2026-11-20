@@ -517,6 +517,8 @@ async def list_skills():
                 "created_at": getattr(skill, "created_at", None),
                 "updated_at": getattr(skill, "updated_at", None),
                 "steps": [step.to_dict() for step in skill.steps],
+                # 技能需要的工具清单 —— 界面可见，也是子智能体按需裁剪的依据
+                "required_tools": skill.tools_needed() if hasattr(skill, "tools_needed") else [],
                 "quality": qualities.get(skill.name),
             }
             for skill in skills

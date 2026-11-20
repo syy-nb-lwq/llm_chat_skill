@@ -22,3 +22,6 @@ author: reorganized
 created_at: '2026-11-20T16:12:40.526340'
 updated_at: '2026-11-20T16:12:40.526340'
 active: true
+required_tools:
+- ecom_product_scorer
+- ecom_listing_gen

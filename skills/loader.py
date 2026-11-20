@@ -119,6 +119,7 @@ class SkillLoader:
             patterns=data.get("patterns", []),
             tags=data.get("tags", []),
             steps=steps,
+            required_tools=[t for t in (data.get("required_tools") or []) if t],
             examples=data.get("examples", []),
             regression=_parse_regression(data.get("regression", [])),
             source=data.get("source", "builtin"),

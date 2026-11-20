@@ -47,6 +47,17 @@ class Skill:
     patterns: List[str] = field(default_factory=list)    # 触发关键词
     tags: List[str] = field(default_factory=list)
     steps: List[SkillStep] = field(default_factory=list)
+    #: 这套技能需要用到的工具名清单。
+    #:
+    #: 存在意义：子智能体执行任务时应**先看技能、再按技能声明的工具裁剪工具表**，
+    #: 而不是把全量工具塞进上下文再从里面挑 —— 后者上下文太长，且容易工具漂移
+    #: （模型在全量工具里选错工具）。
+    #:
+    #: 留空有两种合法语义：
+    #:   - 纯判断/方法论技能，本来不需要任何工具（如"回答用户偏好"）
+    #:   - 旧技能/提炼遗漏（这种情况应由提炼侧补齐）
+    #: 运行时无法区分这两者，所以空清单 → 退回角色/全局工具表，不破坏现有行为。
+    required_tools: List[str] = field(default_factory=list)
     examples: List[str] = field(default_factory=list)
     # 回归样例(M3-05):结构化的可复现用例,发布前用来验证新版本没有退化
     # 形如: {"name": str, "input": {...}, "expect": {...}}
@@ -66,6 +77,24 @@ class Skill:
         """是否声明了结构化步骤(DAG 可执行)"""
         return any(s.tool is not None for s in self.steps)
 
+    def tools_needed(self) -> List[str]:
+        """这套技能实际需要的工具名（去重、保序）。
+
+        显式声明的 ``required_tools`` 优先；没声明才从 ``steps[].tool`` 聚合。
+        这样提炼侧可以直接写清单，旧技能也能靠 steps 自动获得一份。
+        """
+        if self.required_tools:
+            out = []
+            for t in self.required_tools:
+                if t and t not in out:
+                    out.append(t)
+            return out
+        out = []
+        for s in self.steps:
+            if s.tool and s.tool not in out:
+                out.append(s.tool)
+        return out
+
     def to_dict(self) -> Dict:
         return {
             "id": self.id,
@@ -76,6 +105,7 @@ class Skill:
             "patterns": self.patterns,
             "tags": self.tags,
             "steps": [s.to_dict() for s in self.steps],
+            "required_tools": self.tools_needed(),
             "examples": self.examples,
             "regression": self.regression,
             "source": self.source,

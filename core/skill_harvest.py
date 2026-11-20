@@ -889,6 +889,9 @@ def _build_skill_from_plan(
         patterns=patterns,
         tags=["harvested"],
         steps=steps,
+        # steps 故意留空（空参数 DAG 会从头失败），但**工具清单要留下** ——
+        # 它来自这次真实成功的执行序列，是子智能体按需裁剪工具集的依据。
+        required_tools=seq,
         examples=[user_input[:200]],
         regression=regression,
         id=f"skill_{uuid.uuid4().hex[:10]}",

@@ -22,3 +22,7 @@ author: reorganized
 created_at: '2026-11-20T16:12:40.518340'
 updated_at: '2026-11-20T16:12:40.518340'
 active: true
+required_tools:
+- create_tool
+- python_exec
+- web_search

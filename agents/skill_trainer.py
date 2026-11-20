@@ -40,6 +40,10 @@ EXTRACT_SCHEMA = {
         "capability": {"type": "string"},
         "patterns": {"type": "array", "items": {"type": "string"}},
         "tags": {"type": "array", "items": {"type": "string"}},
+        "required_tools": {
+            "type": "array", "items": {"type": "string"},
+            "description": "执行这套技能需要用到的工具名清单；纯判断类技能填空数组",
+        },
         "steps": {
             "type": "array",
             "items": {
@@ -150,7 +154,7 @@ class SkillTrainer(BaseAgent):
                 v = getattr(extracted, f, "")
                 if v and (f not in ts.partial_skill or not ts.partial_skill.get(f)):
                     ts.partial_skill[f] = v
-            for f in ("patterns", "tags"):
+            for f in ("patterns", "tags", "required_tools"):
                 vals = getattr(extracted, f, None) or []
                 if vals:
                     merged = list(ts.partial_skill.get(f, []) or [])
@@ -303,6 +307,7 @@ class SkillTrainer(BaseAgent):
             patterns=d.get("patterns", []) or [],
             tags=d.get("tags", []) or [],
             steps=steps,
+            required_tools=[t for t in (d.get("required_tools") or []) if t],
             examples=[t["content"][:200] for t in ts.evidence_turns if t.get("role") == "user"][:3],
             source="taught",
             author="local",
@@ -327,7 +332,11 @@ class SkillTrainer(BaseAgent):
 教导内容: {user_input}
 
 输出 JSON:
-{{"name": "简短英文名", "method": "方法论", "capability": "能力描述", "patterns": ["关键词"], "tags": ["标签"], "steps": [{{"id": "step1", "name": "步骤名", "description": "描述"}}]}}"""
+{{"name": "简短英文名", "method": "方法论", "capability": "能力描述", "patterns": ["关键词"], "tags": ["标签"], "required_tools": ["这套技能要用到的工具名"], "steps": [{{"id": "step1", "name": "步骤名", "description": "描述", "tool": "工具名或留空"}}]}}
+
+required_tools 填执行这套技能**实际需要调用的工具**（如 read_document、python_exec、publish_artifact）。
+纯判断/回答类、不需要任何工具的技能填空数组 []。不要把无关工具列进去 ——
+子智能体会按这份清单裁剪工具表，列多了会重新撑大上下文并造成工具漂移。"""
         try:
             obj = await self.think_json(prompt, EXTRACT_SCHEMA)
         except Exception as e:
@@ -353,6 +362,7 @@ class SkillTrainer(BaseAgent):
             patterns=obj.get("patterns", []) or [],
             tags=obj.get("tags", []) or [],
             steps=steps,
+            required_tools=[t for t in (obj.get("required_tools") or []) if t],
             examples=[user_input[:200]],
             source="taught",
             author="user",

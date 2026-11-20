@@ -8,6 +8,7 @@
          若无 active,默认激活 version 字符串最大的一个。
 - match() 只返回 active 版本。
 """
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -136,12 +137,43 @@ class SkillRegistry:
         scores.sort(key=lambda x: -x[0])
         return [s for _, s in scores[:top_k]]
 
+    @staticmethod
+    def _bigrams(text: str):
+        """中文 2-gram 集合（去掉空白）。用于长短语的部分匹配。"""
+        clean = re.sub(r"\s+", "", text)
+        if len(clean) < 2:
+            return {clean} if clean else set()
+        return {clean[i:i + 2] for i in range(len(clean) - 1)}
+
+    def _pattern_hit(self, pattern: str, text: str) -> float:
+        """一个触发词的命中强度：完全包含 > 高覆盖的部分匹配 > 0。
+
+        中文没有空格，patterns 常是"按格式输出报销文件"这类长短语，
+        用户几乎不会一字不差地复述 —— 单纯 `if pattern in text` 会**永远匹配不上**
+        （实机踩过：技能名都念对了，match 仍返回空，导致按技能裁剪工具永远走 fallback）。
+
+        所以用 2-gram 覆盖率做部分匹配：重叠过半算命中，给 0.35 分（低于子串命中的 0.5，
+        保证精确/子串匹配仍然优先）。
+        """
+        pl = pattern.lower().strip()
+        if not pl:
+            return 0.0
+        if pl in text:
+            return 1.0 if text == pl else 0.5
+        # 只对够长的中文短语做 2-gram 部分匹配，短词仍走严格包含（避免泛化过度）
+        if len(re.sub(r"\s+", "", pl)) < 4:
+            return 0.0
+        pb = self._bigrams(pl)
+        tb = self._bigrams(text)
+        if not pb or not tb:
+            return 0.0
+        overlap = len(pb & tb) / len(pb)
+        return 0.35 if overlap >= 0.5 else 0.0
+
     def _score(self, skill: Skill, text: str) -> float:
         score = 0.0
         for p in skill.patterns:
-            pl = p.lower()
-            if pl in text:
-                score += 1.0 if text == pl else 0.5
+            score += self._pattern_hit(str(p), text)
         if skill.capability:
             for kw in skill.capability.split()[:5]:
                 if kw.lower() in text:

@@ -57,6 +57,30 @@ def test_registry_match():
     assert res2 and res2[0].name == "code"
 
 
+def test_match_long_chinese_pattern_partial():
+    """长中文触发词用 2-gram 部分匹配 —— 用户不会一字不差复述。
+
+    实机踩过：技能 patterns 是「按格式输出报销文件」，用户说「按格式输出报销」，
+    单纯 `pattern in text` 永远匹配不上，导致按技能裁剪工具永远走 fallback。
+    """
+    reg = SkillRegistry([
+        Skill(name="报销", patterns=["按格式输出报销文件", "生成报销单"]),
+    ])
+    res = reg.match("按格式输出报销文件给我")
+    assert res and res[0].name == "报销"
+    # 部分重叠也应命中
+    res2 = reg.match("帮我按格式出一份报销文件")
+    assert res2 and res2[0].name == "报销"
+
+
+def test_match_short_pattern_stays_strict():
+    """短词仍走严格包含，避免泛化过度。"""
+    reg = SkillRegistry([Skill(name="x", patterns=["报销"])])
+    assert reg.match("报销") 
+    assert reg.match("这个不能报销吗")  # 2 字子串包含，仍命中
+    assert reg.match("完全无关的内容") == []
+
+
 def test_registry_match_score_exact_full():
     reg = SkillRegistry([Skill(name="t", patterns=["abc"])])
     exact = reg.match("abc")

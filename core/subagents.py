@@ -294,6 +294,64 @@ class SubAgentPool:
             return [t for t in self._all_tool_names() if t not in blocked_tools]
         return usable
 
+    def _skill_scoped_tools(
+        self,
+        goal: str,
+        role_tools: List[str],
+        allowed_skills: Optional[List[str]],
+    ) -> tuple:
+        """按"任务命中的技能"裁剪工具表 —— 技能优先，而非全量加载。
+
+        用户的核心要求：子智能体执行任务应**先找 skill，skill 里就带着该用的
+        tool**，用它裁剪工具集；而不是把全量工具塞进上下文再从中挑 ——
+        后者上下文太长，且模型容易在全量工具里选错（工具漂移）。
+
+        规则：
+        - 命中技能（受角色 allowed_skills 约束）→ 取这些技能 ``tools_needed()`` 的并集
+        - 与**角色白名单取交集**：技能不能越权使用角色本来就不允许的工具
+        - 技能清单为空 → 该技能不参与裁剪（退回角色白名单），不破坏旧技能
+        - 最终若没有任何技能给出有效清单 → 原样返回角色白名单
+
+        Returns:
+            ``(裁剪后的工具名列表, 命中的技能名列表)`` —— 后者用于观测/日志。
+        """
+        from skills.manager import get_skill_store
+
+        try:
+            matched = get_skill_store().match(goal, 3)
+        except (ValueError, OSError, RuntimeError):
+            matched = []
+        if allowed_skills is not None:
+            allowed = set(allowed_skills)
+            matched = [
+                s for s in matched
+                if s.name in allowed
+                or f"{s.name}@{getattr(s, 'version', '')}" in allowed
+            ]
+        if not matched:
+            return role_tools, []
+
+        allowed_set = set(role_tools)
+        tool_set = set()
+        hit_names = []
+        for s in matched:
+            needed = [t for t in (s.tools_needed() if hasattr(s, "tools_needed") else (getattr(s, "required_tools", None) or []))]
+            if not needed:
+                continue  # 空清单（纯判断技能 / 旧技能）不参与裁剪
+            hit_names.append(s.name)
+            for t in needed:
+                if t in allowed_set:
+                    tool_set.add(t)  # 取交集，技能不能越权
+
+        if not tool_set:
+            # 命中的技能都给了清单，但和角色白名单无交集 → 保守起见退回角色白名单
+            # （否则子智能体会"无工具可用"而静默什么都不做）
+            return role_tools, hit_names
+
+        # 保序：按角色白名单的顺序输出，便于稳定与去重
+        scoped = [t for t in role_tools if t in tool_set]
+        return scoped, hit_names
+
     def _build_context(
         self,
         *,
@@ -433,6 +491,18 @@ class SubAgentPool:
         task.role = role.role_id
         allowed_tools = self._allowed_tools(role, blocked_tools)
         allowed_skills = list(role.skills) or None
+
+        # --- 技能优先裁剪工具表 ---
+        # 先按任务目标匹配技能，用技能声明的 required_tools 裁剪角色白名单，
+        # 而不是把角色全量工具都塞进上下文。上下文更短，也避免工具漂移。
+        allowed_tools, scoped_skills = self._skill_scoped_tools(
+            task.goal, allowed_tools, allowed_skills
+        )
+        if scoped_skills:
+            self.logger.info(
+                "SubAgent",
+                f"{task.name} 按技能裁剪工具: 命中 {scoped_skills} -> {len(allowed_tools)} 个工具",
+            )
 
         findings: List[str] = []
         last_action_sig = ""
