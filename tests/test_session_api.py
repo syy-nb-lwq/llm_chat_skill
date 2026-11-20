@@ -132,3 +132,38 @@ def test_session_title_empty_for_silent_session(client, store):
     """建了没说话的会话 title 是空串，由前端显示成「新对话」。"""
     store.ensure_session("s1")
     assert client.get("/api/sessions").json()["sessions"][0]["title"] == ""
+
+
+# ===== 带附件的消息：标题不能被路径撑爆 =====
+#
+# 附件清单是拼在消息正文里的（`\n\n【已上传文件】\n- 名字 → 绝对路径`），
+# 目的是让下一次打开这条会话时还能知道"当时传的是哪个文件"。
+# 但标题不该带着 `D://pythonProject//...` 一起进侧栏。
+
+
+def test_session_title_ignores_attachment_block(client, store):
+    store.ensure_session("s1")
+    store.append_message(
+        "s1",
+        "user",
+        "帮我总结这份财报\n\n【已上传文件】\n- Q3财报.xlsx → D:////p////memory////uploads////s1////ab12_Q3财报.xlsx",
+    )
+    assert client.get("/api/sessions").json()["sessions"][0]["title"] == "帮我总结这份财报"
+
+
+def test_session_title_falls_back_to_filename(client, store):
+    """一个字没打、只传了文件 —— 用文件名当标题，比「已上传文件」有信息量。"""
+    store.ensure_session("s1")
+    store.append_message(
+        "s1",
+        "user",
+        "【已上传文件】\n- 竞品分析.pdf → D:////p////memory////uploads////s1////ab12_竞品分析.pdf",
+    )
+    assert client.get("/api/sessions").json()["sessions"][0]["title"] == "竞品分析.pdf"
+
+
+def test_session_title_handles_malformed_attachment_block(client, store):
+    """清单行没有 `→`（手工拼的、旧格式残留）也不能让标题变成一串路径。"""
+    store.ensure_session("s1")
+    store.append_message("s1", "user", "【已上传文件】\n没有分隔符的一行")
+    assert client.get("/api/sessions").json()["sessions"][0]["title"] == "（上传了文件）"

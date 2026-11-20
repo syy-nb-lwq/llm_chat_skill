@@ -112,13 +112,46 @@
 
 ## 4. 前端页面
 
+### 文件上传
+
+`read_document` / `locate_document` 早就有了，能读 docx / xlsx / pptx / pdf / md / txt / csv。
+但这两个工具吃的是**后端进程磁盘上的绝对路径**，而浏览器里的 `File` 对象对后端不可见 ——
+没有上传口，"能读 PDF"这件事用户完全无从触发。
+
+链路：
+
+```
+[dragover/drop 或 📎] → POST /api/upload (multipart)
+   ↓ 落盘 memory/uploads/<session>/<8位随机>_<原名>
+   ↓ detect_format 轻量探测（只读文件头，不解析正文）
+← {path, format, readable, hint}
+   ↓ 前端把路径拼进消息正文尾部的【已上传文件】段
+chat/{conn} → Agent 规划器看到路径 → 调 read_document → 回答
+```
+
+几个刻意的设计：
+
+1. **路径写在正文里，不走额外协议字段**。附件清单必须跟消息一起被存下来 ——
+   否则下次打开这条会话，用户看到「帮我总结这个文档」却不知道是哪个文件。
+   代价是正文里多一段路径，`ChatPanel.parseMessage` 在渲染时把它拆成 chip。
+2. **目录按会话分**，删会话时 `_purge_upload_dir` 整批清掉（否则就是磁盘垃圾）。
+   `default` 目录是"认不出 session_id"的公共落点，**任何情况下都不删**。
+3. **文件名只留 basename + 8 位随机前缀**：前者挡路径穿越（`../../.env`），
+   后者保证同名文件传两次不互相覆盖（历史消息里的路径要一直有效）。
+4. **`readable=False` 的文件不附上**。改了后缀的假 docx（比如旧版 `.doc` 硬改名）
+   能存但读不了，附上去只会让 agent 白跑一次 `read_document` 再报错 ——
+   在用户点「发送」之前就说清楚。
+5. **换会话清空待发送附件**。附件挂在一条会话上，切走还留着会让下一条消息
+   带着上一条会话的文件。
+6. 只收文档，不收图片/音视频（`SUPPORTED_SUFFIXES` 白名单，超出直接 415）。
+
 关键文件：
 
 - `frontend/src/App.vue` —— 页面骨架、事件总线接线、会话切换
 - `frontend/src/websocket.js` —— 连接、RPC、`switchSession`
 - `frontend/src/api/client.js` —— 唯一的 HTTP 出口（超时/错误结构/具名接口）
 - `frontend/src/config.js` —— 只回答"后端在哪"（`VITE_API_BASE` / `VITE_WS_BASE`）
-- `frontend/src/components/ChatPanel.vue` —— 对话区
+- `frontend/src/components/ChatPanel.vue` —— 对话区（含上传、附件 chip、拖拽）
 - `frontend/src/components/SessionList.vue` —— 会话列表（侧栏「💬 对话」）
 - `frontend/src/components/PatchReview.vue`
 - `frontend/src/components/EvolutionDashboard.vue`

@@ -14,6 +14,7 @@ import pytest
 from core.digest_window import DigestWindow
 from core.profile_digest import (
     build_transcript,
+    strip_attachments,
     digest_with_llm,
     validate_digest,
 )
@@ -324,3 +325,109 @@ def test_window_carries_assistant_text():
     win = DigestWindow(size=1, keep=0)
     batch = win.add("用户说的话", "助手的回答")
     assert batch[0]["assistant"] == "助手的回答"
+
+
+
+# ===== 附件不该变成记忆 =====
+#
+# 用户传了个 `Q3财报.xlsx`，正文尾部会带一段路径清单（给 read_document 用）。
+# 归纳时如果连路径一起看，很容易得出"用户经常处理财务表格" ——
+# 那是文件名说的，不是用户说的。
+
+def test_strip_attachments_removes_path_block():
+    text = "帮我总结一下这份财报\n\n【已上传文件】\n- Q3财报.xlsx → D:////x////uploads////s-1////ab12_Q3财报.xlsx"
+    assert strip_attachments(text) == "帮我总结一下这份财报"
+
+
+def test_strip_attachments_leaves_plain_text_alone():
+    assert strip_attachments("就是一句普通的话") == "就是一句普通的话"
+
+
+def test_transcript_hides_attachment_paths():
+    turns = [
+        {
+            "index": 1,
+            "user": "帮我总结这份财报\n\n【已上传文件】\n- Q3财报.xlsx → D:////x////ab12_Q3财报.xlsx",
+            "assistant": "好的。",
+        },
+        {"index": 2, "user": "重点是营收", "assistant": "营收同比…"},
+    ]
+    transcript = build_transcript(turns)
+    assert "帮我总结这份财报" in transcript
+    assert "uploads" not in transcript
+    assert "Q3财报.xlsx" not in transcript
+
+
+def test_quote_from_attachment_block_is_rejected():
+    """模型引用路径里的文字当证据 —— 必须拒，否则"综合"能靠文件名凑出来。"""
+    turns = [
+        {
+            "index": 1,
+            "user": "看看这个\n\n【已上传文件】\n- Q3财报.xlsx → D:////x////uploads////s-1////ab12_Q3财报.xlsx",
+            "assistant": "",
+        },
+        {"index": 2, "user": "重点是营收", "assistant": ""},
+    ]
+    fact = _fact(
+        content="用户经常处理财务表格",
+        evidence=[
+            {"turn": 1, "quote": "Q3财报.xlsx"},
+            {"turn": 2, "quote": "重点是营收"},
+        ],
+    )
+    assert validate_digest({"facts": [fact]}, turns) == []
+
+
+@pytest.mark.asyncio
+async def test_digest_prompt_has_no_attachment_paths():
+    """整条链路：真正发给模型的 transcript 里不能出现上传路径。
+
+    直接对 `digest_with_llm` 断言，而不是对写入器 —— 写入器在测试里会被
+    换成离线替身，那层根本不会调用提示词，断言就成空转了。
+    """
+    captured = {}
+
+    class RecordingLLM:
+        async def chat_with_retry(self, messages, **kwargs):
+            captured["prompt"] = messages[0]["content"]
+            return json.dumps({"facts": []})
+
+    turns = [
+        {
+            "index": 1,
+            "user": "看看这份财报\n\n【已上传文件】\n- Q3财报.xlsx → D:////x////uploads////s-1////ab12_Q3财报.xlsx",
+            "assistant": "好的。",
+        },
+        {"index": 2, "user": "重点是营收那一段", "assistant": "营收同比…"},
+    ]
+    await digest_with_llm(turns, llm=RecordingLLM())
+
+    assert captured.get("prompt"), "归纳没有真的发提示词"
+    assert "看看这份财报" in captured["prompt"]
+    assert "uploads" not in captured["prompt"]
+    assert "Q3财报.xlsx" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_only_attachment_counts_as_too_short():
+    """只传了文件、一个字没打 → 没有可归纳的内容，不该白调一次 LLM。
+
+    路径很长（80+ 字），如果阈值按原文算就永远过得了 —— 这条钉的是
+    "长度也按剥离后的正文算"。
+    """
+    called = {"n": 0}
+
+    class CountingLLM:
+        async def chat_with_retry(self, messages, **kwargs):
+            called["n"] += 1
+            return json.dumps({"facts": []})
+
+    turns = [
+        {
+            "index": 1,
+            "user": "\n\n【已上传文件】\n- " + "长" * 80 + ".xlsx → D:////x////uploads////a.xlsx",
+            "assistant": "好的。",
+        }
+    ]
+    await digest_with_llm(turns, llm=CountingLLM())
+    assert called["n"] == 0

@@ -1,11 +1,14 @@
 """FastAPI backend service."""
 import asyncio
 import json
+import re
+import shutil
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -390,10 +393,18 @@ async def get_session_messages(session_id: str, limit: int = 100):
 @app.delete("/api/sessions/{session_id}")
 @require_auth
 async def delete_session(session_id: str):
-    """删除会话及其全部内容(用户主动要求清除时使用)。"""
+    """删除会话及其全部内容(用户主动要求清除时使用)。
+
+    上传的原始文件一并删掉 —— 它们在 `memory/uploads/<session>/` 下，
+    只属于这条会话；会话没了，这些文件不会再被任何路径引用到。
+    """
     from core.memorykit import get_memory
 
     ok = get_memory().short_term.delete_session(session_id)
+    # 清理排在 404 之前：`delete_session` 靠 session_messages 的删除行数判断
+    # "删到了没有"，会话一条消息都没有时它会返回 False —— 但那种会话
+    # 照样可能有上传文件（新开会话、传完文件、一句话没说就删）。
+    _purge_upload_dir(session_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"session not found: {session_id}")
     return {"deleted": session_id}
@@ -1105,6 +1116,153 @@ async def download_artifact(name: str, request: Request, download: bool = False)
             "Cache-Control": "no-cache",
         },
     )
+
+
+# ===== 文件上传(用户把自己的文档送进来)=====
+#
+# `read_document` / `locate_document` 一直都有，但它们吃的是**后端进程能看见的
+# 绝对路径**。前端从来没有上传口 —— 用户桌面上的那个 PDF，从头到尾没有任何
+# 通道进到 `memory/` 里，所以"支持 PDF"这件事用户根本无从触发。
+#
+# 落盘:`memory/uploads/<session>/<8位随机>_<原名>`
+#   - 按会话分目录: 将来删会话能整批清掉，也不会互相覆盖
+#   - 带随机前缀: 同名文件传两次不会顶掉第一次 —— 历史消息里的路径要一直有效
+#   - 整个 `/memory/` 已在 .gitignore 里，上传物不会进版本库
+
+#: 上传目录(相对项目根)
+_UPLOAD_ROOT = Path(__file__).parent.parent / "memory" / "uploads"
+
+#: 单个文件上限。文档类够用；再大就超出"贴进来读一读"的范畴了
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+
+
+def _safe_upload_name(raw: str) -> str:
+    """把客户端给的文件名压成一个安全的 basename。
+
+    只保留最后一段 —— 客户端完全可以发 `../../.env` 这种名字。
+    中文必须保留：用户就是靠文件名认东西的。
+    """
+    name = Path((raw or "").replace("\\", "/")).name
+    # 控制字符和各平台的非法字符统统换掉
+    name = re.sub(r'[\x00-\x1f<>:"|?*]', "_", name).strip(" .")
+    if not name:
+        name = "upload"
+    # 过长的名字会顶爆文件系统的路径上限（Windows 260）
+    if len(name) > 120:
+        stem, dot, ext = name.rpartition(".")
+        name = (stem[:110] + "." + ext) if dot else name[:110]
+    return name
+
+
+def _safe_upload_folder(session_id: str) -> str:
+    """会话 id → 安全的目录名。认不出来的一律进 `default`。"""
+    folder = re.sub(r"[^A-Za-z0-9_-]", "", (session_id or "").strip())[:64]
+    return folder or "default"
+
+
+def _purge_upload_dir(session_id: str) -> None:
+    """删掉这条会话的上传文件（会话已删，这些路径再也不会被引用）。
+
+    **不能走 `_safe_upload_folder` 的 `default` 兜底**：那个目录是"认不出
+    会话 id"时的公共落点，删一个 id 异常的会话就把别人的文件一起清了。
+    """
+    folder = re.sub(r"[^A-Za-z0-9_-]", "", (session_id or "").strip())[:64]
+    if not folder:
+        return
+
+    target = (_UPLOAD_ROOT / folder).resolve()
+    try:
+        target.relative_to(_UPLOAD_ROOT.resolve())
+    except ValueError:
+        return  # 归一化后仍越界，宁可不删
+    if not target.is_dir():
+        return
+
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        # 会话记录已经删了，这里失败只能留下孤儿文件，不能反过来让接口报错
+        logger.warning("upload", f"清理上传目录失败: {exc}")
+
+
+@app.post("/api/upload")
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+    session_id: str = Form(""),
+):
+    """接收一个文档，落到上传区，返回后端可读的绝对路径。
+
+    返回的 `path` 会被前端拼进用户消息里（`【已上传文件】` 段），
+    Agent 的规划器看到路径就能直接调 `read_document` —— 不需要额外协议。
+    """
+    _resolve_artifact_user(request)  # 与产物接口同一套（本地单用户，恒通过）
+
+    from tools.document import SUPPORTED_SUFFIXES, detect_format
+
+    name = _safe_upload_name(file.filename or "")
+    suffix = Path(name).suffix.lower()
+
+    # 白名单挡在落盘之前：不要让"读不了的东西"先占到磁盘
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"不支持的文件类型: {suffix or '(无扩展名)'}。"
+                f"可读的格式: {', '.join(sorted(SUPPORTED_SUFFIXES))}。"
+                "（图片、音视频暂不支持）"
+            ),
+        )
+
+    # 多读 1 字节用来判断是否超限（比先 stat 再 read 更可靠：分块上传没有 Content-Length）
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="文件是空的")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限",
+        )
+
+    folder = _UPLOAD_ROOT / _safe_upload_folder(session_id)
+    target = folder / f"{uuid.uuid4().hex[:8]}_{name}"
+
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        # 先写 .part 再 rename: 半截文件绝不能被 read_document 看到
+        tmp = target.with_name(target.name + ".part")
+        tmp.write_bytes(data)
+        tmp.replace(target)
+    except OSError as exc:
+        logger.error("upload", f"写入上传文件失败: {exc}")
+        raise HTTPException(status_code=500, detail=f"保存文件失败: {exc}")
+
+    # 扩展名不可全信（`a.docx` 可能根本不是 OOXML）。这里只做**轻量探测**：
+    # detect_format 只读文件头，不解析正文，几十毫秒的事 —— 但能在用户点下
+    # "发送"之前就告诉他"这个文件其实读不了"，而不是等 agent 报错。
+    fmt = detect_format(target)
+    readable = fmt != "unknown"
+    hint = ""
+    if not readable:
+        hint = (
+            f"扩展名是 {suffix}，但内容不像该格式（比如改了后缀的旧版 .doc / "
+            "压缩包）。可以让 Agent 用 read_file 试试，或将另存为新格式后再传。"
+        )
+
+    logger.info(
+        "upload",
+        f"收到上传: {name} ({len(data)} B) → {target}",
+    )
+    return {
+        "name": name,
+        "path": str(target),
+        "size": len(data),
+        "suffix": suffix,
+        "format": fmt,
+        "readable": readable,
+        "hint": hint,
+        "session_id": folder.name,
+    }
 
 
 # ===== 用户画像面板(A-09 / U-04)=====

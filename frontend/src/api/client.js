@@ -82,8 +82,14 @@ export async function request(path, options = {}) {
     signal: controller.signal,
   }
   if (body !== undefined) {
-    init.headers['Content-Type'] = 'application/json'
-    init.body = JSON.stringify(body)
+    if (typeof FormData !== 'undefined' && body instanceof FormData) {
+      // 上传必须让浏览器自己写 Content-Type —— 里面带 boundary，
+      // 手写 'multipart/form-data' 会导致服务端解析不出字段。
+      init.body = body
+    } else {
+      init.headers['Content-Type'] = 'application/json'
+      init.body = JSON.stringify(body)
+    }
   }
 
   try {
@@ -130,8 +136,24 @@ export const skillsApi = {
     ),
 }
 
-export const sessionApi = {
-  /** 全部会话（新→旧），每条带 title / message_count / updated_at */
+export const uploadApi = {
+  /**
+   * 把一个本地文件送到后端上传区，拿回后端可读的绝对路径。
+   *
+   * 文档工具（read_document）吃的是**后端磁盘上的路径**，浏览器里的 File
+   * 对象对后端不可见 —— 不落盘，能力再全也让用户无从触发。
+   *
+   * 超时给足 2 分钟：30 MB 的 PDF 走局域网也够用了。
+   */
+  send: (file, sessionId) => {
+    const form = new FormData()
+    form.append('file', file, file.name)
+    form.append('session_id', sessionId || '')
+    return request('/api/upload', { method: 'POST', body: form, timeout: 120000 })
+  },
+}
+
+export const sessionApi = {  /** 全部会话（新→旧），每条带 title / message_count / updated_at */
   list: () => request('/api/sessions'),
 
   /** 某个会话的历史消息（短期记忆，全量保留） */

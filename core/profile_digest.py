@@ -161,6 +161,25 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+#: 消息正文里附件清单的分节标记（与前端 ChatPanel / session_memory 一致）
+_ATTACH_HEADER = "【已上传文件】"
+
+
+def strip_attachments(text: str) -> str:
+    """去掉正文尾部的【已上传文件】路径清单。
+
+    归纳看的是"用户说了什么"，不是"他传了个存在 D 盘的文件"。
+    不清掉的话，一段传过 `Q3财报.xlsx` 的对话会被归纳成
+    "用户经常处理财务表格" —— 那是文件名说的，不是用户说的。
+
+    注意：`build_transcript` 和 `validate_digest` **必须用同一个剥离版本**，
+    否则模型引用的原话在校验时对不上，整条结论会被误判为编造。
+    """
+    raw = text or ""
+    idx = raw.rfind(_ATTACH_HEADER)
+    return raw[:idx].rstrip() if idx >= 0 else raw
+
+
 def build_transcript(turns: Sequence[Dict[str, Any]]) -> str:
     """把一段对话渲染成带轮次号的文本。
 
@@ -170,7 +189,7 @@ def build_transcript(turns: Sequence[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for turn in turns:
         idx = turn.get("index")
-        user = (turn.get("user") or "").strip()
+        user = strip_attachments(turn.get("user") or "").strip()
         assistant = (turn.get("assistant") or "").strip()
         lines.append(f"[第 {idx} 轮]")
         lines.append(f"用户：{user}")
@@ -204,7 +223,7 @@ def validate_digest(
             idx = int(turn.get("index"))
         except (TypeError, ValueError):
             continue
-        user_norm = _norm(turn.get("user") or "")
+        user_norm = _norm(strip_attachments(turn.get("user") or ""))
         user_by_turn[idx] = user_norm
         whole += user_norm + _norm(turn.get("assistant") or "")
 
@@ -325,7 +344,7 @@ async def digest_with_llm(
     # 阈值刻意设得很低：这句「我叫老王，自己是做电商的」只有 19 字，
     # 却是一条完整的身份陈述 —— 用 20 字卡会把人间蒸发。
     # 「继续」「好」这类早已被 `DigestWindow` 挡在窗口外，这里只是兜底。
-    total = sum(len((t.get("user") or "").strip()) for t in turns)
+    total = sum(len(strip_attachments(t.get("user") or "").strip()) for t in turns)
     if total < 10:
         return []
 

@@ -61,6 +61,7 @@
         :connected="isConnected"
         :messages="messages"
         :busy="busy"
+        :session-id="activeSessionId"
         @send="onSend"
         @new-session="createSession"
         @feedback="sendFeedback"

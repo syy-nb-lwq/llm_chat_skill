@@ -115,13 +115,35 @@ _FIRST_USER_MESSAGE_SQL = """
 _TITLE_MAX_CHARS = 36
 
 
+#: 带附件的消息里，正文尾部的路径清单分节标记（与前端 ChatPanel 一致）
+_ATTACH_HEADER = "【已上传文件】"
+
+#: 清单条目形如 `- 报告.docx → D:\...\uploads\s-x\ab12_报告.docx`
+_ATTACH_LINE_RE = re.compile(r"^-\s+(.+?)\s*→", re.MULTILINE)
+
+
 def _make_title(text: str) -> str:
     """把首条用户消息压成一行标题。
 
     用户输入里常有换行（贴进来的日志、代码），列表里必须压平 —— 否则一条
     消息就把整个侧栏撑开。截断用省略号结尾，让人知道后面还有内容。
+
+    带附件的消息要先把 `【已上传文件】` 那段路径清单切掉：不清掉的话，
+    标题会变成「【已上传文件】 - 报告.pdf → D:\\pythonProject\\...」，
+    在侧栏里又长又认不出是什么。
     """
-    flat = re.sub(r"\s+", " ", (text or "").strip())
+    raw = text or ""
+    idx = raw.rfind(_ATTACH_HEADER)
+    if idx >= 0:
+        head = raw[:idx].strip()
+        if head:
+            raw = head
+        else:
+            # 只传了文件、一个字没打 —— 用文件名当标题，比「已上传文件」有信息量
+            match = _ATTACH_LINE_RE.search(raw[idx:])
+            raw = match.group(1) if match else "（上传了文件）"
+
+    flat = re.sub(r"\s+", " ", raw.strip())
     if not flat:
         return ""
     if len(flat) <= _TITLE_MAX_CHARS:
