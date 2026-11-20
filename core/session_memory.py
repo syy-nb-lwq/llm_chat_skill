@@ -93,6 +93,42 @@ def _now() -> str:
     return datetime.now().isoformat()
 
 
+#: 会话列表的标题来源：每个会话 `reset_at_seq` 之后的第一条 user 消息。
+#:
+#: 一条 SQL 把所有会话一次取完，**不要按会话循环查** —— 每次 _connect 都是
+#: 一次新连接，会话攒到几百条时打开列表能明显卡住。
+#: 子查询先算出每个会话的最小 seq（只算 reset 之后的），再回表取内容；
+#: `session_messages.seq` 在会话内唯一，所以这个 join 不会一对多。
+_FIRST_USER_MESSAGE_SQL = """
+    SELECT m.session_id AS session_id, m.content AS content
+    FROM session_messages m
+    JOIN (
+        SELECT sm.session_id AS sid, MIN(sm.seq) AS min_seq
+        FROM session_messages sm
+        JOIN sessions s ON s.session_id = sm.session_id
+        WHERE sm.role = 'user' AND sm.seq > s.reset_at_seq
+        GROUP BY sm.session_id
+    ) t ON t.sid = m.session_id AND t.min_seq = m.seq
+"""
+
+#: 标题最多显示的字数。侧栏一行放不下更多，超出部分要能看出被截断了。
+_TITLE_MAX_CHARS = 36
+
+
+def _make_title(text: str) -> str:
+    """把首条用户消息压成一行标题。
+
+    用户输入里常有换行（贴进来的日志、代码），列表里必须压平 —— 否则一条
+    消息就把整个侧栏撑开。截断用省略号结尾，让人知道后面还有内容。
+    """
+    flat = re.sub(r"\s+", " ", (text or "").strip())
+    if not flat:
+        return ""
+    if len(flat) <= _TITLE_MAX_CHARS:
+        return flat
+    return flat[: _TITLE_MAX_CHARS - 1] + "…"
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 
@@ -360,14 +396,31 @@ class SessionMemoryStore:
             conn.close()
 
     def list_sessions(self) -> List[Dict]:
+        """会话列表（新→旧），每条带上 `title`。
+
+        **title 是现算的，不是列**：建表时会话里还没有内容，加一列就得
+        写迁移 + 在每次 append 时回填；而标题只是"给列表认人用"，取首条
+        用户消息足够。真要改名，那时候再落列也不迟。
+
+        标题的起点是 `reset_at_seq` 之后：reset 的语义是"这会话从这儿重新
+        开始"，标题若还挂着 reset 之前那句，列表里就会指着一段用户已经
+        忘掉的内容。
+        """
         conn = self._connect()
         try:
-            rows = conn.execute(
+            rows = [dict(r) for r in conn.execute(
                 "SELECT * FROM sessions ORDER BY updated_at DESC"
-            ).fetchall()
-            return [dict(r) for r in rows]
+            ).fetchall()]
+            titles = {
+                r["session_id"]: r["content"]
+                for r in conn.execute(_FIRST_USER_MESSAGE_SQL).fetchall()
+            }
         finally:
             conn.close()
+        for row in rows:
+            # 空会话（建了没说话）title 为空串，由前端显示成「新对话」
+            row["title"] = _make_title(titles.get(row["session_id"], ""))
+        return rows
 
     def mark_reset(self, session_id: str) -> int:
         """标记"工作上下文已清空"。

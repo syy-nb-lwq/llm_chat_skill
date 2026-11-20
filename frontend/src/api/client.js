@@ -131,9 +131,16 @@ export const skillsApi = {
 }
 
 export const sessionApi = {
+  /** 全部会话（新→旧），每条带 title / message_count / updated_at */
+  list: () => request('/api/sessions'),
+
   /** 某个会话的历史消息（短期记忆，全量保留） */
   messages: (sessionId, limit = 200) =>
     request('/api/session/messages', { query: { session_id: sessionId, limit } }),
+
+  /** 删除会话及其全部内容——不可恢复，调用方必须先让用户确认 */
+  remove: (sessionId) =>
+    request(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
 }
 
 export const memoryApi = {

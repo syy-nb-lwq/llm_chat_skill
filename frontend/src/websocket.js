@@ -83,14 +83,7 @@ class WsService {
 
           // 触发 init topic (服务端订阅了 init/*)
           // 带上 session_id:服务端据此恢复上次的会话(会话内容全量保留)
-          await this._call('publish', {
-            topics: [`init/${this.clientId}`],
-            data: {
-              client_id: this.clientId,
-              session_id: this._loadSessionId(),
-            },
-            sync: false,
-          })
+          await this._init(this._loadSessionId())
 
           // 注意:这里不 emit('connected')。
           // 'connected' 事件等服务端签发身份后再发。
@@ -271,6 +264,19 @@ class WsService {
     })
   }
 
+  /**
+   * 向服务端登记（或重新登记）身份。`sessionId` 为空时服务端新签发一个。
+   *
+   * 抽成方法是因为它现在有两个调用点：首次连接（onopen）和切换会话。
+   */
+  _init(sessionId = '') {
+    return this._call('publish', {
+      topics: [`init/${this.clientId}`],
+      data: { client_id: this.clientId, session_id: sessionId },
+      sync: false,
+    })
+  }
+
   // 订阅 topic
   async _subscribe(topics) {
     try {
@@ -326,6 +332,35 @@ class WsService {
 
   reset() {
     this._publish(`reset/${this.clientId}`, {})
+  }
+
+  /**
+   * 切到另一个会话；`sessionId` 留空 = 开一个**新**会话。
+   *
+   * 服务端换会话的方式就是"用另一个 session_id 重新登记身份"：`issue_identity`
+   * 会拿新 session_id 去 `get_or_create`（没跑过就新建 Agent），所以只要重发
+   * 一次 init —— 不用断开重连，topic 还是同一个。
+   *
+   * 注意 **connected 事件是异步回来的**：这个方法 resolve 时 `this.session`
+   * 还是旧值，新 session_id 要等 `connected` 事件（服务端签发后推送）才落地。
+   * 调用方不要拿 resolve 时机当"切换完成"。
+   */
+  async switchSession(sessionId = '') {
+    const sid = String(sessionId || '')
+    try {
+      if (sid) {
+        this.session = { client_id: this.session?.client_id || '', session_id: sid }
+        localStorage.setItem('skill_agent_session', JSON.stringify(this.session))
+      } else {
+        // 新会话必须先清掉本地记录：否则下次重连 `_loadSessionId` 又把旧会话
+        // 带回来，用户会看到"新对话里怎么还有刚才那些话"
+        this.session = null
+        localStorage.removeItem('skill_agent_session')
+      }
+    } catch (e) {
+      console.warn('[WS] 无法保存 session', e)
+    }
+    return this._init(sid)
   }
 
   ping() {

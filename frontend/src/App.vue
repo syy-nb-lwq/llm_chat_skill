@@ -12,6 +12,7 @@
     <main class="main-content">
       <aside class="sidebar">
         <div class="sidebar-tabs">
+          <button :class="{ active: activeTab === 'sessions' }" @click="activeTab = 'sessions'">💬 对话</button>
           <button :class="{ active: activeTab === 'tools' }" @click="activeTab = 'tools'">🔧 工具</button>
           <button :class="{ active: activeTab === 'skills' }" @click="activeTab = 'skills'">📘 技能</button>
           <button :class="{ active: activeTab === 'flow' }" @click="activeTab = 'flow'">🔀 流转</button>
@@ -20,6 +21,17 @@
           <button :class="{ active: activeTab === 'dashboard' }" @click="activeTab = 'dashboard'">📈 仪表盘</button>
         </div>
 
+        <div v-show="activeTab === 'sessions'" class="sidebar-content">
+          <SessionList
+            :sessions="sessions"
+            :active-id="activeSessionId"
+            :busy="busy"
+            :loading="sessionsLoading"
+            @select="selectSession"
+            @create="createSession"
+            @remove="removeSession"
+          />
+        </div>
         <div v-show="activeTab === 'tools'" class="sidebar-content">
           <ToolList :tools="tools" />
         </div>
@@ -48,8 +60,9 @@
       <ChatPanel
         :connected="isConnected"
         :messages="messages"
+        :busy="busy"
         @send="onSend"
-        @reset="onReset"
+        @new-session="createSession"
         @feedback="sendFeedback"
       />
     </main>
@@ -68,14 +81,15 @@ import ChatPanel from './components/ChatPanel.vue'
 import PatchReview from './components/PatchReview.vue'
 import EvolutionDashboard from './components/EvolutionDashboard.vue'
 import MemoryPanel from './components/MemoryPanel.vue'
+import SessionList from './components/SessionList.vue'
 
 export default {
   name: 'App',
-  components: { ToolList, SkillList, SkillManager, FlowPanel, ChatPanel, PatchReview, EvolutionDashboard, MemoryPanel },
+  components: { ToolList, SkillList, SkillManager, FlowPanel, ChatPanel, PatchReview, EvolutionDashboard, MemoryPanel, SessionList },
   data() {
     return {
       isConnected: false,
-      activeTab: 'flow',  // 默认显示流转面板
+      activeTab: 'sessions',  // 默认显示会话列表（打开就想接着上次，或者开新的）
       tools: [],
       skills: [],
       messages: [],
@@ -84,7 +98,19 @@ export default {
       pendingIndex: -1,
       loading: false,
       recentLearned: null,
+      // 会话列表：库里有什么就显示什么（新→旧）
+      sessions: [],
+      sessionsLoading: false,
+      // 当前会话 id。**必须放在 data 里**，不能算成 computed ——
+      // wsService.session 是普通对象，改了不会触发 Vue 重新渲染
+      activeSessionId: '',
     }
+  },
+  computed: {
+    /** 有一轮回答正在流式输出（pendingIndex 指向那条空助手气泡） */
+    busy() {
+      return this.pendingIndex >= 0
+    },
   },
   mounted() {
     this.initWebSocket()
@@ -138,12 +164,17 @@ export default {
     },
 
     initWebSocket() {
-      wsService.on(EV.CONNECTED, () => {
+      wsService.on(EV.CONNECTED, (payload) => {
         this.isConnected = true
         // 身份签发后立刻恢复历史 —— 否则一刷新页面，之前的对话就“消失”了。
         // 会话内容本来就是全量保留在 memory/sessions.db 里的，
         // 只是前端从来没去取过。
+        //
+        // **切换会话也走这里**：`switchSession` 会让服务端重新签发身份并发
+        // connected，所以 activeSessionId / 历史 / 列表三处一起刷新。
+        this.activeSessionId = (payload && payload.session_id) || ''
         this.loadHistory()
+        this.loadSessions()
       })
       wsService.on(EV.DISCONNECTED, () => { this.isConnected = false })
 
@@ -297,11 +328,88 @@ export default {
       wsService.chat(text)
     },
 
-    onReset() {
+    // ===== 会话列表 =====
+
+    /** 拉会话列表（新→旧）。每条带 title，标题由后端从首条用户消息生成 */
+    async loadSessions() {
+      this.sessionsLoading = true
+      try {
+        const data = await sessionApi.list()
+        this.sessions = data.sessions || []
+      } catch (e) {
+        // 列表拉不到不影响聊天，只是侧栏空着
+        console.warn('[Sessions] 列表加载失败:', e)
+      } finally {
+        this.sessionsLoading = false
+      }
+    },
+
+    /** 清掉当前这屏对话（不动库里的数据） */
+    clearConversation() {
       this.messages = []
       this.turns = []
       this.currentTurn = null
-      wsService.reset()
+      this.pendingIndex = -1
+    },
+
+    /**
+     * 切到另一条会话。
+     *
+     * 换会话 = 让服务端按新 session_id 重新签发身份（`wsService.switchSession`），
+     * 回来后 connected 事件会把历史装上。所以这里只负责"先把这屏清干净"。
+     *
+     * `busy` 时直接拒绝：一轮回答跑到一半就换会话，旧那轮的 delta 会推给
+     * 同一个连接（topic 是按连接走的），新会话界面里会冒出上一条回答的尾巴。
+     */
+    async selectSession(sessionId) {
+      if (this.busy) return
+      if (sessionId === this.activeSessionId) return
+      this.clearConversation()
+      // 乐观更新：不等服务端回包，列表高亮立刻跟着走
+      this.activeSessionId = sessionId
+      try {
+        await wsService.switchSession(sessionId)
+      } catch (e) {
+        console.error('[Sessions] 切换失败:', e)
+        this.messages.push({ role: 'system', content: '切换会话失败: ' + (e.message || e) })
+      }
+    },
+
+    /** 开一条全新会话：不传 session_id，由服务端签发 */
+    async createSession() {
+      if (this.busy) return
+      this.clearConversation()
+      this.activeSessionId = ''
+      try {
+        await wsService.switchSession('')
+      } catch (e) {
+        console.error('[Sessions] 新建失败:', e)
+        this.messages.push({ role: 'system', content: '新建对话失败: ' + (e.message || e) })
+      }
+    },
+
+    async removeSession(sessionId) {
+      if (this.busy) return
+      const label = (this.sessions.find((s) => s.session_id === sessionId) || {}).title || '这条对话'
+      if (!confirm(`删除「${label}」?\n\n对话内容会一起删掉,不可恢复。`)) return
+
+      try {
+        await sessionApi.remove(sessionId)
+      } catch (e) {
+        // 404 = 库里本来就没有（比如刚新建还没说话就删），当成已删除
+        if (e.status !== 404) {
+          this.messages.push({ role: 'system', content: '删除失败: ' + (e.message || e) })
+          return
+        }
+      }
+
+      const wasActive = sessionId === this.activeSessionId
+      const remaining = this.sessions.filter((s) => s.session_id !== sessionId)
+      this.sessions = remaining
+      if (!wasActive) return
+      // 删掉的正是当前这条：挪到剩下的第一条，一条都没了就开新的
+      if (remaining.length) await this.selectSession(remaining[0].session_id)
+      else await this.createSession()
     },
   },
 }
@@ -356,15 +464,21 @@ body {
 .sidebar-tabs {
   display: flex;
   border-bottom: 1px solid rgba(255,255,255,0.05);
+  /* 7 个标签在 320px 里刚好排得下；再窄（小窗口/高 DPI）就横向滚，
+     而不是换行把侧栏顶部顶掉一大块 */
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.sidebar-tabs::-webkit-scrollbar { display: none; }
 .sidebar-tabs button {
-  flex: 1;
-  padding: 10px 4px;
+  flex: 1 0 auto;
+  padding: 10px 2px;
   background: none;
   border: none;
   color: #999;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10px;
+  white-space: nowrap;
   border-bottom: 2px solid transparent;
 }
 .sidebar-tabs button.active {

@@ -298,7 +298,12 @@ async def get_features():
 @app.get("/api/sessions")
 @require_auth
 async def list_sessions():
-    """列出全部会话（本地单用户）。"""
+    """列出全部会话（本地单用户），新→旧。
+
+    `title` 由后端从首条用户消息现算（见 `SessionMemoryStore.list_sessions`）：
+    列表要让人认出"这条聊的是什么"，只给一个 `s-1795083884893-4fb3c78e`
+    等于没给。
+    """
     from core.memorykit import get_memory
 
     rows = get_memory().short_term.list_sessions()
@@ -306,6 +311,7 @@ async def list_sessions():
         "sessions": [
             {
                 "session_id": r["session_id"],
+                "title": r.get("title", ""),
                 "message_count": r["message_count"],
                 "created_at": r["created_at"],
                 "updated_at": r["updated_at"],

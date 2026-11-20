@@ -66,13 +66,18 @@
         :disabled="!connected"
       />
       <button @click="sendMessage" :disabled="!connected || !inputMessage">发送</button>
-      <!-- 「新对话」而不是「重置」：它做的是让模型忘掉上文，历史仍留在库里
-           （可导出、可查），所以叫重置会让人以为数据被删了 -->
+      <!--
+        「新对话」= 真的开一条新会话（左侧列表里会多一条），不是清空当前这条。
+        以前这个位置是 ↺「重置」，做的是"同一个会话里让模型忘掉上文"——
+        用户在列表里看不到任何变化，自然就问"新对话在哪儿建"。
+        回答还在流的时候禁掉：切走会让上一条回答的增量飘进新会话。
+      -->
       <button
-        @click="resetChat"
+        @click="$emit('new-session')"
         class="reset-btn"
-        title="新对话（清空当前上下文，历史仍保留在库里）"
-      >↺</button>
+        :disabled="busy"
+        :title="busy ? '正在生成回答，等它说完再开新对话' : '新对话（当前这条会留在左侧列表里）'"
+      >＋</button>
     </div>
   </div>
 </template>
@@ -87,8 +92,10 @@ export default {
   props: {
     connected: Boolean,
     messages: Array,
+    /** 有一轮回答正在流式输出 */
+    busy: Boolean,
   },
-  emits: ['send', 'reset', 'feedback'],
+  emits: ['send', 'new-session', 'feedback'],
   data() {
     return {
       inputMessage: '',
@@ -129,7 +136,6 @@ export default {
       this.$emit('send', msg)
       this.inputMessage = ''
     },
-    resetChat() { this.$emit('reset') },
     // 回答反馈:👍 / 👎
     sendFeedback(msg, accepted) {
       if (!msg || !msg.execution_id) return

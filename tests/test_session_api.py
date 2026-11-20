@@ -86,3 +86,49 @@ def test_delete_session(client, store):
 def test_delete_unknown_session(client, store):
     r = client.delete("/api/sessions/s-nope")
     assert r.status_code == 404
+
+
+# ===== 列表标题（会话列表靠它认人） =====
+#
+# 没有 title 列，标题是从首条用户消息现算的（见
+# `SessionMemoryStore.list_sessions`）。下面这几条钉的是"算规则"本身。
+
+
+def test_session_title_comes_from_first_user_message(client, store):
+    store.ensure_session("s1")
+    store.append_message("s1", "system", "系统提示不算标题")
+    store.append_message("s1", "user", "帮我写个爬虫")
+    store.append_message("s1", "user", "再改一下频率")
+    r = client.get("/api/sessions")
+    assert r.json()["sessions"][0]["title"] == "帮我写个爬虫"
+
+
+def test_session_title_is_flattened_to_one_line(client, store):
+    """用户经常整段日志/代码贴进来，标题必须压成一行，否则侧栏被撑开。"""
+    store.ensure_session("s1")
+    store.append_message("s1", "user", "第一行\n\n  第二行\t第三行")
+    r = client.get("/api/sessions")
+    assert r.json()["sessions"][0]["title"] == "第一行 第二行 第三行"
+
+
+def test_session_title_is_truncated(client, store):
+    store.ensure_session("s1")
+    store.append_message("s1", "user", "长" * 100)
+    title = client.get("/api/sessions").json()["sessions"][0]["title"]
+    assert len(title) == 36
+    assert title.endswith("…")
+
+
+def test_session_title_follows_reset(client, store):
+    """reset 之后标题要换成新话题 —— 不然列表指着一段已经忘掉的内容。"""
+    store.ensure_session("s1")
+    store.append_message("s1", "user", "旧话题")
+    store.mark_reset("s1")
+    store.append_message("s1", "user", "新话题")
+    assert client.get("/api/sessions").json()["sessions"][0]["title"] == "新话题"
+
+
+def test_session_title_empty_for_silent_session(client, store):
+    """建了没说话的会话 title 是空串，由前端显示成「新对话」。"""
+    store.ensure_session("s1")
+    assert client.get("/api/sessions").json()["sessions"][0]["title"] == ""
