@@ -55,7 +55,7 @@ def _break_store(critic):
 # ============================================================
 
 def test_store_heals_after_dir_deleted(tmp_path):
-    """目录被删 → 存储层自己建回来。"""
+    """库被删 → 存储层自己建回来，且能继续写。"""
     import shutil
 
     from core.memory import MemoryStore
@@ -67,7 +67,8 @@ def test_store_heals_after_dir_deleted(tmp_path):
         trace_id="t1", scenario="x", intent="task", selected_skill="s",
         success_rate=0.0, fallback_count=0, latency_ms=1.0, diagnosis="e",
     )
-    assert store.failures_dir.exists()
+    assert store.db_path.exists()
+    assert len(store.get_recent_failures(top_k=5)) == 1
 
 
 # ============================================================

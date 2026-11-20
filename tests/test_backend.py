@@ -1,6 +1,5 @@
 """FastAPI integration tests."""
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -165,27 +164,24 @@ def test_approve_patch_persists_skill_method(client, tmp_path, monkeypatch):
     )
 
     memory_store = MemoryStore(base_path=tmp_path / "memory")
-    patch_file = memory_store.patches_dir / "patch_demo.json"
-    patch_file.write_text(
-        json.dumps(
-            {
-                "id": "patch_demo",
-                "trace_id": "trace_1",
-                "timestamp": "2026-07-16T12:00:00",
+    from core.memory import SkillPatch
+
+    memory_store.add_pending_patch(
+        SkillPatch(
+            id="patch_demo",
+            trace_id="trace_1",
+            timestamp="2026-07-16T12:00:00",
+            target_skill="demo",
+            patch_type="improve_skill",
+            diagnosis="needs update",
+            suggestion={
+                "type": "improve_skill",
                 "target_skill": "demo",
-                "patch_type": "improve_skill",
-                "diagnosis": "needs update",
-                "suggestion": {
-                    "type": "improve_skill",
-                    "target_skill": "demo",
-                    "method": "new method",
-                },
-                "confidence": 0.9,
-                "status": "pending",
+                "method": "new method",
             },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+            confidence=0.9,
+            status="pending",
+        )
     )
 
     mgr.reset_skill_store()

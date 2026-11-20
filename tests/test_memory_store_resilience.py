@@ -12,6 +12,13 @@
 
 **目录没了应该被当成"没有记录",而不是"崩溃"。**
 日志清理、部署脚本、磁盘清理都可能删掉它 —— 不该要求运维知道这个内部结构。
+
+## 载体换成 SQLite 之后
+
+库文件被删比目录被删更严重:目录没了只是路径失效,库没了是数据没了。
+但契约不变 —— 单例攥着失效路径时,**写不能抛、读要返回空**,
+而且下一次写要能把库重新建出来,让自演化链路继续跑下去。
+所以这里的断言从"目录被重建"改成"数据真的写进去了"。
 """
 
 import pytest
@@ -44,15 +51,15 @@ def test_record_failure_after_dir_wiped(store):
         diagnosis="boom",
     )
     assert rec is not None
-    assert (store.failures_dir).exists()
+    assert store.db_path.exists()
+    assert [f.id for f in store.get_recent_failures(top_k=5)] == [rec.id]
 
 
 def test_record_success_after_dir_wiped(store):
     """目录被删后记成功 —— 必须成功,目录自建。"""
     _wipe(store)
     store.record_success(trace_id="t1", scenario="x", matched_skill="s", latency_ms=10)
-    assert store.successes_dir.exists()
-    assert (store.successes_dir / "success_index.jsonl").exists()
+    assert [r.trace_id for r in store.get_recent_successes()] == ["t1"]
 
 
 def test_add_pending_patch_after_dir_wiped(store):
@@ -65,7 +72,7 @@ def test_add_pending_patch_after_dir_wiped(store):
         diagnosis="d", suggestion="", confidence=0.5,
     )
     store.add_pending_patch(patch)
-    assert store.patches_dir.exists()
+    assert [p.id for p in store.get_pending_patches()] == ["p1"]
 
 
 def test_write_audit_after_dir_wiped(store):
@@ -81,9 +88,10 @@ def test_record_failure_to_existing_dir_still_works(store):
         trace_id="t1", scenario="x", intent="task", selected_skill="s",
         success_rate=0.0, fallback_count=0, latency_ms=1.0, diagnosis="e",
     )
-    months = list(store.failures_dir.iterdir())
-    assert len(months) == 1
-    assert len(list(months[0].glob("*.json"))) == 1
+    assert store.db_path.exists()
+    recent = store.get_recent_failures(top_k=5)
+    assert len(recent) == 1
+    assert recent[0].scenario == "x"
 
 
 # ============================================================

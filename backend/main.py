@@ -823,13 +823,12 @@ async def approve_patch(patch_id: str):
         raise HTTPException(status_code=403, detail="self evolution disabled")
 
     store = get_memory_store()
-    patch_file = store.patches_dir / f"{patch_id}.json"
-    if not patch_file.exists():
+    patch = store.get_patch(patch_id)
+    if patch is None:
         raise HTTPException(status_code=404, detail=f"patch not found: {patch_id}")
 
-    data = json.loads(patch_file.read_text(encoding="utf-8"))
-    suggestion = data.get("suggestion", {}) or {}
-    target_skill = suggestion.get("target_skill") or data.get("target_skill")
+    suggestion = patch.suggestion or {}
+    target_skill = suggestion.get("target_skill") or patch.target_skill
     updates = {}
     # 支持多种字段更新,不只限于 method
     for field in ("method", "capability", "patterns"):
@@ -903,7 +902,7 @@ async def approve_patch(patch_id: str):
             {
                 "patch_id": patch_id,
                 "target_skill": target_skill,
-                "diagnosis": data.get("diagnosis", ""),
+                "diagnosis": patch.diagnosis,
                 "updates": updates,
                 "files": applied_files,
                 "validation": validation,

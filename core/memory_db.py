@@ -9,14 +9,17 @@
 ## 它不存什么
 
 **不存经验**：失败诊断、成功模式、待审补丁都不在这里 —— 它们在
-`core/memory.py::MemoryStore`（JSON 文件）。
+`core/memory.py::MemoryStore` 的 `experience` 表（同一个库文件）。
 
 两库**职责互斥**，不是同一份数据的两个副本：
 
-| 问题 | 库 | 载体 |
-|---|---|---|
-| 这个人是谁？ | `MemoryDB` | `memory/semantic_memory.db` |
-| 什么做法有效/无效？ | `MemoryStore` | `memory/failures/*.json`、`memory/successes/*`、`memory/skill_patches/*` |
+| 问题 | 库 | 表 | 为什么分开 |
+|---|---|---|---|
+| 这个人是谁？ | `MemoryDB` | `memories` | 要语义检索 + 去重合并 + 置信度 |
+| 什么做法有效/无效？ | `MemoryStore` | `experience` | 要按时间倒序 + 完整原文可读 |
+
+两者都在 `memory/semantic_memory.db` 里，所以"某条经验属于哪个画像"
+可以一条 SQL 关联，标量统计不用跨库对账。
 
 `add()` 会拒绝非画像类型（`ValueError`），把这条边界从"事实"变成"契约"。
 """

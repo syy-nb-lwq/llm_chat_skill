@@ -151,9 +151,7 @@ async def test_corrected_turn_does_not_record_success(mem_store):
         )
         await critic.evaluate(ctx)
 
-    success_path = mem_store.successes_dir / "success_index.jsonl"
-    content = success_path.read_text(encoding="utf-8") if success_path.exists() else ""
-    assert "corr_002" not in content
+    assert "corr_002" not in [r.trace_id for r in mem_store.get_recent_successes()]
 
 
 # ============================================================
@@ -166,9 +164,9 @@ def test_remove_success(mem_store):
     assert mem_store.remove_success("s1") is True
     assert mem_store.remove_success("s1") is False   # 幂等
 
-    content = (mem_store.successes_dir / "success_index.jsonl").read_text(encoding="utf-8")
-    assert "s1" not in content
-    assert "s2" in content
+    trace_ids = [r.trace_id for r in mem_store.get_recent_successes()]
+    assert "s1" not in trace_ids
+    assert "s2" in trace_ids
 
 
 def test_adoption_rate_counts_corrections(mem_store):
@@ -267,8 +265,7 @@ async def test_agent_detects_correction_and_reevaluates(monkeypatch, tmp_path):
     await agent.handle("帮我查天气", on_event=None)
 
     # 第 1 轮被记成成功(工具全通 + 没被纠正)
-    success_path = store.successes_dir / "success_index.jsonl"
-    assert success_path.exists()
+    assert store.get_recent_successes()
     assert agent._last_exec_ctx is not None
     exec_id = agent._last_exec_ctx.execution_id
 
@@ -276,8 +273,7 @@ async def test_agent_detects_correction_and_reevaluates(monkeypatch, tmp_path):
     await agent.handle("不对，应该是上海", on_event=None)
 
     # 成功记录被撤销
-    content = success_path.read_text(encoding="utf-8") if success_path.exists() else ""
-    assert exec_id not in content
+    assert exec_id not in [r.trace_id for r in store.get_recent_successes()]
 
     # 产生了带 user_corrected 的失败记录
     failures = store.get_recent_failures(top_k=10)
@@ -319,9 +315,7 @@ async def test_agent_normal_followup_does_not_trigger_correction(monkeypatch, tm
 
     failures = store.get_recent_failures(top_k=10)
     assert not any(f.user_corrected for f in failures)
-    success_path = store.successes_dir / "success_index.jsonl"
-    content = success_path.read_text(encoding="utf-8") if success_path.exists() else ""
-    assert exec_id in content
+    assert exec_id in [r.trace_id for r in store.get_recent_successes()]
 
 
 @pytest.mark.asyncio
