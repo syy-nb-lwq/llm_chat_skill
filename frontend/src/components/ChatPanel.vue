@@ -66,7 +66,13 @@
         :disabled="!connected"
       />
       <button @click="sendMessage" :disabled="!connected || !inputMessage">发送</button>
-      <button @click="resetChat" class="reset-btn" title="重置对话">↺</button>
+      <!-- 「新对话」而不是「重置」：它做的是让模型忘掉上文，历史仍留在库里
+           （可导出、可查），所以叫重置会让人以为数据被删了 -->
+      <button
+        @click="resetChat"
+        class="reset-btn"
+        title="新对话（清空当前上下文，历史仍保留在库里）"
+      >↺</button>
     </div>
   </div>
 </template>
