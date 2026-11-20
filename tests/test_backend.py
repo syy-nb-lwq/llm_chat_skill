@@ -417,3 +417,43 @@ def test_overview_lessons_come_from_store_not_json_dir(client):
         "迁移之后应该从库里读到这条" in (item.get("diagnosis") or "")
         for item in lessons["recent"]
     ), f"教训没从 MemoryStore 读出来: {lessons['recent']}"
+
+
+
+
+def test_session_messages_hides_pre_reset_history(client):
+    """reset 之后，前端恢复对话只能拿到重置点之后的内容。
+
+    原先前端用的 `/api/session/messages` 不过滤 `reset_at_seq`：
+    点「新对话」界面清空，**一刷新旧对话全回来**，而 Agent 那边其实已经忘了
+    （它恢复时按 `skip_before = max(cover, reset_at)` 跳过）。界面与上下文
+    不一致是最难解释的一类 bug —— 用户接着问"刚才那个"，模型答不上来。
+
+    这里同时钉住一个容易写错的实现细节：过滤必须发生在 SQL 里。
+    先 `LIMIT` 再在 Python 里筛的话，reset 前消息一多，新消息会被挤出窗口，
+    表现成"重置后新说的话也看不见了"。
+    """
+    from core.memorykit import get_memory
+
+    sid = "s-test-reset-visible"
+    st = get_memory().short_term
+    st.append_message(sid, "user", "重置前的问题")
+    st.append_message(sid, "assistant", "重置前的回答")
+
+    resp = client.get(f"/api/session/messages?session_id={sid}")
+    assert resp.json()["count"] == 2
+
+    st.reset(sid)
+
+    resp = client.get(f"/api/session/messages?session_id={sid}")
+    assert resp.json()["count"] == 0, "重置前的对话不该再出现在界面上"
+
+    # 重置后新说的话必须能看见 —— 且 limit=1 专门用来抓"先 LIMIT 后过滤"的写法
+    st.append_message(sid, "user", "重置后的问题")
+    resp = client.get(f"/api/session/messages?session_id={sid}&limit=1")
+    body = resp.json()
+    assert body["count"] == 1
+    assert body["messages"][0]["content"] == "重置后的问题"
+
+    # 但历史一条没删：存档仍然完整（管理员接口 / 导出用它）
+    assert len(st.messages(sid, limit=0)) == 3

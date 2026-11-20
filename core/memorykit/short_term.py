@@ -106,9 +106,17 @@ class ShortTermMemory:
     def recent_messages(self, session_id: str, limit: int = 20) -> List[Any]:
         return self.store.get_recent_messages(session_id, limit=limit)
 
-    def messages(self, session_id: str, limit: int = 0) -> List[Any]:
-        """按时间顺序取消息（`limit=0` 表示全部）—— 给历史查看接口用。"""
-        return self.store.get_messages(session_id, limit=limit)
+    def messages(self, session_id: str, limit: int = 0, from_seq: int = 0) -> List[Any]:
+        """按时间顺序取消息（`limit=0` 表示全部）—— 给历史查看接口用。
+
+        `from_seq` 只取 `seq > from_seq` 的部分。前端恢复对话时必须传
+        `reset_at_seq`：reset 的语义是"忘掉之前的内容"，若界面照旧显示，
+        就会出现**界面还留着旧对话、模型已经忘了**的错位 —— 用户接着问
+        "刚才那个"，模型一脸茫然。过滤要放在 SQL 里，不能取完再筛：
+        先 `LIMIT` 再筛的话，reset 前消息一多就会把新消息挤出窗口，
+        表现为"重置后新说的话也看不见了"。
+        """
+        return self.store.get_messages(session_id, limit=limit, from_seq=from_seq)
 
     def latest_summary(self, session_id: str) -> Optional[Any]:
         return self.store.get_latest_summary(session_id)

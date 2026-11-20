@@ -324,6 +324,13 @@ async def get_my_session_messages(request: Request, limit: int = 200):
     一旦配了 `OWNER_TOKEN`,前端就取不到自己的历史了。
 
     session_id 从 query 参数取（本地单用户，无越权问题）。
+
+    **为什么从 `reset_at_seq` 之后开始取**：reset 的语义是"忘掉之前的内容"。
+    Agent 侧恢复时一直按这个点过滤（`skip_before = max(cover, reset_at)`），
+    但这里原先不过滤 —— 于是点「新对话」后界面清空，**一刷新旧对话全回来了**，
+    而模型其实什么都不记得。用户接着问"刚才那个"，模型答不上来。
+    过滤放在 SQL 里（`from_seq`），不能取完再筛：reset 前消息一多，
+    先 `LIMIT` 会把新消息挤出窗口，表现为"重置后新说的话也看不见"。
     """
     from core.memorykit import get_memory
 
@@ -337,7 +344,11 @@ async def get_my_session_messages(request: Request, limit: int = 200):
         # 会话还没落盘(全新会话)—— 空历史比 404 更合适,前端不用特殊处理
         return {"session_id": session_id, "messages": [], "count": 0}
 
-    msgs = short_term.messages(session_id, limit=max(0, min(limit, 1000)))
+    msgs = short_term.messages(
+        session_id,
+        limit=max(0, min(limit, 1000)),
+        from_seq=short_term.reset_at_seq(session_id),
+    )
     return {
         "session_id": session_id,
         "count": len(msgs),
@@ -351,7 +362,13 @@ async def get_my_session_messages(request: Request, limit: int = 200):
 @app.get("/api/sessions/{session_id}/messages")
 @require_auth
 async def get_session_messages(session_id: str, limit: int = 100):
-    """取某个会话的消息(短期记忆内容全量保留)。"""
+    """取某个会话的消息(短期记忆内容全量保留)。
+
+    **这是"看档案"的口径：不按 `reset_at_seq` 过滤**，`reset` 之前的也返回 ——
+    存档本来就该完整，审计/导出要的就是全量。
+    前端恢复对话用的是 `/api/session/messages`（那条按 reset 点过滤，
+    因为界面要跟 Agent 记得的东西一致）。
+    """
     from core.memorykit import get_memory
 
     short_term = get_memory().short_term
