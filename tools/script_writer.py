@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 MAX_SCRIPT_CHARS = 200_000
@@ -177,9 +178,8 @@ class WriteScriptTool(Tool):
                 (target_dir / (Path(name).stem + ".md")).write_text(
                     f"# {name}\n\n{description}\n", encoding="utf-8"
                 )
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/script_writer.py')
         self.logger.info("WriteScript", f"已保存 {target} ({len(content)} 字符)")
         rel = str(target.relative_to(workspace_dir())).replace("\\", "/")
         return ToolResult(

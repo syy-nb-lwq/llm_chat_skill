@@ -53,6 +53,7 @@ from typing import Any, Dict, List
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 #: 公共前置：读参数 + 结果输出工具函数
@@ -239,8 +240,8 @@ class ScriptTool(Tool):
             return None
         try:
             return json.loads(blob)
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='tools/script_tool.py')
         # 多行输出时，取最后一个非空行试试
         for line in reversed(blob.splitlines()):
             line = line.strip()

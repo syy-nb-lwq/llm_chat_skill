@@ -52,6 +52,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 # ===== 默认限制 =====
@@ -714,8 +715,8 @@ def _kill_process_group(proc) -> None:
     except Exception:
         try:
             proc.kill()
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='tools/python_exec.py')
 
 
 def _run_dir() -> Path:
@@ -738,8 +739,8 @@ def _run_dir() -> Path:
     d = _workspace_dir() / "_run" / current_scope_key()
     try:
         d.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='tools/python_exec.py')
     return d
 
 
@@ -770,8 +771,8 @@ def _snapshot(root: Path, *, max_files: int = 20000) -> Dict[str, int]:
                     snap[str(path)] = path.stat().st_mtime_ns
             except OSError:
                 continue
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='tools/python_exec.py')
     return snap
 
 

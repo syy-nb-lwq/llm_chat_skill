@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from tools.base import ToolParam, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
+from core.exception_policy import downgrade
 
 
 def parse_server_command(server_path: str) -> List[str]:
@@ -216,8 +217,8 @@ class MCPSource(ToolSourceBase):
             # 读侧不用管:进程已经终止,管道随之关闭。
             try:
                 self._writer.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='tools/sources/mcp_source.py')
         self._reader = None
         self._writer = None
 
@@ -331,9 +332,8 @@ class MCPSource(ToolSourceBase):
                 if text:
                     self._stderr_tail.append(text)
                     del self._stderr_tail[:-20]
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/sources/mcp_source.py')
     async def _pump_responses(self) -> None:
         """专职读协程:独占 stdout,按 id 把响应分发给等待者。
 
@@ -410,9 +410,8 @@ class MCPSource(ToolSourceBase):
                                 }
                     self._connected = True
                     return True
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/sources/mcp_source.py')
         # 简单 HTTP 模式:假设返回 JSON
         self._http_session = aiohttp.ClientSession()
         self._connected = True
@@ -427,9 +426,8 @@ class MCPSource(ToolSourceBase):
                 tool_name = tool.get("name")
                 if tool_name:
                     self._tools[tool_name] = tool
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/sources/mcp_source.py')
     async def _call_stdio(self, tool_name: str, params: Dict) -> Dict:
         """通过 stdio 调用工具"""
         response = await self._send_request("tools/call", {

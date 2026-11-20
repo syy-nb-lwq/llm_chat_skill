@@ -32,6 +32,7 @@ from infra.logger import get_logger
 from core import sqlite_util
 from core.text_match import query_fragments as _query_fragments
 from core.text_match import score_fragments as _score_fragments
+from core.exception_policy import downgrade
 
 
 DEFAULT_TENANT = "default"
@@ -315,14 +316,15 @@ class SessionMemoryStore:
             if table == "session_messages":
                 try:
                     cursor.execute("DROP INDEX IF EXISTS idx_sess_msg_user")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    downgrade(exc, where='core/session_memory.py')
             for col in ("user_id", "tenant_id"):
                 if col in cols:
                     try:
                         cursor.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
-                    except Exception:
-                        pass  # 老 SQLite 不支持 DROP COLUMN 时保留，读写仍正常
+                    except Exception as exc:
+                        # 老 SQLite 不支持 DROP COLUMN 时保留，读写仍正常
+                        downgrade(exc, where="core/session_memory.py::DROP COLUMN")
 
     # ===== 会话 =====
 

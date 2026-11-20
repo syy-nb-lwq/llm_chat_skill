@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 #: 一次最多修几个（别在一轮里烧掉太多调用）
@@ -174,8 +175,8 @@ async def repair_tool(
                 tried=f"自动修复 {tool_name}",
                 blocked_by=str(patch["unfixable"])[:300],
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/tool_repair.py')
         return result
 
     # --- 4. 校验候选 ---
@@ -280,8 +281,8 @@ async def _run_tests(candidate) -> List[str]:
             )
     try:
         await tool.aclose()
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='core/tool_repair.py')
     return problems
 
 

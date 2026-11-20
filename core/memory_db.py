@@ -34,6 +34,7 @@ from infra.logger import get_logger
 from core import sqlite_util
 from core.text_match import query_fragments as _query_fragments
 from core.text_match import score_fragments as _score_fragments
+from core.exception_policy import downgrade
 
 
 @dataclass
@@ -223,14 +224,15 @@ class MemoryDB:
             for idx in ("idx_memories_user", "idx_memories_user_status"):
                 try:
                     cursor.execute(f"DROP INDEX IF EXISTS {idx}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    downgrade(exc, where='core/memory_db.py')
             for col in ("user_id", "tenant_id"):
                 if col in cols:
                     try:
                         cursor.execute(f"ALTER TABLE memories DROP COLUMN {col}")
-                    except Exception:
-                        pass  # 老版本 SQLite 不支持时保留列，不影响读写
+                    except Exception as exc:
+                        # 老版本 SQLite 不支持时保留列，不影响读写
+                        downgrade(exc, where="core/memory_db.py::DROP COLUMN")
         # 补齐其余新增列（老库可能缺 agent_id 等），保证 _row_to_entry 不错位
         cursor.execute("PRAGMA table_info(memories)")
         existing = {row[1] for row in cursor.fetchall()}
@@ -255,13 +257,12 @@ class MemoryDB:
         if "user_id" in pcols:
             try:
                 cursor.execute("DROP INDEX IF EXISTS idx_proposals_user")
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/memory_db.py')
             try:
                 cursor.execute("ALTER TABLE memory_proposals DROP COLUMN user_id")
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='core/memory_db.py')
     def _row_to_entry(self, row: tuple) -> MemoryEntry:
         """将数据库行转换为 MemoryEntry
 

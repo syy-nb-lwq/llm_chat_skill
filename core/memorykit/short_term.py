@@ -32,6 +32,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 class ShortTermMemory:
@@ -123,8 +124,8 @@ class ShortTermMemory:
             # 检索是增强，坏了不能拖垮规划
             try:
                 self.logger.warning("ShortTermMemory", f"会话内检索失败: {exc}")
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/memorykit/short_term.py')
             return []
 
     def count_messages(self, session_id: str) -> int:

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from tools.base import Tool, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
+from core.exception_policy import downgrade
 
 
 def _flag_allows(tool: Tool) -> bool:
@@ -121,9 +122,8 @@ class PythonSource(ToolSourceBase):
                             if not _flag_allows(instance):
                                 continue
                             self._tools[instance.name] = instance
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/sources/python_source.py')
     def register_tool(self, tool: Tool):
         """手动注册工具"""
         if not tool.name:

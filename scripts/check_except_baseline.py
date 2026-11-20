@@ -30,6 +30,13 @@ NEEDLE = "except Exception"
 
 
 def count_occurrences() -> tuple[int, list[tuple[str, int]]]:
+    """按 AST 数真正的 `except Exception`，不数字符串/文档里的示例文本。
+
+    早期版本用文本匹配，结果 `core/exception_policy.py` 的文档里写了一句
+    `except Exception: pass` 作为反例，就被算成新增两处 —— 假阳性。
+    """
+    import ast
+
     total = 0
     per_file: list[tuple[str, int]] = []
     for d in DIRS:
@@ -37,7 +44,18 @@ def count_occurrences() -> tuple[int, list[tuple[str, int]]]:
             if "__pycache__" in path.parts:
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
-            n = sum(1 for line in text.splitlines() if NEEDLE in line and not line.lstrip().startswith("#"))
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue
+            n = 0
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ExceptHandler):
+                    continue
+                exc = node.type
+                # bare except / except (A, B) 不算；只数 except Exception
+                if isinstance(exc, ast.Name) and exc.id == "Exception":
+                    n += 1
             if n:
                 total += n
                 per_file.append((path.relative_to(ROOT).as_posix(), n))

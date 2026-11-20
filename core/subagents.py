@@ -38,6 +38,7 @@ from contextvars import ContextVar
 
 from core.events import EV_SUBAGENT_DONE, EV_SUBAGENT_PROGRESS, EV_SUBAGENT_SPAWNED
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 #: 当前这一轮的**对话上下文** —— 子智能体必须能看到，否则它不知道在聊什么。
@@ -410,8 +411,8 @@ class SubAgentPool:
                 from core.exec_context import reset_exec_context
 
                 reset_exec_context(_exec_tokens)
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/subagents.py')
             task.finished_at = time.time()
             await self._emit(on_event, EV_SUBAGENT_DONE, task)
 
@@ -579,9 +580,8 @@ class SubAgentPool:
             return
         try:
             await on_event(event, task.to_dict())
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='core/subagents.py')
     @staticmethod
     def _action_signature(tasks: List[Dict[str, Any]]) -> str:
         """动作签名：工具名 + 参数（排序后），用来判断是不是在重复同一件事。"""

@@ -36,6 +36,7 @@ import re
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Tuple
+from core.exception_policy import downgrade
 
 #: 当前这一轮的会话 / 执行 / 子智能体
 _session_id: ContextVar[str] = ContextVar("dsh_exec_session", default="")
@@ -105,8 +106,8 @@ def reset_exec_context(tokens: Tuple[Token, ...]) -> None:
     for token in reversed(list(tokens or ())):
         try:
             token.var.reset(token)
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/exec_context.py')
 
 
 def get_exec_context() -> ExecContext:

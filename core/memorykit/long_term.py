@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 class LongTermMemory:
@@ -75,8 +76,8 @@ class LongTermMemory:
         except Exception as exc:
             try:
                 self.logger.warning("LongTermMemory", f"画像读取失败: {exc}")
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/memorykit/long_term.py')
             return ""
 
     def profile_entries(self, limit: int = 50) -> List[Any]:
@@ -112,8 +113,8 @@ class LongTermMemory:
         except Exception as exc:
             try:
                 self.logger.warning("LongTermMemory", f"经验 hints 读取失败: {exc}")
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/memorykit/long_term.py')
             return []
 
     def recent_failures(self, top_k: int = 10) -> List[Any]:

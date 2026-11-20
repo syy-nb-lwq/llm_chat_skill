@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 # ===== 降级阈值(可配) =====
@@ -411,8 +412,8 @@ class SkillQualityStore:
         try:
             if self.file.exists():
                 self.file.unlink()
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/skill_quality.py')
         self._cache = None
 
 

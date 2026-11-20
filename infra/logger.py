@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 from infra.config import config
+from core.exception_policy import downgrade
 
 
 # ===== UTF-8 stdout 包装器 (M0-05) =====
@@ -72,9 +73,8 @@ class _Utf8Stream:
     def flush(self) -> None:
         try:
             self._raw.flush()
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='infra/logger.py')
     def isatty(self) -> bool:
         try:
             return bool(self._raw.isatty())
@@ -137,9 +137,9 @@ class SimpleLogger:
                     fh = logging.FileHandler(log_dir / "skill_agent.log", encoding="utf-8")
                     fh.setFormatter(fmt)
                     self._logger.addHandler(fh)
-                except Exception:
+                except Exception as exc:
                     # 文件 handler 创建失败不影响 stdout
-                    pass
+                    downgrade(exc, where="infra/logger.py::FileHandler")
 
     def _log(self, level: int, component: str, message: str, data: Any = None):
         if component:
@@ -153,9 +153,8 @@ class SimpleLogger:
         for cb in list(self._subscribers):
             try:
                 cb(level, component, message, data)
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='infra/logger.py')
     def info(self, component: str, message: str, data: Any = None):
         self._log(logging.INFO, component, message, data)
 

@@ -9,6 +9,7 @@ from tools.base import Tool, ToolResult, ToolSchema
 from tools.sources.base import SourceType, ToolSource, ToolSourceBase
 from core.events import EV_TOOL_CALL, EV_TOOL_RESULT
 from tools.validation import validate_params
+from core.exception_policy import downgrade
 
 
 @dataclass
@@ -248,9 +249,8 @@ class ToolHub:
                     tried=f"尝试调用 {tool_name}",
                     blocked_by="工具不存在",
                 )
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/hub.py')
         result = await self._call_tool_inner(tool_name, params, on_event=on_event)
 
         if known:
@@ -266,9 +266,8 @@ class ToolHub:
                     duration_ms=(_time.perf_counter() - started) * 1000,
                     source=source,
                 )
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/hub.py')
         return result
 
     async def _call_tool_inner(
@@ -472,9 +471,8 @@ def get_tool_hub() -> ToolHub:
             _hub.register_python_tool(SearchTool())
             _hub.register_python_tool(WebFetchTool())
             _builtin_tools_added = True
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/hub.py')
         # 代码执行/脚本工具 —— 受 CODE_EXEC_ENABLED 控制。
         # 这是**安全开关**:执行的是 LLM 生成的代码,对外服务前应当关掉
         # 或换成容器隔离(见 tools/python_exec.py 顶部的安全模型说明)。
@@ -490,18 +488,16 @@ def get_tool_hub() -> ToolHub:
                 )
                 _hub.register_python_tool(WriteScriptTool())
                 _hub.register_python_tool(ListScriptsTool())
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/hub.py')
         # 文档工具 —— 读文档 + 定位锚点
         try:
             from tools.document import LocateDocumentTool, ReadDocumentTool
 
             _hub.register_python_tool(ReadDocumentTool())
             _hub.register_python_tool(LocateDocumentTool())
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/hub.py')
         # 文件工具 —— 读任意文本文件(源码/配置/日志),上限 10MB
         #
         # 和 `read_document` 分开:文档工具做的是"解析成带锚点的结构",
@@ -510,9 +506,8 @@ def get_tool_hub() -> ToolHub:
             from tools.file_read import ReadFileTool
 
             _hub.register_python_tool(ReadFileTool())
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/hub.py')
         # 元工具:让 agent 自己造工具(受 TOOL_CREATION_ENABLED 控制)
         try:
             from infra.config import config
@@ -539,26 +534,23 @@ def get_tool_hub() -> ToolHub:
                 from tools.meta_tools import ToolHealthTool
 
                 _hub.register_python_tool(ToolHealthTool())
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/hub.py')
             # 产物登记:把授权目录里已有的文件变成可下载产物
             try:
                 from tools.artifact_publish import PublishArtifactTool
 
                 _hub.register_python_tool(PublishArtifactTool())
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/hub.py')
             # 视频:探测 / 拼接(ffmpeg 由我们受控调用,python_exec 里的 subprocess 仍然禁)
             try:
                 from tools.video import VideoConcatTool, VideoProbeTool
 
                 _hub.register_python_tool(VideoProbeTool())
                 _hub.register_python_tool(VideoConcatTool())
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='tools/hub.py')
             # 子智能体:把互不依赖的子任务派出去并行做
             if config.subagents_enabled:
                 from core.subagents import get_subagent_pool
@@ -572,9 +564,8 @@ def get_tool_hub() -> ToolHub:
 
                 _hub.register_python_tool(RunSubAgentsTool())
                 _hub.register_python_tool(SubAgentStatusTool())
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/hub.py')
     return _hub
 
 

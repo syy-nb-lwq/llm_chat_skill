@@ -59,6 +59,7 @@ from core.events import (
     EV_GOAL_STOP,
 )
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 #: 停止原因
@@ -230,9 +231,8 @@ async def run_goal_loop(
             return
         try:
             await emit(event, payload)
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='core/goal_runner.py')
     if not enabled:
         result.stop_reason = STOP_DISABLED
         try:

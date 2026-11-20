@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 #: 工具名规则：小写字母开头，允许数字和下划线
@@ -203,8 +204,8 @@ class ToolProposal:
 
                 ctx = get_exec_context()
                 self.owner_agent_id = ctx.agent_id or ""
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='tools/proposal.py')
         self.visibility = (self.visibility or VISIBILITY_GLOBAL).strip().lower()
 
     def is_visible_to(self, agent_id: str = "") -> bool:

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 # ===== 默认限制 =====
@@ -147,8 +148,8 @@ def detect_format(path: Path) -> str:
                 return "xlsx"
             if any(n.startswith("ppt/") for n in names):
                 return "pptx"
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='tools/document.py')
         return "unknown"
     if ext == ".pdf":
         return "pdf"
@@ -319,9 +320,8 @@ def parse_xlsx(path: Path) -> ParseResult:
     finally:
         try:
             wb.close()
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/document.py')
     return ParseResult(blocks=blocks, fmt="xlsx", meta={"sheets": sheets})
 
 
@@ -508,8 +508,8 @@ def parse_document(path: Path) -> ParseResult:
                 _add(blocks, "paragraph", para, Locator(paragraph=i))
             if blocks:
                 return ParseResult(blocks=blocks, fmt=fmt)
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='tools/document.py')
         raise DocumentError(
             f"不支持的格式 {fmt!r}。支持:{', '.join(sorted(SUPPORTED_SUFFIXES))}"
         )

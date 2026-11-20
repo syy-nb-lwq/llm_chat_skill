@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 #: 拼接后允许的最大字节（避免把磁盘写爆）
@@ -53,8 +54,8 @@ def find_ffmpeg() -> Optional[str]:
         exe = imageio_ffmpeg.get_ffmpeg_exe()
         if exe and Path(exe).is_file():
             return str(exe)
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='tools/video.py')
     return shutil.which("ffmpeg")
 
 
@@ -115,8 +116,8 @@ def parse_mp4(path: Path) -> Dict[str, Any]:
                         dur = struct.unpack(">Q", data[body + 24:body + 32])[0]
                     if ts:
                         info["duration_s"] = round(dur / ts, 2)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    downgrade(exc, where='tools/video.py')
             elif typ == "tkhd":
                 version = data[body]
                 off = body + (76 if version == 0 else 88)
@@ -124,13 +125,12 @@ def parse_mp4(path: Path) -> Dict[str, Any]:
                     w, h = struct.unpack(">II", data[off:off + 8])
                     if w and h and not info["width"]:
                         info["width"], info["height"] = w >> 16, h >> 16
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    downgrade(exc, where='tools/video.py')
     try:
         walk(0, len(data))
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='tools/video.py')
     return info
 
 

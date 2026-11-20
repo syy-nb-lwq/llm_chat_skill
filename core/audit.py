@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 # ===== 统一事件名 =====
 
@@ -74,8 +75,8 @@ def audit_dir() -> Path:
     root = Path(__file__).resolve().parent.parent / "memory" / "audit"
     try:
         root.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='core/audit.py')
     return root
 
 
@@ -95,8 +96,8 @@ def append_jsonl(filename: str, payload: Dict[str, Any]) -> bool:
     except Exception as exc:
         try:
             get_logger().warning("Audit", f"写审计文件失败 {filename}: {exc}")
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/audit.py')
         return False
 
 
@@ -113,8 +114,8 @@ def write_json(filename: str, payload: Dict[str, Any]) -> Optional[Path]:
     except Exception as exc:
         try:
             get_logger().warning("Audit", f"写审计文件失败 {filename}: {exc}")
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/audit.py')
         return None
 
 

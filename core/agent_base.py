@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from infra.llm import get_llm_client
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 def _try_validate_schema(obj: Any, schema: Dict) -> Optional[str]:
@@ -102,8 +103,8 @@ class BaseAgent(ABC):
             try:
                 from core.soul import get_soul_loader
                 self._soul_loader = get_soul_loader()
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/agent_base.py')
         return self._soul_loader
 
     def get_soul_prompt(self) -> str:

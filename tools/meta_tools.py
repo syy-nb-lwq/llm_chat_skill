@@ -37,6 +37,7 @@ from typing import Any, Dict, Optional
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 class CreateToolTool(Tool):
@@ -246,9 +247,8 @@ class CreateToolTool(Tool):
                 **(extra or {}),
             )
             append_jsonl("tools.jsonl", payload)
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/meta_tools.py')
     async def _run_tests(self, proposal) -> Dict[str, Any]:
         """跑提案里带的测试用例。返回 {ran, passed, failed}。"""
         cases = proposal.test_cases or []
@@ -293,8 +293,8 @@ class CreateToolTool(Tool):
         # 测试完把临时客户端关掉
         try:
             await tool.aclose()
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='tools/meta_tools.py')
         return report
 
 

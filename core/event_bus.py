@@ -30,6 +30,7 @@ from contextvars import ContextVar
 from typing import Awaitable, Callable, Optional
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 #: 当前轮的 emit 回调
@@ -64,5 +65,5 @@ async def emit(event: str, payload: dict) -> None:
     except Exception as exc:
         try:
             get_logger().warning("EventBus", f"推送事件失败({event}): {exc}")
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/event_bus.py')

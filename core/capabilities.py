@@ -43,6 +43,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 #: 注入的能力块最大字符数
@@ -100,8 +101,8 @@ def build_capability_block(max_chars: int = CAPABILITY_BLOCK_MAX_CHARS) -> str:
     except Exception as exc:
         try:
             get_logger().warning("Capabilities", f"读取工具清单失败: {exc}")
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/capabilities.py')
         return ""
 
     if not names:
@@ -125,9 +126,8 @@ def build_capability_block(max_chars: int = CAPABILITY_BLOCK_MAX_CHARS) -> str:
         )
         if mcp_tools:
             lines.append(f"- 已接入 {mcp_tools} 个外部 MCP 工具（文件读写、网页抓取等）")
-    except Exception:
-        pass
-
+    except Exception as exc:
+        downgrade(exc, where='core/capabilities.py')
     if not lines:
         return ""
 

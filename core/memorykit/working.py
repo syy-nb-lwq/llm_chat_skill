@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 #: 单个值 / 槽位总数的上限（工作记忆不能变成第二个数据库）
 MAX_VALUE_CHARS = 4000
@@ -258,8 +259,8 @@ class WorkingMemory:
         except Exception as exc:
             try:
                 self.logger.warning("WorkingMemory", f"工作记忆落盘失败: {exc}")
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/memorykit/working.py')
             return None
 
     def clear(self) -> None:
@@ -293,10 +294,8 @@ class WorkingMemory:
             self.logger.warning(
                 "WorkingMemory", f"槽位超上限({self.max_slots})，已丢弃: {oldest}"
             )
-        except Exception:
-            pass
-
-
+        except Exception as exc:
+            downgrade(exc, where='core/memorykit/working.py')
 # ===== 当前轮的工作台（contextvar） =====
 
 _current: ContextVar[Optional[WorkingMemory]] = ContextVar("dsh_working_memory", default=None)

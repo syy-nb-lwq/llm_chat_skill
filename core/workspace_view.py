@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List
+from core.exception_policy import downgrade
 
 
 
@@ -124,9 +125,8 @@ def _roots() -> List[Path]:
         artifact_root = Path(workspace_dir())
         if artifact_root.is_dir():
             roots.append(artifact_root)
-    except Exception:
-        pass
-
+    except Exception as exc:
+        downgrade(exc, where='core/workspace_view.py')
     for d in _mcp_dirs():
         try:
             resolved = d.resolve()

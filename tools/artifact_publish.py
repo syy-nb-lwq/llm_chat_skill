@@ -34,6 +34,7 @@ from typing import List, Optional
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 #: 拒绝登记的文件名模式（大小写不敏感）
@@ -68,9 +69,8 @@ def _authorized_roots() -> List[Path]:
         ws = Path(workspace_dir()).resolve()
         if ws.is_dir():
             roots.append(ws)
-    except Exception:
-        pass
-
+    except Exception as exc:
+        downgrade(exc, where='tools/artifact_publish.py')
     try:
         from core.workspace_view import _mcp_dirs
 
@@ -83,9 +83,8 @@ def _authorized_roots() -> List[Path]:
                 continue          # 应用自身目录绝不开放
             if all(resolved != r for r in roots):
                 roots.append(resolved)
-    except Exception:
-        pass
-
+    except Exception as exc:
+        downgrade(exc, where='tools/artifact_publish.py')
     return roots
 
 

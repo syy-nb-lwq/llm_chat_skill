@@ -19,6 +19,7 @@ from core.session_config import (
     session_rollup_keep_recent,
     session_rollup_threshold,
 )
+from core.exception_policy import downgrade
 
 
 _SUMMARY_PROMPT = """请把下面的对话片段压缩成一段简洁的中文摘要,用于后续对话时回顾早期内容。
@@ -90,8 +91,8 @@ async def summarize_messages(messages: List[Any]) -> str:
         answer = (answer or "").strip()
         if answer:
             return answer
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='core/session_rollup.py')
     # 退化:直接截断,至少不丢内容
     return transcript[:600]
 

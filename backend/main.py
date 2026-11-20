@@ -17,6 +17,7 @@ from backend.websocket_handler import endpoint, register_handlers
 from infra.auth import require_auth
 from infra.config import ConfigError, config
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 app = FastAPI(title="Skill Agent API")
@@ -1038,8 +1039,8 @@ async def list_artifacts(request: Request, limit: int = 200):
         try:
             if "_run" in path.relative_to(root).parts:
                 continue
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='backend/main.py')
         try:
             stat = path.stat()
         except OSError:

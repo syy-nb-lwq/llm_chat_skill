@@ -29,6 +29,7 @@ from core.text_match import query_fragments as _query_fragments
 from core.text_match import score_fragments as _score_fragments
 from infra.config import get_self_evolution_enabled
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 #: hints 与当前输入的相关度门槛(命中查询片段的 20%,与检索通道保持一致)
 _HINT_MIN_SCORE = 0.2
@@ -367,9 +368,8 @@ class MemoryStore:
                     )
                 if len(hints) >= top_k:
                     break
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='core/memory.py')
         return hints
 
     def get_pending_patches(self) -> List[SkillPatch]:
@@ -380,8 +380,8 @@ class MemoryStore:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("status") == "pending":
                     patches.append(SkillPatch(**data))
-            except Exception:
-                pass
+            except Exception as exc:
+                downgrade(exc, where='core/memory.py')
         # 按 confidence 降序
         patches.sort(key=lambda x: -x.confidence)
         return patches
@@ -438,9 +438,8 @@ class MemoryStore:
                     data = json.loads(path.read_text(encoding="utf-8"))
                     rate = data.get("success_rate", 0.0)
                     records.append((path, rate))
-                except Exception:
-                    pass
-
+                except Exception as exc:
+                    downgrade(exc, where='core/memory.py')
             # 按 success_rate 降序排序,保留 top keep_ratio
             records.sort(key=lambda x: -x[1])
             keep_count = int(len(records) * keep_ratio)

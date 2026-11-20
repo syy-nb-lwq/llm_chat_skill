@@ -34,6 +34,7 @@ import httpx
 
 from infra.logger import get_logger
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 #: 模板占位符
@@ -139,9 +140,8 @@ class DeclarativeHttpTool(Tool):
             ok, err = self.validate_params(kwargs)
             if not ok:
                 return ToolResult(success=False, error=err)
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='tools/declarative.py')
         # 缺省值补齐
         values: Dict[str, Any] = {}
         for p in spec.params or []:

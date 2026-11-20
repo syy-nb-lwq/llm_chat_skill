@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 
 #: 至少要有这么多样本，才允许判"不健康"（避免用两次失败就下结论）
@@ -143,9 +144,8 @@ class ToolHealthStore:
         except Exception as exc:
             try:
                 self.logger.warning("ToolHealth", f"记录失败: {exc}")
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='core/tool_health.py')
     # ---------- 读流水 ----------
 
     def _read_records(self, limit_per_tool: int = WINDOW) -> Dict[str, List[ToolCallRecord]]:
@@ -220,9 +220,8 @@ class ToolHealthStore:
         except Exception as exc:
             try:
                 self.logger.warning("ToolHealth", f"记录能力缺口失败: {exc}")
-            except Exception:
-                pass
-
+            except Exception as exc:
+                downgrade(exc, where='core/tool_health.py')
     def list_gaps(self, limit: int = 50) -> List[Dict[str, Any]]:
         if not self.gaps.exists():
             return []

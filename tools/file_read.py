@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from infra.logger import get_logger, redact_secrets
 from tools.base import Tool, ToolParam, ToolResult, ToolSchema
+from core.exception_policy import downgrade
 
 
 # ===== 限制 =====
@@ -192,8 +193,8 @@ def _candidate_roots() -> List[Path]:
         ws = Path(workspace_dir())
         roots.append(ws / "_run")
         roots.append(ws)
-    except Exception:
-        pass
+    except Exception as exc:
+        downgrade(exc, where='tools/file_read.py')
     return roots
 
 
