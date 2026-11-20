@@ -1122,9 +1122,6 @@ async def memory_overview(request: Request):
     **记忆不是一样东西，是分层的**（docs/13）：
     短期 = 会话内容；长期 = 用户画像；此外还有经验层（教训 / 方法论）。
     """
-    import json as _json
-    from pathlib import Path as _Path
-
     session_id = _session_id_from_request(request)
 
     out: Dict[str, Any] = {"session_id": session_id}
@@ -1173,26 +1170,22 @@ async def memory_overview(request: Request):
     out["profile"] = profile
 
     # ---------- 经验：失败教训 ----------
+    # 必须走 `get_memory_store()`，不能直接扫 `memory/failures/*.json`：
+    # 经验已经搬到 SQLite（`experience` 表），JSON 目录只剩历史存量。
+    # 直读目录的症状是"面板数字还停在迁移那一刻"—— 新教训一条都看不到，
+    # 而且不报错。这是 docs/19 §07 验收条件里点名的一条。
     lessons: Dict[str, Any] = {"count": 0, "recent": []}
     try:
-        fdir = _Path(__file__).parent.parent / "memory" / "failures"
-        files = sorted(
-            fdir.rglob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
-        )
-        mine = []
-        for f in files:
-            try:
-                raw = _json.loads(f.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            mine.append(raw)
-        lessons["count"] = len(mine)
+        from core.memory import get_memory_store
+
+        items = get_memory_store().get_recent_failures(top_k=200)
+        lessons["count"] = len(items)
         lessons["recent"] = [
             {
-                "at": str(r.get("timestamp") or "")[:19],
-                "diagnosis": str(r.get("diagnosis") or "")[:200],
+                "at": str(f.timestamp or "")[:19],
+                "diagnosis": str(f.diagnosis or "")[:200],
             }
-            for r in mine[:3]
+            for f in items[:3]
         ]
     except Exception as exc:
         lessons["error"] = str(exc)

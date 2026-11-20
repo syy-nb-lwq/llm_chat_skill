@@ -378,3 +378,42 @@ async def test_push_event_times_out_instead_of_hanging(monkeypatch):
 
     # 不抛异常就算过:超时后放弃这条事件,流程继续
     await asyncio.wait_for(wsh.push_event("cid", "thinking", {"stage": "x"}), 2)
+
+
+def test_overview_lessons_come_from_store_not_json_dir(client):
+    """`/api/memory/overview` 的教训必须读 `MemoryStore`，不能扫 JSON 目录。
+
+    迁移把经验搬到了 SQLite（`experience` 表），JSON 目录只剩历史存量。
+    这个端点原先还在 `rglob("memory/failures/*.json")` —— 症状是面板数字
+    永远停在迁移那一刻，**新产生的失败教训一条都不显示，而且不报错**。
+
+    测试靠 `reset_singletons` 把单例指到临时目录来区分两条路径：
+    临时目录下既没有 `failures/` 也没有 JSON，所以能从 `recent` 读到刚写入
+    的诊断，只可能是走了库。
+    """
+    from core.memory import get_memory_store
+
+    store = get_memory_store()
+    store.record_failure(
+        "trace-overview-1",
+        "场景A",
+        "task",
+        "",
+        0.2,
+        1,
+        5.0,
+        "迁移之后应该从库里读到这条",
+        None,
+        False,
+        execution_id="trace-overview-1",
+    )
+
+    resp = client.get("/api/memory/overview")
+    assert resp.status_code == 200
+    lessons = resp.json()["lessons"]
+    assert "error" not in lessons
+    assert lessons["count"] >= 1
+    assert any(
+        "迁移之后应该从库里读到这条" in (item.get("diagnosis") or "")
+        for item in lessons["recent"]
+    ), f"教训没从 MemoryStore 读出来: {lessons['recent']}"
