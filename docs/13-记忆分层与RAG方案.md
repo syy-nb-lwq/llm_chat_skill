@@ -131,6 +131,13 @@ core/memory_repository.py（新增）
 3. 业务代码只依赖接口，通过配置切换
 4. 数据迁移脚本：`memory/failures/*.json` → `memories` 表，`type=failure`
 
+> **实际执行结果（2026-11-20，见 `docs/20`）**：第 1、3 步没有做 ——
+> 分仓适配器 + 配置开关会让"到底读的哪个库"变成一个运行时问题，
+> 比现状更难排查。第 4 步改为：`MemoryStore` 自身换成 SQLite 载体
+> （`experience` 表，与画像 `memories` 同库不同表），历史 JSON 用
+> `scripts/migrate_experience_to_sqlite.py` 一次性导入。
+> 接口没变，所以 critic / API / manager 的调用点零改动。
+
 ### 2.4 写入管线（把语义记忆接到主链）
 
 这是 **R1（最大断点）**。按 `docs/archive/10 §8.2`：

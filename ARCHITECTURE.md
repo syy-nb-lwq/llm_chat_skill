@@ -458,7 +458,7 @@ Frontend / CLI / Streamlit
 - **会话串行化**：`Session.submit()` 单队列 + worker；重连复用同一个 Agent
   （`session_id → Session` 索引），不再出现"同 session 两个 Agent 同时写库"
 - **工程质量有闸门**：ruff（E4/E7/E9/F）零告警；`requirements.txt` 有上界 +
-  `requirements.lock`；`except Exception` 走棘轮（基线 368，只降不升）
+  `requirements.lock`；`except Exception` 走棘轮（基线 365，只降不升）
 
 ### 仍然存在的限制
 
@@ -469,17 +469,19 @@ Frontend / CLI / Streamlit
 - 用户画像抽取是 **LLM + 证据校验**（`core/memory_writer.py` + `core/profile_llm.py`），
   不是纯规则；召回率的天花板在于"用户没说出口的偏好"抽不出来
 - 记忆三层已收口到 `core/memorykit/`（调用方只认三个门面）。
-  底层是**两种载体、互斥职责**：画像走 SQLite（`MemoryDB`），经验走 JSON
-  （`MemoryStore`）。这不是"同一份数据的两个副本"，所以不做合并；
-  代价是"查全部经验"与"查全部画像"是两个入口，`long_term` 门面负责收口
+  底层是**两张表、互斥职责**：画像在 `MemoryDB`（`memories` 表，带 FTS +
+  向量，供语义检索），经验在 `MemoryStore`（`experience` 表，一条一行、
+  原文存 `payload`）。两份数据不是副本，所以不做合并；`long_term` 门面收口。
+  同库不同表的好处是"画像 ⋈ 经验"一条 SQL 就能查，备份也只有一份
 - `Agent.handle()` 仍是长函数（345 行，原 494）：准备 / 事件 / 流式 / 快捷意图
   四个 stage 已抽出；主执行段（目标循环 + DAG）还耦合在一起，
   要彻底切分需先引入 `TurnContext` 对象
 - `ManagerAgent` 948 行（原 1190）：提示词（`agents/prompts.py`）、判别层
   （`agents/intents.py`）、数据类型（`agents/manager_types.py`）已拆分；
   `plan()` 仍是 L0→L1→L2 的编排核心
-- 经验存储（JSON）到 SQLite 的迁移方案与脚本已就绪（`scripts/migrate_experience_to_sqlite.py`），
-  但数据未迁移、读写未切换，见 `docs/20`
+- 经验存储已从 JSON 目录树搬到 SQLite（`experience` 表），老的 JSON 目录
+  用 `scripts/migrate_experience_to_sqlite.py` 一次性导入（幂等 + 可按批次回滚），
+  见 `docs/20`。`export_json()` 保留为单向出口，供人工审阅与备份
 - `core/agentkit` 已收口：主链**直接**引用 `roles` / `sources`，`context` / `memory`
   经 `sources` 间接使用，`identity` / `brief` / `blackboard` / `messaging` 是契约层。
   接线表在 `core/agentkit/__init__.py`，由 `test_declared_wiring_matches_reality` 守着；
