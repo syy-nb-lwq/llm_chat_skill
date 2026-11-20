@@ -295,3 +295,43 @@ def test_bundle_summary_and_to_dict():
     data = bundle.to_dict()
     assert data["blocks"][0]["source"] == SOURCE_MEMORY
     assert data["total_chars"] == 10
+
+
+# ===== 接线契约：包声明的“已接主链”集合必须与实践一致 =====
+
+
+def test_declared_wiring_matches_reality():
+    """`core/agentkit/__init__.py` 的接线表是唯一真相，不能与实践漂移。
+
+    历史上这里写着"不接主链"，但 subagents 早就 import 了 roles/sources ——
+    声明和实践各说各话，读者无法判断这是死代码还是地基。
+    这条测试把两者锁在一起：改接线必须改声明，反之亦然。
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+
+    # 主链 = 会被真实请求走到的代码（不是 tests）
+    producers = [
+        root / "core" / "subagents.py",
+        root / "tools" / "subagent_tool.py",
+    ]
+    actual = set()
+    for path in producers:
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"core\.agentkit\.(\w+)", text):
+            actual.add(m.group(1))
+
+    # 声明的“主链直接 import”模块（与 __init__.py 的表格一致）
+    # context / memory 是经 sources 间接使用，不算直接引用
+    declared = {"roles", "sources"}
+
+    assert actual == declared, (
+        f"接线实践 {sorted(actual)} 与包声明 {sorted(declared)} 不一致；"
+        "改主链 import 时必须同步更新 core/agentkit/__init__.py 的表格"
+    )
+
+    # 契约层模块不得被主链直接 import
+    contract_only = {"identity", "brief", "blackboard", "messaging"}
+    assert not (actual & contract_only), f"契约层模块被主链直接引用：{actual & contract_only}"

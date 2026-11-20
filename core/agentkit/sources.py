@@ -46,6 +46,7 @@ from core.agentkit.context import (
     ContextBundle,
 )
 from core.agentkit.roles import RoleProfile
+from core.exception_policy import downgrade
 
 #: 各类来源的裁剪优先级（数字越大越先被裁，见 core/agentkit/context.py）
 PRIORITY = {
@@ -384,5 +385,5 @@ class ContextBuilder:
                 dropped=list(bundle.dropped),
             )
             append_jsonl("context.jsonl", payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            downgrade(exc, where='core/agentkit/sources.py')

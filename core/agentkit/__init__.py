@@ -1,19 +1,39 @@
-"""智能体基础设施（Agent Kit）—— 契约层。
+"""智能体基础设施（Agent Kit）—— 子智能体契约层 + 已接线的装配组件。
 
-这里的模块**不接主链**，只定义"智能体这件事"的结构与规则：
+## 当前定位（2026-11-20 收口）
 
-| 模块 | 是什么 |
-|---|---|
-| `identity` | 智能体身份（谁在跑、谁派的他、多深） |
-| `roles` | 岗位画像（能力矩阵、工具授权、预算、预置角色） |
-| `brief` | 任务简报 / 报告包 / 编排图 —— 主与子之间唯一的契约 |
-| `context` | 上下文装配器（带来源、理由、预算、裁剪记录） |
+这个包**不是纯实验代码**：它有两个模块已被主链真实使用，其余是契约层/规则层。
 
-对应 `docs/18-智能体基础设施规划.md` 的 F1 阶段。
+**主链直接 import 的只有两个模块**：`roles`、`sources`。其余要么被这两个间接使用，
+要么纯属契约层。
 
-**为什么先做这些**：上面每一项现在都是散落的约定（提示词里的"必须"、
-工具表的全量注入、子智能体自己现编上下文）。把它们变成**机器可校验的数据结构**，
-后面接主链才有地基，否则接一次改一次。
+| 模块 | 状态 | 谁在用 |
+|---|---|---|
+| `roles` | ✅ 主链直接引用 | `core/subagents.py`（岗位注册表、角色解析）、`tools/subagent_tool.py`（岗位一览） |
+| `sources` | ✅ 主链直接引用 | `core/subagents.py`（`ContextBuilder` 装配子智能体上下文） |
+| `context` | ✅ 间接依赖 | 被 `sources` 使用（上下文装配） |
+| `memory` | ✅ 间接依赖 | 被 `sources` 使用（`get_memory_facade`） |
+| `identity` | 契约层 | 定义"谁在跑、谁派的、多深"；测试覆盖 |
+| `brief` | 契约层 | TaskBrief / ReportPacket / DelegationPlan；测试覆盖 |
+| `blackboard` | 契约层 | 共享白板；测试覆盖 |
+| `messaging` | 契约层 | 消息总线与路由规则；测试覆盖 |
+
+## 为什么这个划分是稳定的
+
+`roles` / `context` / `sources` 回答的是**子智能体运行时必须回答的问题**
+（谁来干、能看到什么、预算多少），所以主链直接依赖它们。
+
+`identity` / `brief` / `blackboard` / `messaging` 回答的是"多智能体协作**将来**需要什么"，
+目前主链只用单角色 + 事件推送，还没有协作场景 —— 它们作为契约先定义好，由
+`tests/test_agentkit_contracts.py`、`test_f2_context_memory.py`、`test_f3_messaging.py` 守着。
+
+## 不允许的漂移
+
+不要把这里改回"完全不接主链"或"全部接进主链"的二元说法。
+当前事实就是**部分接线**，上面的表格是唯一真相；
+`tests/test_agentkit_contracts.py::test_declared_wiring_matches_reality` 会校验这张表。
+
+对应 `docs/18-智能体基础设施规划.md`。
 """
 from core.agentkit.brief import (
     STATUS_BLOCKED,

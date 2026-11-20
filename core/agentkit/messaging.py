@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from infra.logger import get_logger
+from core.exception_policy import downgrade
 
 # ===== 消息类型 =====
 
@@ -413,9 +414,8 @@ class MessageBus:
             from core.audit import append_jsonl
 
             append_jsonl("messages.jsonl", msg.to_dict())
-        except Exception:
-            pass
-
+        except Exception as exc:
+            downgrade(exc, where='core/agentkit/messaging.py')
     def stats(self) -> Dict[str, Any]:
         """总线统计（观测用）。"""
         return {
