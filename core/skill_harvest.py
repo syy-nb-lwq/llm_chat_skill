@@ -294,7 +294,10 @@ class SkillDraftStore:
         path = self._path(skill.id)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload: Dict[str, Any] = {"origin": origin, "skill": asdict(skill)}
+            # 用户原话里可能直接贴了 API key / 内网地址（真实发生过：两条草稿
+            # 的 origin 明文存着 sk-... 和 http://x.x.x.x:port）。存盘前统一脱敏，
+            # 这里不截断，保留足够上下文给人判断这条草稿讲的是什么。
+            payload: Dict[str, Any] = {"origin": _scrub_origin(origin), "skill": asdict(skill)}
             if revision_of:
                 payload["revision_of"] = revision_of
                 payload["base_version"] = base_version
@@ -577,6 +580,19 @@ _SCRUB_RES = (
     re.compile(r"\b[A-Za-z0-9]{32,}\b"),
     re.compile(r"[A-Za-z]:\\[^\s，。；、]+"),
 )
+
+
+def _scrub_origin(text: str, limit: int = 200) -> str:
+    """脱敏用户原话里的密钥/链接/路径，供草稿 origin 存储。
+
+    和 ``_scrub`` 共用规则，但不压到 80 字 —— origin 是给人看"这条草稿源自哪句话"，
+    要留够上下文。密钥这类敏感串无论如何都不能明文落盘。
+    """
+    out = str(text or "")
+    for pattern in _SCRUB_RES:
+        out = pattern.sub("<已省略>", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out[:limit].rstrip() + ("…" if len(out) > limit else "")
 
 
 def _scrub(text: str, limit: int = 80) -> str:
