@@ -152,6 +152,10 @@ export default {
       // 记忆全景：短期/长期/经验各层到底有多少东西
       // 只展示画像时，用户会以为"系统什么都没记" —— 其实别的层有数据
       overview: null,
+      // 保存 WS 监听函数引用，卸载时才能精确移除。
+      // 之前直接传 this.refresh 给 on()，_emit 裸调用 cb() 时 this 指向丢失，
+      // refresh 里 this.sessionId 报错被 catch 吞掉 —— 面板永远空白。
+      onConnected: null,
     }
   },
   computed: {
@@ -163,16 +167,29 @@ export default {
       return this.entries.filter((e) => e.type === this.filter)
     },
   },
+  watch: {
+    // 会话身份是 WS 连上后才签发的，且本组件用 v-show 常驻挂载。
+    // 监听 sessionId 变化，无论 WS 在挂载前还是挂载后连上都能加载，
+    // 也避免只靠一次性 connected 事件的竞态（事件先发过就再也收不到）。
+    sessionId(val) {
+      if (val) this.refresh()
+    },
+  },
   mounted() {
     if (this.sessionId) {
       this.refresh()
     } else {
-      // 身份是 WS 连接后签发的 —— 连上再拉
-      wsService.on(EV.CONNECTED, this.refresh)
+      // 身份是 WS 连接后签发的 —— 连上再拉。
+      // 必须用箭头函数绑定 this：wsService._emit 是裸调用 cb()，
+      // 直接传 this.refresh 会丢失 this 指向、报错被吞、面板空白。
+      this.onConnected = () => this.refresh()
+      wsService.on(EV.CONNECTED, this.onConnected)
     }
   },
   beforeUnmount() {
-    wsService.off(EV.CONNECTED, this.refresh)
+    if (this.onConnected) {
+      wsService.off(EV.CONNECTED, this.onConnected)
+    }
   },
   methods: {
     async refresh() {
