@@ -384,7 +384,7 @@ Frontend / CLI / Streamlit
 |---|---|---|
 | 身份 | `user_id` + `tenant_id` | 只有 `session_id` |
 | 令牌 | 会话令牌 + 长期用户令牌（HMAC） | 无 |
-| 假用户服务 | `core/user_service.py` + `POST /api/users` | 已删除（端点保留为兼容） |
+| 假用户服务 | `core/user_service.py` + `POST /api/users` | 全部删除（含 `/api/users` 端点） |
 | 管理接口鉴权 | `OWNER_TOKEN` | 无（`require_auth` 为 no-op） |
 | 记忆隔离 | 按 `user_id` 过滤 | 按 `scope` + `agent_id` 分层 |
 | 执行目录 | 按 `user_id + session_id` | 按 `session_id` |
@@ -404,14 +404,14 @@ Frontend / CLI / Streamlit
 - 补丁发布前跑回归样例（`core/result_validator.py`），自动发布还需写审计记录
 - 每次 `handle()` 生成唯一 `execution_id`，失败记录不再互相覆盖
 - 规划器工具枚举从 `ToolHub` 动态生成
-- WebSocket 身份由服务端签发，令牌校验后才放行
-- 用户身份跨连接稳定（假用户服务 + 长期用户令牌）
+- WebSocket 连接由服务端签发 `client_id` 作为路由句柄，**不校验令牌**（本地单用户）
+- 会话跨连接稳定：`session_id` 由客户端带回，服务端据此恢复会话内容
 - 意图识别的三处关键词误伤已修（结构化正则 + 元问题拦截）
 - 意图识别已分层：L0 守卫层（0 LLM）→ L1 闭集判别（一次 LLM 调用）→ L2 规划（不再输出意图）
   → L3 澄清（意图不明时问一句 + 候选项）；L1 低置信升级 L2 兜底，分类失败不拖垮链路
 - 会话内容全量落库，服务重启 / 浏览器刷新后可继续问答（短期记忆）
 - 用户画像（长期记忆）已接入主链：**LLM 抽取（证据校验）** → 去重/冲突 → 入库 → **每轮常驻注入**；
-  混合检索用 RRF，`user_id` 强制过滤
+  混合检索用 RRF（本地单用户，无 `user_id` 过滤）
 - 画像进 **回答生成的 system prompt**（不只是规划器）—— 说话方式偏好这才真正生效
 - 长期记忆检索对中文可用：FTS5 切不开汉字，另有一条 **CJK 二元组通道**一起进 RRF
 - 向量通道**默认关闭**：没配 `EMBEDDING_PROVIDER` 就只用 FTS + CJK；
@@ -436,7 +436,7 @@ Frontend / CLI / Streamlit
   多租户对外开放前必须关掉 `CODE_EXEC_ENABLED` 或换容器隔离
 - **用户可见可管理自己的长期记忆**（「记忆」面板）:
   列出、分类、逐条忘掉、全部忘掉;同时显示正在注入的内容。
-  **隔离是强的**:`user_id` 只从令牌里取,不信任 query 参数
+  **没有用户隔离维度**：本地只有一个人，按 `session_id` 与 `scope` 分层
 - **能读文件**：`read_file` 读文本文件（源码/配置/日志），返回带行号的内容；
   单文件上限 10MB，超了明确报错而不是截断当全文；
   大文件分段读；凭据类文件里的密钥值打码后再返回
@@ -449,18 +449,35 @@ Frontend / CLI / Streamlit
 - **有真机基线了**（DeepSeek `deepseek-flash`）：L1 意图开发集 38 条 100%、
   留出集+封存集 96.3%；画像抽取精确率 100%（CI 闸门 ≥95%）；
   基线按**分布**报（多遍跑，取最差一遍做闸门），不是单次数字
+- **事件名有唯一来源**：`core/events.py` → 生成 `frontend/src/events.js`，
+  后端只写常量、前端只用 `EV.*`；四道契约测试守着（见 §8.5）
+- **工具参数有校验边界**：`tools/validation.py` 在 `hub` 执行前校验必填 / 未知 /
+  类型 / enum，未知参数给近似候选（`file_path` → `path`），不再"静默空转"
+- **前端只有一个 HTTP 出口**：`frontend/src/api/client.js`（超时 / ApiError / 具名接口），
+  页面里不再有裸 `fetch`
+- **会话串行化**：`Session.submit()` 单队列 + worker；重连复用同一个 Agent
+  （`session_id → Session` 索引），不再出现"同 session 两个 Agent 同时写库"
+- **工程质量有闸门**：ruff（E4/E7/E9/F）零告警；`requirements.txt` 有上界 +
+  `requirements.lock`；`except Exception` 走棘轮（基线 368，只降不升）
 
 ### 仍然存在的限制
 
 - `docs/` 下的细分设计文档仍有部分历史描述，需继续同步
 - `frontend` 没有端到端自动化测试
-- 长期记忆面板已做（`frontend/src/components/MemoryPanel.vue` 接 `GET /api/memories`），
+- 长期记忆面板已做（`MemoryPanel.vue` 接 `GET /api/memory/profile` 与 `/api/memory/overview`），
   但**没有**「这条记忆是从哪句话来的」溯源展示
 - 用户画像抽取是 **LLM + 证据校验**（`core/memory_writer.py` + `core/profile_llm.py`），
   不是纯规则；召回率的天花板在于"用户没说出口的偏好"抽不出来
-- 记忆三层已收口到 `core/memorykit/`（调用方只认三个门面），
-  但**底层仍是两套存储**：画像/经验走 SQLite + JSON 文件两条路，
-  统一存储层（Repository 协议）仍未做；见 §6.1
+- 记忆三层已收口到 `core/memorykit/`（调用方只认三个门面）。
+  底层是**两种载体、互斥职责**：画像走 SQLite（`MemoryDB`），经验走 JSON
+  （`MemoryStore`）。这不是"同一份数据的两个副本"，所以不做合并；
+  代价是"查全部经验"与"查全部画像"是两个入口，`long_term` 门面负责收口
+- `Agent.handle()` 仍是一个长函数（393 行，原 494）：
+  准备 / 事件 / 流式三块已抽出，主执行段（目标循环 + DAG）还耦合在一起，
+  要彻底切分需先引入 `TurnContext` 对象
+- `ManagerAgent` 仍是 1059 行（原 1190）：提示词与 schema 已移到 `agents/prompts.py`，
+  判别 / 规划 / 检索仍在一个 `plan()` 里
+- `core/agentkit` 是"契约层已存在、主链未接完"的并行层，尚未决定接完或移出
 - **自演化质量信号已接通**，但**只有纠正信号**：
   `user_feedback` 现在会被写入（隐式纠正语 + 前端 👍/👎），critic 会把被纠正的轮次记成失败；
   见 `docs/14` §2.3
@@ -475,18 +492,50 @@ Frontend / CLI / Streamlit
   服务端另有 `PUSH_TIMEOUT=10s` 兜底，但客户端不回 ACK 时每条事件会多等一个超时
 
 
+## 8.5 事件契约（前后端唯一真相）
+
+事件名以前散在十几个文件里各写一遍字面量：后端 `emit("thinking")`、前端
+`wsService.on('thinking')`。改一个名字要全仓搜，**漏掉任何一端都不报错** ——
+只是那个面板从此不动了，而且没人知道为什么。
+
+现在只有一个来源：
+
+```text
+core/events.py  ──(scripts/gen_events_js.py)──>  frontend/src/events.js
+      │                                                  │
+      │ 后端：emit(EV_THINKING, ...)                      │ 前端：wsService.on(EV.THINKING, ...)
+      └──────────────────────────────────────────────────┘
+                     tests/test_event_contract.py 守着
+```
+
+- **后端**只能 `from core.events import EV_*`，不允许写字面量；
+- **前端**只能用 `EV.*`（`events.js` 由脚本生成，禁止手改）；
+- 事件分两类：`STREAM_EVENTS`（推前端）与 `AUDIT_EVENTS`（只落 `memory/audit/`）。
+
+测试有四道闸，任何一端偷写新名字都会红：
+
+1. 后端出现的字面量事件名必须在 `core/events.py` 里；
+2. 前端出现的事件名必须在契约里；
+3. `EV.XXX` 引用的常量必须真实存在 —— **JS 里 `on(undefined)` 不报错，
+   只会让监听永远不触发**，这是比写错字符串更隐蔽的失效；
+4. `events.js` 必须与重新生成的结果逐字节一致（防止手改或忘了重新生成）。
+
+CI 里也跑 `python scripts/gen_events_js.py --check`。
+
 ## 9. 目录摘要
 
 ```text
 backend/      FastAPI、Session、WebSocket
-frontend/     Vue 3 前端
-agents/       三个业务 Agent + Trainer
+frontend/     Vue 3 前端（HTTP 统一走 frontend/src/api/client.js）
+agents/       三个业务 Agent + Trainer；agents/prompts.py 是规划提示词与 schema
 core/         Agent、Context、DAG、Memory、SessionMemory、Critic、Reflect
+core/events.py   事件契约（前后端唯一事件名来源）
 core/memorykit/  记忆三层门面（工作 / 短期 / 长期）与职责契约
 skills/       技能模型、加载、注册、存储
-tools/        工具实现与 ToolHub
+tools/        工具实现与 ToolHub（tools/validation.py 是参数校验边界）
 infra/        配置、Provider、日志
+scripts/      gen_events_js.py（生成前端事件常量）、check_except_baseline.py（异常棘轮）
 ui/           Streamlit / CLI
 tests/        自动化测试
-docs/         细分设计文档
+docs/         细分设计文档（00-总览里标注了哪些是历史快照）
 ```

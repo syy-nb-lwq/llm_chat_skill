@@ -270,65 +270,40 @@ SELF_EVOLUTION_ENABLED=true
 P7-5 Provider Plugin      ──── ✅ 已完成
 P7-4 SQLite 长期记忆      ──── ✅ 已完成
 P7-2 SOUL 身份系统        ──── ✅ 已完成
-P7-1 Heartbeat 主动任务   ──── ✅ 已完成
+P7-1 Heartbeat 主动任务   ──── ❌ 未实现(已移除占位)
 P7-3 MCP 工具协议         ──── ✅ 已完成
 ```
 
 ---
 
-### P7-1 — Heartbeat 主动任务 ✅
+### P7-1 — Heartbeat 主动任务 ❌ 未实现（占位实现已移除）
 
-**目标**:让 Agent 能主动定时执行任务,不止被动响应。
+**目标**:让 Agent 能主动定时执行任务,不止被动响应。参考 OpenClaw 的 Heartbeat 机制,
+每 30 分钟唤醒检查 `HEARTBEAT.md` 清单。
 
-**参考**:OpenClaw 的 Heartbeat 机制,每 30 分钟唤醒检查 `HEARTBEAT.md` 清单。
+**为什么移除**：曾有一版 `core/heartbeat.py`（340 行）+ 11 个单测，包含
+`HeartbeatLoader`（解析清单）/ `HeartbeatScheduler`（定时触发）/ `HeartbeatAgent`（执行）。
+但 `HeartbeatAgent.execute_task()` 里写的是
 
-#### 核心设计
-
-```
-┌─────────────────────────────────────────────────────┐
-│                    HeartbeatScheduler               │
-│  ┌─────────────────────────────────────────────┐    │
-│  │ HEARTBEAT.md (用户定义的定时任务清单)          │    │
-│  │ - 每天 8 点发送日程摘要                       │    │
-│  │ - 检查 CI 构建状态变化                        │    │
-│  │ - 重要邮件标记提醒                            │    │
-│  └─────────────────────────────────────────────┘    │
-│                       │                              │
-│            每 N 分钟触发一次                          │
-│                       ▼                              │
-│  ┌─────────────────────────────────────────────┐    │
-│  │ HeartbeatAgent                              │    │
-│  │ 1. 加载 HEARTBEAT.md                         │    │
-│  │ 2. 按条件筛选待执行项                         │    │
-│  │ 3. 若无任务 → 返回 HEARTBEAT_OK (静默)        │    │
-│  │ 4. 若有任务 → 正常执行 + 推送结果              │    │
-│  └─────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────┘
+```python
+# 这里应该调用 LLM 执行实际任务
+# 目前只是模拟
+result = f"任务 '{task.description}' 执行完成"
 ```
 
-#### 已完成文件
+——它不做事，却返回"执行完成"。而且它没有任何入口（`backend/main.py` 既不启动
+scheduler，也没有开关），`heartbeat/HEARTBEAT.md` 之外没有真实使用。
 
-| 文件 | 说明 |
-|---|---|
-| [core/heartbeat.py](file:///d:\pythonProject\langchain_functioncall\core\heartbeat.py) | HeartbeatScheduler + HeartbeatAgent |
-| [heartbeat/HEARTBEAT.md](file:///d:\pythonProject\langchain_functioncall\heartbeat\HEARTBEAT.md) | 任务配置示例 |
-| [tests/test_heartbeat.py](file:///d:\pythonProject\langchain_functioncall\tests\test_heartbeat.py) | 单元测试 (11 passed) |
+把它接到主链只会产出**假的成功结果**，比不接更糟。因此连同占位实现、单测、
+空配置一起删除；需要时从 git 历史恢复并**先把执行器做成真的**（接
+`Agent.handle`，带失败语义与审计），再加 feature flag 默认关闭。
 
-#### 启用方式
+**前置条件**（重新做之前必须满足）：
 
-```bash
-# .env 配置
-HEARTBEAT_ENABLED=true
-HEARTBEAT_INTERVAL_SECONDS=1800  # 30 分钟
-HEARTBEAT_PATH=heartbeat/HEARTBEAT.md
-```
-
-#### 验收
-
-- [x] HeartbeatScheduler 定时调度器
-- [x] HEARTBEAT.md 加载器 + 条件解析
-- [x] HEARTBEAT_OK 静默跳过机制
-- [x] 支持每天/每隔 N 分钟/每隔 N 小时 触发条件
+1. 执行器真的执行（复用 `Agent.handle`，不是拼字符串）；
+2. 失败要落 `memory/failures`，不能静默；
+3. 默认关闭，开启需显式配置；
+4. 不能与用户正在进行的轮次抢同一个 Agent（参见 §01 会话串行化）。
 
 ---
 
@@ -549,7 +524,7 @@ LOCAL_MODEL=llama3.2
 | P7-5 Provider Plugin | 高(解耦 LLM) | 中 | ✅ 已完成 |
 | P7-4 SQLite 记忆 | 高(体验提升) | 中 | ✅ 已完成 |
 | P7-2 SOUL 身份 | 中(差异化) | 低 | ✅ 已完成 |
-| P7-1 Heartbeat | 中(主动性) | 中 | ✅ 已完成 |
+| P7-1 Heartbeat | 中(主动性) | 中 | ❌ 未实现（占位实现已移除） |
 | P7-3 MCP 协议 | 中(生态集成) | 高 | ✅ 已完成 |
 
 ---
