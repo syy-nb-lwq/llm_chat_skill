@@ -36,6 +36,7 @@
           <ToolList :tools="tools" />
         </div>
         <div v-show="activeTab === 'skills'" class="sidebar-content">
+          <SkillDrafts @approved="loadData" />
           <SkillManager
             :skills="skills"
             :loading="loading"
@@ -77,6 +78,7 @@ import { sessionApi, skillsApi, toolsApi } from './api/client'
 import ToolList from './components/ToolList.vue'
 import SkillList from './components/SkillList.vue'
 import SkillManager from './components/SkillManager.vue'
+import SkillDrafts from './components/SkillDrafts.vue'
 import FlowPanel from './components/FlowPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import PatchReview from './components/PatchReview.vue'
@@ -86,7 +88,7 @@ import SessionList from './components/SessionList.vue'
 
 export default {
   name: 'App',
-  components: { ToolList, SkillList, SkillManager, FlowPanel, ChatPanel, PatchReview, EvolutionDashboard, MemoryPanel, SessionList },
+  components: { ToolList, SkillList, SkillManager, SkillDrafts, FlowPanel, ChatPanel, PatchReview, EvolutionDashboard, MemoryPanel, SessionList },
   data() {
     return {
       isConnected: false,

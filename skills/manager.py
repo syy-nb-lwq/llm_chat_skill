@@ -8,7 +8,7 @@ import yaml
 from infra.logger import get_logger
 from skills.loader import SkillLoader
 from skills.models import Skill
-from skills.registry import SkillRegistry
+from skills.registry import SkillConflictError, SkillRegistry
 
 
 def _bump_version(version: str) -> str:
@@ -59,6 +59,42 @@ class SkillStore:
             self._registry.set_active(skill.name, skill.version)
         self._skills = self._registry._by_name
         return skill.id
+
+    def persist(self, skill: Skill) -> Optional[Path]:
+        """把技能写到磁盘并切 active —— **落盘的唯一入口**。
+
+        为什么单独抽出来：`add()` 只动内存索引，进程一重启技能就没了。
+        `approve_draft()` 原先直接调 `add()`，于是出现「批准了、界面也有了、
+        重启之后又空了」——提炼链路明明跑通，方法论却一条都没沉淀下来。
+
+        - `taught` / `harvested` 写 ``<base>/user/``（人教的和自己攒的）
+        - 其余写 ``<base>/builtin/``
+
+        Returns:
+            写成功的路径；失败返回 None（已记日志）。
+        """
+        folder = "user" if str(getattr(skill, "source", "")) in ("taught", "harvested") else "builtin"
+        target_dir = Path(self.base_path) / folder
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            data = skill.to_dict()
+            data["active"] = True
+            path = target_dir / f"{skill.name}@{skill.version}.yaml"
+            path.write_text(
+                yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            self.logger.error("Skills", f"技能落盘失败 {skill.name}: {exc}")
+            return None
+
+        try:
+            self.add(skill, set_active=True)
+        except SkillConflictError:
+            # 磁盘已经是真相，下面 reload 会把内存索引对齐
+            pass
+        self.reload()
+        return path
 
     def get(self, skill_id: str) -> Optional[Skill]:
         return self._registry._by_id.get(skill_id)

@@ -408,3 +408,113 @@ def test_delete_draft_api(api_client, monkeypatch):
     r = c.delete(f"/api/skill-drafts/{skill.id}")
     assert r.status_code == 200
     assert store.get(skill.id) is None
+
+# ============================================================
+# 6. 质量闸门：拦「执行日志的散文版」
+# ============================================================
+#
+# 真实教训：15 条草稿里 9 条写成「第一步用 python_exec…；第二步用 publish_artifact…」，
+# 换个场景一个字都用不上。工具顺序已经存在 steps 里，method 再念一遍毫无价值 ——
+# 而且这类技能进库后会污染匹配、占注入预算。
+
+
+def test_rejects_method_that_repeats_tool_names(drafts):
+    """正文点名多个工具 → 这是调用日志，不是方法论。"""
+    from core.skill_harvest import _build_skill_from_plan
+
+    payload = dict(GOOD_PAYLOAD)
+    payload["method"] = (
+        "第一步，用 python_exec 生成产物；第二步，调用 publish_artifact 发布；"
+        "第三步，再用 python_exec 复核结果，失败就重试直到 publish_artifact 成功。"
+    )
+    skill, why = _build_skill_from_plan(
+        payload, user_input="x", tool_results=_results(2),
+        task_specs=_specs("python_exec", "publish_artifact"),
+    )
+    assert skill is None
+    assert "执行日志" in why, why
+
+
+def test_warns_when_only_steps_without_judgement():
+    """三步以上却一个判断都没有 → 提醒（不拒收，人来定）。"""
+    from core.skill_harvest import assess_method_quality
+
+    q = assess_method_quality(
+        "第一步，打开官网；第二步，看定价页；第三步，搜一下评测；第四步，整理成表格。"
+    )
+    assert q["reject"] is False
+    assert any("执行日志" in w for w in q["warnings"]), q["warnings"]
+
+
+def test_flags_patterns_copied_from_origin():
+    """触发词直接抄用户原话 → 以后只有原话能命中，等于没写。"""
+    from core.skill_harvest import assess_method_quality
+
+    q = assess_method_quality(
+        "如果目标是选品，就先算清成本与佣金，再判断竞争度是否可接受。",
+        origin="主要是选品工具 你觉得 你可以帮我干啥",
+        patterns=["主要是选品工具"],
+    )
+    assert q["reject"] is False
+    assert any("原话" in w for w in q["warnings"]), q["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_honors_worth_keeping_false(drafts):
+    """模型自己说这次不值得沉淀 → 不存草稿。"""
+    payload = {"worth_keeping": False, "reason": "一次性的临时任务"}
+    out = await harvest(
+        "把这份文件转成 pdf",
+        _results(2),
+        rounds=2,
+        task_specs=_specs("read_multiple_files", "python_exec"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(payload)),
+    )
+    assert out.skipped is True
+    assert out.skill is None
+    assert "没有可复用价值" in out.reason
+    assert drafts.list() == []
+
+
+def test_trajectory_carries_failure_reason_without_secrets():
+    """失败原因要带给提炼模型，但链接/密钥/路径必须脱敏。"""
+    text = _build_trajectory(
+        {
+            "t1": FakeResult(success=False, error="连接 https://api.example.com/v1 失败 key=sk-abcdefgh12345678"),
+            "t2": FakeResult(success=True, data={"ok": 1}),
+        },
+        {
+            "t1": {"type": "publish_artifact", "params": {"path": "D:/x/y.mp4"}},
+            "t2": {"type": "python_exec", "params": {"code": "print(1)"}},
+        },
+    )
+    assert "失败" in text
+    assert "publish_artifact" in text
+    assert "example.com" not in text, "URL 泄漏到提炼提示词里了"
+    assert "sk-abcdefgh12345678" not in text, "密钥泄漏到提炼提示词里了"
+    assert "D:/x/y.mp4" not in text, "参数值泄漏到提炼提示词里了"
+
+
+def test_approve_draft_persists_through_restart(tmp_path, drafts, monkeypatch):
+    """批准后必须**落盘** —— 否则重启一次技能库又空了。"""
+    import core.skill_harvest as mod
+    from skills.manager import SkillStore
+
+    monkeypatch.setattr(mod, "_draft_store", drafts)
+    store = SkillStore(str(tmp_path / "skills"))
+    monkeypatch.setattr(mod, "get_draft_store", lambda: drafts)
+
+    skill = build_skill_from_plan(
+        GOOD_PAYLOAD, user_input="x", tool_results=_results(2),
+        task_specs=_specs("web_search", "web_fetch"),
+    )
+    draft_id = drafts.save(skill)
+
+    ok, msg = approve_draft(draft_id, store=store, drafts=drafts)
+    assert ok, msg
+
+    # 模拟重启：新开一个 store 从磁盘读
+    fresh = SkillStore(str(tmp_path / "skills"))
+    assert fresh.get_by_name(skill.name) is not None, "批准后重启就丢了"
+    assert list((tmp_path / "skills" / "user").glob("*.yaml")), "没有写 yaml 文件"

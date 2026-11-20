@@ -136,6 +136,22 @@ export const skillsApi = {
     ),
 }
 
+export const skillDraftsApi = {
+  /**
+   * 待批准的方法论草稿。
+   *
+   * 为什么要单独一组接口：agent 做成一件多步任务后会自己提炼方法论，
+   * 但**人不批准就不进技能库**（垃圾技能比没有技能更糟）。
+   * 之前这批草稿只在后端躺着，界面上无处可见 —— 于是"沉淀了 15 条、
+   * 技能库 0 条"。
+   */
+  list: () => request('/api/skill-drafts'),
+  approve: (id) =>
+    request(`/api/skill-drafts/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
+  discard: (id) =>
+    request(`/api/skill-drafts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+}
+
 export const uploadApi = {
   /**
    * 把一个本地文件送到后端上传区，拿回后端可读的绝对路径。
