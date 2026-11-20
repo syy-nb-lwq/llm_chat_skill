@@ -33,6 +33,8 @@ vector_store/
 .acl_report/
 # 只忽略项目根的 memory/（运行时数据），不影响 .workbuddy/memory/ 里的项目记忆
 /memory/
+# 迁移脚本每次 --apply 生成的备份（memory.bak-<时间戳>/），不忽略会一直挂在 git status 上
+/memory.bak-*/
 *.xlsx
 *.xls
 
