@@ -14,8 +14,9 @@
     </div>
 
     <p class="hint">
-      agent 做成一件事后会自己提炼方法论，但批准前不生效 ——
-      注水的技能会污染匹配、白占提示词预算。
+      skill 是做事的方法，不是做过的事。同一类事要攒够 <b>3 次</b> 观察、<b>且真说出学到的东西</b>才够格晋升 ——
+      光重复 100 次也成不了技能。已有技能再有新判断时产出修订（版本 +1），不是又添一条。
+      每条草稿都标了「价值」判定，批准前可点开看它凭什么。
     </p>
 
     <div v-if="loading" class="empty">加载中...</div>
@@ -24,6 +25,17 @@
     <div v-for="d in drafts" :key="d.id" class="draft-card" :class="{ risky: hasIssues(d) }">
       <div class="draft-head" @click="toggle(d.id)">
         <span class="name">{{ d.name || '(未命名)' }}</span>
+        <span v-if="d.revision_of" class="badge rev">修订 v{{ d.base_version || '?' }}</span>
+        <span
+          v-if="valueOf(d).valuable === false"
+          class="badge bad"
+          title="这条没有可迁移的判断，批准前请仔细看"
+        >无价值</span>
+        <span
+          v-else-if="valueOf(d).valuable === true"
+          class="badge value"
+          title="命中了可迁移的判断信号"
+        >有价值</span>
         <span v-if="hasIssues(d)" class="badge bad">建议改写</span>
         <span v-else-if="warnCount(d)" class="badge warn">{{ warnCount(d) }} 处提醒</span>
         <span v-else class="badge ok">可批准</span>
@@ -36,6 +48,10 @@
       <div v-if="expanded[d.id]" class="detail">
         <div class="section-title">方法论</div>
         <pre class="method">{{ d.method }}</pre>
+
+        <div v-if="valueOf(d).reason" class="value-note" :class="valueOf(d).valuable ? 'good' : 'poor'">
+          {{ valueOf(d).valuable ? '✓ 价值：' : '⛔ 价值存疑：' }}{{ valueOf(d).reason }}
+        </div>
 
         <template v-if="qualityOf(d).issues && qualityOf(d).issues.length">
           <div class="note bad-note">⛔ {{ qualityOf(d).issues.join('；') }}</div>
@@ -61,12 +77,42 @@
       </div>
     </div>
 
+    <div class="comp-section">
+      <div class="header-row comp-header" @click="showComps = !showComps">
+        <h4>能力档案 <span class="count">{{ competences.length }}</span></h4>
+        <span class="caret">{{ showComps ? '▼' : '▶' }}</span>
+      </div>
+      <p class="hint">
+        同一类事做过几次、还差几次够格 —— 技能就是从这些观察里长出来的。
+      </p>
+      <div v-show="showComps">
+        <div v-if="!competences.length" class="empty">还没观察到可归类的能力</div>
+        <div v-for="c in competences" :key="c.key" class="comp-card">
+          <div class="comp-head">
+            <span class="name">{{ c.title }}</span>
+            <span
+              class="badge"
+              :class="c.has_skill ? 'ok' : (c.ready ? 'warn' : 'mut')"
+            >{{ c.has_skill ? ('已成技能 v' + c.version) : (c.ready ? '够格' : c.progress) }}</span>
+          </div>
+          <div class="comp-meta">{{ c.reason }}<span v-if="c.revisions"> · 已修订 {{ c.revisions }} 次</span></div>
+          <div v-if="(c.insights || []).length" class="comp-insights">
+            <div v-for="(ins, i) in c.insights" :key="i" class="insight">💡 {{ ins }}</div>
+          </div>
+          <div class="comp-foot">
+            <span class="key">{{ c.key }}</span>
+            <button class="forget" @click="forget(c)">忘掉</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="toast" class="toast">{{ toast }}</div>
   </div>
 </template>
 
 <script>
-import { skillDraftsApi } from '../api/client'
+import { skillDraftsApi, competenceApi } from '../api/client'
 
 export default {
   name: 'SkillDrafts',
@@ -74,10 +120,12 @@ export default {
   data() {
     return {
       drafts: [],
+      competences: [],
       loading: false,
       busy: '',
       purging: false,
       expanded: {},
+      showComps: false,
       toast: '',
     }
   },
@@ -93,6 +141,9 @@ export default {
     qualityOf(d) {
       return d.quality || {}
     },
+    valueOf(d) {
+      return d.value || {}
+    },
     hasIssues(d) {
       const q = this.qualityOf(d)
       return !!(q.issues && q.issues.length)
@@ -104,6 +155,25 @@ export default {
     toggle(id) {
       this.expanded[id] = !this.expanded[id]
     },
+    async loadCompetences() {
+      try {
+        const data = await competenceApi.list()
+        this.competences = data.items || []
+      } catch (e) {
+        // 档案只是解释性信息，读不到不该挡住草稿审批
+        this.competences = []
+      }
+    },
+    async forget(c) {
+      if (!confirm(`忘掉「${c.title}」这条档案？\n\n以后同类任务会重新从 0 开始计数。`)) return
+      try {
+        await competenceApi.forget(c.key)
+        this.flash(`已忘掉「${c.title}」`)
+        await this.loadCompetences()
+      } catch (e) {
+        this.flash('忘掉失败: ' + e.message)
+      }
+    },
     async load() {
       this.loading = true
       try {
@@ -114,6 +184,7 @@ export default {
       } finally {
         this.loading = false
       }
+      this.loadCompetences()
     },
     async approve(d) {
       const warn = this.hasIssues(d)
@@ -246,6 +317,9 @@ export default {
 .badge.ok { background: rgba(102,187,106,0.2); color: #81c784; }
 .badge.warn { background: rgba(255,183,77,0.2); color: #ffb74d; }
 .badge.bad { background: rgba(239,83,80,0.22); color: #ef9a9a; }
+.badge.value { background: rgba(118,75,162,0.3); color: #ce93d8; }
+.badge.rev { background: rgba(33,150,243,0.22); color: #90caf9; }
+.badge.mut { background: rgba(255,255,255,0.08); color: #9aa5c2; }
 .caret { margin-left: auto; color: #8d97b5; font-size: 10px; }
 
 .capability { margin: 6px 0 4px; font-size: 12px; color: #c3cbe0; }
@@ -288,6 +362,15 @@ export default {
 }
 .bad-note { background: rgba(239,83,80,0.14); color: #ef9a9a; }
 .warn-note { background: rgba(255,183,77,0.12); color: #ffcc80; }
+.value-note {
+  margin-top: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.value-note.good { background: rgba(118,75,162,0.16); color: #ce93d8; }
+.value-note.poor { background: rgba(239,83,80,0.12); color: #ef9a9a; }
 
 .patterns { display: flex; flex-wrap: wrap; gap: 4px; }
 .pattern {
@@ -328,6 +411,50 @@ export default {
 }
 .discard:hover { background: rgba(239,83,80,0.28); }
 .actions button:disabled { opacity: 0.5; cursor: default; }
+
+.comp-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+.comp-header { cursor: pointer; user-select: none; }
+.comp-card {
+  background: rgba(255,255,255,0.04);
+  border-left: 3px solid rgba(255,255,255,0.16);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.comp-head { display: flex; align-items: center; gap: 8px; }
+.comp-meta { margin-top: 4px; font-size: 11px; color: #8d97b5; line-height: 1.5; }
+.comp-insights { margin-top: 5px; }
+.insight {
+  font-size: 10.5px;
+  color: #c9b3e6;
+  line-height: 1.5;
+  padding: 2px 0;
+}
+.comp-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+.comp-foot .key {
+  font-size: 10px;
+  color: #6f7a99;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.forget {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.14);
+  color: #8d97b5;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 10px;
+}
+.forget:hover { color: #ef9a9a; border-color: rgba(239,83,80,0.4); }
 
 .toast {
   position: fixed;

@@ -68,16 +68,41 @@ class FakeSkillStore:
 
 
 GOOD_PAYLOAD = {
+    "worth_keeping": True,
+    "capability_key": "competitor_research",
     "name": "竞品调研",
     "capability": "快速摸清一个陌生产品的关键信息",
     "method": (
-        "第一步,先用搜索确认官方站点和文档入口;"
-        "第二步,抓取官网首页和定价页,提取定位与价格档位;"
-        "第三步,搜索第三方评测,补充独立视角的优缺点;"
-        "第四步,把四处信息对齐成一张对比表再下结论。"
+        "先判断这是不是「同一类」需求：如果目标是把陌生产品摸清，就先找到官方入口，"
+        "再看定价页判断定位与档位；如果只有第三方来源，必须交叉两个以上再下结论。"
+        "常见的坑是把营销话术当事实 —— 官网自称「领先」不能进结论，要能对上可验证的数字。"
+        "完成标准是一句话能说清它的定位、价格档位和主要短板，缺任何一项都不算做完。"
     ),
     "patterns": ["调研一下这个产品", "看看竞品", "帮我做个对比"],
 }
+
+
+def _prime(ledger, key="competitor_research", times=2, corrected=0, **extra):
+    """预置 n 次同类观察 —— 让"第 n+1 次"够格晋升。"""
+    for i in range(times):
+        ledger.record(
+            key,
+            title=extra.get("title", "竞品调研"),
+            capability=extra.get("capability", "快速摸清一个陌生产品"),
+            method=extra.get("method", GOOD_PAYLOAD["method"]),
+            patterns=extra.get("patterns", GOOD_PAYLOAD["patterns"]),
+            tools=["web_search", "web_fetch"],
+            user_input=f"第 {i + 1} 次同类任务",
+            corrected=i < corrected,
+        )
+    if extra.get("bind"):
+        ledger.bind_skill(
+            key,
+            skill_id=extra.get("skill_id", "skill_old"),
+            skill_name=extra.get("skill_name", "竞品调研"),
+            version=extra.get("version", "1.0.0"),
+        )
+    return ledger
 
 
 def _results(n=2):
@@ -91,6 +116,13 @@ def _specs(*tools):
 @pytest.fixture
 def drafts(tmp_path):
     return SkillDraftStore(base_path=tmp_path / "drafts")
+
+
+@pytest.fixture
+def ledger(tmp_path):
+    from core.skill_ledger import CompetenceLedger
+
+    return CompetenceLedger(path=tmp_path / "ledger.json")
 
 
 # ============================================================
@@ -130,8 +162,9 @@ async def test_skips_when_nothing_succeeded(drafts):
 
 
 @pytest.mark.asyncio
-async def test_harvests_multi_tool_task(drafts):
-    """≥2 个不同工具 → 值得沉淀。"""
+async def test_harvests_multi_tool_task(drafts, ledger):
+    """≥2 个不同工具 + 同类攒够次数 → 够格产出草稿。"""
+    _prime(ledger, times=2)
     llm = FakeLLM(json.dumps(GOOD_PAYLOAD))
     out = await harvest(
         "帮我调研一下竞品",
@@ -141,15 +174,19 @@ async def test_harvests_multi_tool_task(drafts):
         drafts=drafts,
         store=FakeSkillStore(),
         llm=llm,
+        ledger=ledger,
     )
     assert out.skill is not None, out.reason
+    assert out.status == "drafted"
+    assert out.competence_key == "competitor_research"
     assert out.skill.name == "竞品调研"
     assert llm.calls, "没有调用 LLM 提炼"
 
 
 @pytest.mark.asyncio
-async def test_harvests_multi_round_task(drafts):
+async def test_harvests_multi_round_task(drafts, ledger):
     """轮次够多也算有实质过程（哪怕只用一个工具）。"""
+    _prime(ledger, times=2)
     out = await harvest(
         "帮我反复查清楚这件事",
         _results(1),
@@ -158,23 +195,263 @@ async def test_harvests_multi_round_task(drafts):
         drafts=drafts,
         store=FakeSkillStore(),
         llm=FakeLLM(json.dumps(GOOD_PAYLOAD)),
+        ledger=ledger,
     )
     assert out.skill is not None, out.reason
+
+
+# ============================================================
+# 1b. 晋升节奏：一次不算一类
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_first_observation_only_records(drafts, ledger):
+    """第 1 次做完，只记账 —— 不产技能。
+
+    这是这次重设计的核心：技能是「一类任务的做法」，
+    一次任务只是它的一个样本。
+    """
+    out = await harvest(
+        "帮我调研一下竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(GOOD_PAYLOAD)),
+        ledger=ledger,
+    )
+    assert out.skill is None
+    assert out.status == "accumulating"
+    assert drafts.list() == [], "第一次就产草稿 = 又回到「一次一条」"
+    comp = ledger.get("competitor_research")
+    assert comp and len(comp["evidence"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_second_observation_still_accumulating(drafts, ledger):
+    """第 2 次还不够：两次可能只是同一批工作的两半。"""
+    _prime(ledger, times=1)
+    out = await harvest(
+        "帮我调研一下竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(GOOD_PAYLOAD)),
+        ledger=ledger,
+    )
+    assert out.status == "accumulating"
+    assert drafts.list() == []
+    assert len(ledger.get("competitor_research")["evidence"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_correction_raises_the_bar(drafts, ledger):
+    """被纠正过说明原来做法错了 —— 需要更多次干净成功才够格。"""
+    _prime(ledger, times=2, corrected=1)  # 3 次里有 1 次被纠正
+    out = await harvest(
+        "帮我调研一下竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(GOOD_PAYLOAD)),
+        ledger=ledger,
+    )
+    assert out.status == "accumulating", "4 次里有 1 次纠正，还不够"
+    assert "纠正" in out.reason
+
+
+@pytest.mark.asyncio
+async def test_same_observation_still_counts(drafts, ledger):
+    """「和上次一样」必须照常记账，而且照样能晋升。
+
+    这是实测暴露的坑：第 3 次同类任务，模型判「完全同类、没有新判断」，
+    如果把它当成「不值得沉淀」直接丢弃，这个档案就永远停在 2 次 ——
+    做法越稳定，反而越沉淀不下来。
+    """
+    _prime(ledger, times=2)
+    same = {
+        "novelty": "same",
+        "capability_key": "competitor_research",
+        "name": "竞品调研",
+        "capability": "快速摸清一个陌生产品",
+    }
+    out = await harvest(
+        "再帮我调研一个竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(same)),
+        ledger=ledger,
+    )
+    assert out.status == "drafted", out.reason
+    assert out.skill.method, "判 same 时正文要从档案里沿用它，不能是空的"
+    assert "同一类" in out.skill.method or "判断" in out.skill.method
+
+
+@pytest.mark.asyncio
+async def test_not_worth_is_not_recorded(drafts, ledger):
+    """「这类事本身不值得沉淀」连账都不记 —— 否则档案表会被一次性任务塞满。"""
+    payload = {
+        "novelty": "not_worth",
+        "capability_key": "one_off_convert",
+        "reason": "一次性的临时转换",
+    }
+    out = await harvest(
+        "把这份文件转成 pdf",
+        _results(2),
+        rounds=2,
+        task_specs=_specs("read_multiple_files", "python_exec"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(payload)),
+        ledger=ledger,
+    )
+    assert out.status == "skipped"
+    assert "不值得沉淀" in out.reason
+    assert ledger.all() == []
+    assert drafts.list() == []
+
+
+@pytest.mark.asyncio
+async def test_distinct_capabilities_do_not_pollute(drafts, ledger):
+    """不同能力互不计数 —— 否则「做过三件事」就冒充「一类事做了三次」。"""
+    _prime(ledger, key="competitor_research", times=2)
+    other = dict(GOOD_PAYLOAD, capability_key="ecom_listing_batch", name="批量上架")
+    out = await harvest(
+        "帮我批量上架这几个品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(other)),
+        ledger=ledger,
+    )
+    assert out.status == "accumulating"
+    assert len(ledger.get("ecom_listing_batch")["evidence"]) == 1
+    assert len(ledger.get("competitor_research")["evidence"]) == 2
+
+
+# ============================================================
+# 1c. 晋升之后：产出的是修订，不是新技能
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_revision_instead_of_new_skill(drafts, ledger):
+    """同一个档案已有技能 → 产出修订草稿，顶在原技能上，不新增一条。"""
+    _prime(ledger, times=3, bind=True, skill_name="竞品调研", version="1.0.0")
+    payload = dict(GOOD_PAYLOAD, revision_note="上一版说交叉来源即可；这次发现官网自述不能当事实")
+    out = await harvest(
+        "帮我调研一下竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(payload)),
+        ledger=ledger,
+    )
+    assert out.status == "revision", out.reason
+    items = drafts.list()
+    assert len(items) == 1
+    assert items[0]["revision_of"] == "skill_old"
+    assert items[0]["base_version"] == "1.0.0"
+    assert items[0]["name"] == "竞品调研", "修订必须沿用原技能名，否则升版本找不到文件"
+
+
+@pytest.mark.asyncio
+async def test_repeat_without_new_judgement_is_not_a_revision(drafts, ledger):
+    """「又做了一次，流程一样」不构成修订 —— 否则版本号会无限涨。"""
+    _prime(ledger, times=3, bind=True)
+    payload = dict(GOOD_PAYLOAD, revision_note="")
+    out = await harvest(
+        "帮我调研一下竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(payload)),
+        ledger=ledger,
+    )
+    assert out.status == "skipped"
+    assert "不构成修订" in out.reason
+    assert drafts.list() == []
+
+
+@pytest.mark.asyncio
+async def test_same_capability_keeps_one_pending_draft(drafts, ledger):
+    """同一条档案重复够格，也只留一条待批准草稿，不越堆越多。"""
+    _prime(ledger, times=2)
+    for _ in range(2):
+        await harvest(
+            "帮我调研一下竞品",
+            _results(2),
+            rounds=1,
+            task_specs=_specs("web_search", "web_fetch"),
+            drafts=drafts,
+            llm=FakeLLM(json.dumps(GOOD_PAYLOAD)),
+            ledger=ledger,
+        )
+    assert len(drafts.list()) == 1
+
+
+@pytest.mark.asyncio
+async def test_rejects_bad_capability_key(drafts, ledger):
+    """key 不是 snake_case → 拒绝，不入账（否则档案会碎成一堆同义 key）。"""
+    payload = dict(GOOD_PAYLOAD, capability_key="竞品调研")
+    out = await harvest(
+        "帮我调研一下竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=FakeLLM(json.dumps(payload)),
+        ledger=ledger,
+    )
+    assert out.status == "failed"
+    assert "key" in out.reason
+    assert ledger.all() == []
+
+
+@pytest.mark.asyncio
+async def test_prompt_lists_existing_capabilities(drafts, ledger):
+    """已有档案要喂给模型 —— 不喂它就会另起一个 key，这正是过去失控的原因。"""
+    _prime(ledger, key="short_drama_video_publish", times=1, title="短剧视频发布")
+    llm = FakeLLM(json.dumps(GOOD_PAYLOAD))
+    await harvest(
+        "帮我调研一下竞品",
+        _results(2),
+        rounds=1,
+        task_specs=_specs("web_search", "web_fetch"),
+        drafts=drafts,
+        llm=llm,
+        ledger=ledger,
+    )
+    prompt = llm.calls[0][0]["content"]
+    assert "short_drama_video_publish" in prompt
+    assert "短剧视频发布" in prompt
 
 
 # ============================================================
 # 2. 提炼质量
 # ============================================================
 
-def test_steps_come_from_real_tools():
-    """steps 必须是**真实执行过的工具**，不是模型编的。"""
+def test_harvest_produces_no_replayable_steps():
+    """自动沉淀只给判断，不给可重放步骤。
+
+    steps 曾由工具序列自动生成，但参数是空的（值在脱敏时删掉了）。
+    planner 选中这种技能，DAG 会把 `web_search(空)` 一路跑到底全失败 ——
+    技能库反而成了故障源。参数完整的 DAG 只能人教。
+    """
     skill = build_skill_from_plan(
         GOOD_PAYLOAD,
         user_input="调研一下",
         tool_results=_results(2),
         task_specs=_specs("web_search", "web_fetch"),
     )
-    assert [s.tool for s in skill.steps] == ["web_search", "web_fetch"]
+    assert skill.steps == [], "自动沉淀不该产可重放步骤"
+    assert skill.regression, "但这次真实成功要留作样例"
+    assert [r["expect"]["tool"] for r in skill.regression] == ["web_search"]
 
 
 def test_regression_generated_from_real_run():
@@ -207,8 +484,9 @@ def test_rejects_missing_name():
 
 
 @pytest.mark.asyncio
-async def test_skips_when_same_name_exists(drafts):
+async def test_skips_when_same_name_exists(drafts, ledger):
     """不自动覆盖已有技能 —— 升级是人的决定。"""
+    _prime(ledger, times=2)
     out = await harvest(
         "调研一下",
         _results(2),
@@ -217,6 +495,7 @@ async def test_skips_when_same_name_exists(drafts):
         drafts=drafts,
         store=FakeSkillStore(existing={"竞品调研": object()}),
         llm=FakeLLM(json.dumps(GOOD_PAYLOAD)),
+        ledger=ledger,
     )
     assert out.skipped is True
     assert "同名" in out.reason
@@ -460,8 +739,8 @@ def test_flags_patterns_copied_from_origin():
 
 
 @pytest.mark.asyncio
-async def test_honors_worth_keeping_false(drafts):
-    """模型自己说这次不值得沉淀 → 不存草稿。"""
+async def test_legacy_worth_keeping_false_still_skips(drafts, ledger):
+    """旧格式 worth_keeping=false 仍按「不值得沉淀」处理（兼容老模型输出）。"""
     payload = {"worth_keeping": False, "reason": "一次性的临时任务"}
     out = await harvest(
         "把这份文件转成 pdf",
@@ -470,10 +749,11 @@ async def test_honors_worth_keeping_false(drafts):
         task_specs=_specs("read_multiple_files", "python_exec"),
         drafts=drafts,
         llm=FakeLLM(json.dumps(payload)),
+        ledger=ledger,
     )
     assert out.skipped is True
     assert out.skill is None
-    assert "没有可复用价值" in out.reason
+    assert "不值得沉淀" in out.reason
     assert drafts.list() == []
 
 
@@ -518,3 +798,77 @@ def test_approve_draft_persists_through_restart(tmp_path, drafts, monkeypatch):
     fresh = SkillStore(str(tmp_path / "skills"))
     assert fresh.get_by_name(skill.name) is not None, "批准后重启就丢了"
     assert list((tmp_path / "skills" / "user").glob("*.yaml")), "没有写 yaml 文件"
+
+# ============================================================
+# 7. 修订批准：升版本，而不是又加一条技能
+# ============================================================
+
+
+class FakeVersionedStore(FakeSkillStore):
+    """有 get(id) + update_skill 的最小 store —— 修订分支要的就是这两个。"""
+
+    def __init__(self, target=None):
+        super().__init__({target.name: target} if target else {})
+        self.by_id = {target.id: target} if target else {}
+        self.updates = []
+
+    def get(self, skill_id):
+        return self.by_id.get(skill_id)
+
+    def update_skill(self, skill_name, updates, version=None):
+        self.updates.append((skill_name, updates))
+        return [f"{skill_name}@1.1.0.yaml"]
+
+
+def test_approve_revision_bumps_version(drafts, ledger, monkeypatch):
+    """批准修订 → 走 update_skill 升版本；技能库里不该多出一条。
+
+    这是"技能不断完善"的落点：同一类事做得越多，同一条技能越准，
+    而不是技能数量往上涨、每条都只说了一部分。
+    """
+    import core.skill_harvest as mod
+    from skills.models import Skill
+
+    monkeypatch.setattr(mod, "get_ledger", lambda: ledger)
+    _prime(ledger, times=1)  # 档案得先存在，修订才有地方计数
+    target = Skill(name="竞品调研", version="1.0.0", id="skill_old")
+    store = FakeVersionedStore(target)
+
+    skill = build_skill_from_plan(
+        GOOD_PAYLOAD, user_input="x", tool_results=_results(2),
+        task_specs=_specs("web_search", "web_fetch"),
+    )
+    skill.name = "竞品调研"
+    draft_id = drafts.save(
+        skill,
+        revision_of="skill_old",
+        base_version="1.0.0",
+        competence_key="competitor_research",
+    )
+
+    ok, msg = approve_draft(draft_id, store=store, drafts=drafts)
+    assert ok, msg
+    assert store.updates, "修订没有走升版本"
+    assert store.updates[0][0] == "竞品调研"
+    assert "1.1.0" in msg
+    assert store.added == [], "修订不该往库里新增技能"
+    assert drafts.get(draft_id) is None
+    assert ledger.get("competitor_research")["revisions"] == 1
+
+
+def test_approve_revision_refuses_when_target_gone(drafts, ledger, monkeypatch):
+    """目标技能被删了就明确失败，别把修订当成新技能塞进去。"""
+    import core.skill_harvest as mod
+
+    monkeypatch.setattr(mod, "get_ledger", lambda: ledger)
+    store = FakeVersionedStore(None)
+
+    skill = build_skill_from_plan(
+        GOOD_PAYLOAD, user_input="x", tool_results=_results(2),
+    )
+    draft_id = drafts.save(skill, revision_of="skill_gone", base_version="1.0.0")
+
+    ok, msg = approve_draft(draft_id, store=store, drafts=drafts)
+    assert ok is False
+    assert "不存在" in msg
+    assert store.added == []

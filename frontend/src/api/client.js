@@ -152,6 +152,19 @@ export const skillDraftsApi = {
     request(`/api/skill-drafts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
+export const competenceApi = {
+  /**
+   * 能力档案：技能晋升之前的观察记录。
+   *
+   * 为什么需要它：技能是「一类任务的做法」，一次任务只是样本。
+   * 某一类事做过几次、还差几次、有没有被纠正过 —— 这些看不见的话，
+   * 界面只会显示「暂无技能」，用户会以为沉淀坏了。
+   */
+  list: () => request('/api/competences'),
+  forget: (key) =>
+    request(`/api/competences/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+}
+
 export const uploadApi = {
   /**
    * 把一个本地文件送到后端上传区，拿回后端可读的绝对路径。

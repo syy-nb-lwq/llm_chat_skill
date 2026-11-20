@@ -391,8 +391,12 @@ class Agent:
     # ===== 方法论自增长（后台，不阻塞回答） =====
 
     async def _harvest_skill(self, user_input: str, tool_results: Dict,
-                             rounds: int, planned_tasks: List) -> None:
-        """把一次成功的多步任务提炼成技能草稿。
+                             rounds: int, planned_tasks: List,
+                             session_id: str = "") -> None:
+        """把一次成功的多步任务记进**能力档案**，够格了才产出技能。
+
+        注意时序变了：这里不再"做完就产一条技能"，
+        而是记账 —— 同类观察攒够次数才晋升，已晋升的走修订。
 
         **永远不抛异常**：这是附加价值，失败不能影响主流程。
         """
@@ -414,13 +418,15 @@ class Agent:
                 tool_results,
                 rounds=rounds,
                 task_specs=specs,
+                session_id=session_id,
             )
-            if outcome.skill:
+            if outcome.status in ("drafted", "revision"):
+                label = "产出修订" if outcome.status == "revision" else "够格，产出技能草稿"
                 self.logger.info(
-                    "Agent", f"沉淀出方法论草稿: {outcome.skill.name}"
+                    "Agent", f"{label}: {outcome.skill.name}（档案 {outcome.competence_key}）"
                 )
             elif outcome.reason:
-                self.logger.info("Agent", f"未沉淀方法论: {outcome.reason}")
+                self.logger.info("Agent", f"沉淀[{outcome.status}] {outcome.reason}")
         except Exception as exc:
             self.logger.warning("Agent", f"方法论提炼失败(忽略): {exc}")
 
@@ -1268,6 +1274,7 @@ class Agent:
                 self._harvest_skill(
                     tc.user_input, tc.tool_results, tc.goal.rounds,
                     tc.planned_tasks,
+                    session_id=self.identity.session_id if self.identity else self.session_id,
                 )
             ))
 

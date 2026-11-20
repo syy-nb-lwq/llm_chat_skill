@@ -746,6 +746,53 @@ async def delete_tool_proposal(proposal_id: str):
 # 经验就丢一次。但**垃圾技能比没有技能更糟**（污染检索、占注入预算、
 # 可能被误选），所以提炼出来一律进草稿队列，人批准才生效。
 
+@app.get("/api/competences")
+async def list_competences():
+    """能力档案 —— 技能晋升之前的观察记录。
+
+    这里回答的是「为什么还没有技能」：某一类事做过几次、还差几次、
+    有没有被纠正过。没有这一层，界面只会显示「暂无技能」，看起来像坏了。
+    """
+    from core.skill_ledger import PROMOTE_MIN_EVIDENCE, get_ledger
+
+    ledger = get_ledger()
+    items = []
+    for comp in ledger.all():
+        ready, why = ledger.readiness(comp)
+        evidence = comp.get("evidence") or []
+        items.append({
+            "key": comp.get("key"),
+            "title": comp.get("title") or comp.get("key"),
+            "capability": comp.get("capability") or "",
+            "tools": comp.get("tools") or [],
+            "times": len(evidence),
+            "corrected": sum(1 for e in evidence if e.get("corrected")),
+            "has_skill": bool(comp.get("skill_id")),
+            "skill_name": comp.get("skill_name") or "",
+            "version": comp.get("version") or "",
+            "revisions": comp.get("revisions") or 0,
+            "ready": ready,
+            "progress": f"{min(len(evidence), PROMOTE_MIN_EVIDENCE)}/{PROMOTE_MIN_EVIDENCE}",
+            "reason": why,
+            # "攒下来到底学到了什么" —— 价值的可读证据，界面展示给人复核
+            "insights": comp.get("insights") or [],
+            "last_seen": comp.get("updated_at") or "",
+        })
+    items.sort(key=lambda x: (-x["times"], x["last_seen"]))
+    return {"count": len(items), "min_evidence": PROMOTE_MIN_EVIDENCE, "items": items}
+
+
+@app.delete("/api/competences/{key}")
+@require_auth
+async def forget_competence(key: str):
+    """忘掉一条能力档案 —— 如果一类事其实不值得沉淀，别让它一直数着。"""
+    from core.skill_ledger import get_ledger
+
+    if not get_ledger().forget(key):
+        raise HTTPException(status_code=404, detail=f"档案不存在: {key}")
+    return {"forgotten": key}
+
+
 @app.get("/api/skill-drafts")
 async def list_skill_drafts():
     """列出待批准的方法论草稿。"""

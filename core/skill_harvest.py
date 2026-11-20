@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from infra.logger import get_logger
+from core.skill_ledger import get_ledger, normalize_key
 from skills.models import Skill, SkillStep
 
 
@@ -69,8 +70,41 @@ _JUDGE_WORDS = (
     "坑", "失败", "误报", "注意", "切记", "区分", "分清", "先判断",
 )
 
+# ---------------------------------------------------------------------------
+# 价值判据的词表。
+#
+# 一条方法论有没有价值，不等于"写得像不像方法论"（那是 assess_method_quality 管的），
+# 也不等于"做了几次"（那是账本 readiness 管的）。它只有一个标准：
+#
+#     里面有没有 planner 凭常识推不出来、下次不看就会做错/想不到的东西。
+#
+# 能落入这个标准的信息就四类，下面按类给词表。命中任意一类即算"有价值"。
+# ---------------------------------------------------------------------------
 
-HARVEST_PROMPT = """你在复盘一次**成功完成**的任务，目标是把这次的经验变成**下次能直接复用的判断力**。
+#: 坑 / 失败模式：踩过或差点踩的错，以及怎么绕开
+_VALUE_PITFALL_WORDS = (
+    "坑", "否则", "不要", "别", "误", "错", "失败", "踩", "差点", "陷阱",
+    "容易", "千万", "小心", "注意", "遗漏", "忽略", "反例", "边界",
+)
+#: 反直觉：看起来该这样、其实该那样
+_VALUE_COUNTER_WORDS = (
+    "其实", "以为", "实际上", "反而", "看起来", "不是", "而是", "往往",
+    "别看", "越", "直觉", "表面", "未必", "通常", "误区",
+)
+#: 条件分支：出现信号 A 走这条路、信号 B 换招（要同时有触发词和动作词）
+_VALUE_BRANCH_TRIGGERS = ("如果", "若", "当", "一旦", "遇到", "取决于", "分情况", "看情况")
+_VALUE_BRANCH_ACTIONS = ("就", "则", "改", "换", "再", "才", "走", "用", "退")
+#: 完成标准：怎么算真做完，而不是"看起来做完了"
+_VALUE_DONE_WORDS = (
+    "才算", "标准", "核对", "读回", "验证", "确认", "检查", "为准",
+    "缺任何", "不能算", "不算做完", "才算完成",
+)
+#: 纯顺序叙述的信号 —— 只有步骤词、没有任何判断，是被 reject 的对象
+_VALUE_SEQUENCE_WORDS = ("第一步", "第二步", "第三步", "然后", "接着", "再", "最后")
+
+
+HARVEST_PROMPT = """你在复盘一次**成功完成**的任务。目标是让系统对"这类事该怎么做"多懂一点，
+而不是又多一条流水账。
 
 ## 这次任务
 用户要求：{user_input}
@@ -78,46 +112,102 @@ HARVEST_PROMPT = """你在复盘一次**成功完成**的任务，目标是把�
 ## 实际执行过程
 {trajectory}
 
-## 重要前提：不要复述执行顺序
-调用过哪些工具、按什么顺序调用，系统**已经单独存成结构化步骤**了。
-所以下面这些写出来都是废的：
+## 已有的能力档案
+{existing}
 
-- ❌「第一步调用 A；第二步调用 B；第三步调用 C」—— 换个场景，A/B/C 根本不存在
+## 第一步：归类，并判断这次有没有新东西
+
+同一类事必须归到同一条档案。**不要因为换了个说法就另起一条** ——
+这正是过去技能库失控的原因：「充值完成处理」和「充值后重生成」被记成了两条。
+
+- 如果这次属于上面某个已有档案 → `capability_key` 原样用那个 key，`reuse` 给 true
+- 如果确实都不属于 → 自己起一个 key，规则：
+  - 英文小写 snake_case，6~40 字符
+  - 描述的是**一类事**，不是这一次
+  - ❌ `charge_after_regenerate`、`fix_temp_bug`、`do_it_again` —— 这种只对这次成立
+  - ✅ `short_drama_video_publish`、`ecom_listing_batch` —— 换个对象照样成立
+  - 自检：把 key 念一遍，如果它里面含着这次的时间/对象/数字，就说明起错了
+
+归类之后，判断这次**相对已有方法论**是什么性质，填进 `novelty`：
+
+| novelty | 含义 | 要不要写 method |
+|---|---|---|
+| `new` | 出现了上一版没有的判断 / 坑 / 完成标准 | **必须写** |
+| `same` | 与已有方法论一致，这次没有新东西 | 可以不写，系统沿用档案里的 |
+| `not_worth` | 这类事本身不值得沉淀（一次性的、换个场景完全用不上） | 不写 |
+
+**`same` 不是"没价值"。** 一类事反复做都说不出新东西，恰恰说明做法已经稳定 ——
+这正是它该固化成技能的时候。只有 `not_worth` 才是真的不值得记。
+
+## 第二步：写方法论（novelty = new 时必写）
+
+不要复述执行顺序 —— 调过哪些工具、什么顺序，系统已经单独存成结构化步骤了。
+下面这些写出来都是废的：
+
+- ❌「第一步调用 A；第二步调用 B」—— 换个场景 A/B 根本不存在
 - ❌ 把工具名、任务编号、参数名写进正文
 - ❌ 复述这次的具体数据（城市、金额、文件名、链接）
 
-## 要提炼的是「判断」，不是「步骤」
+要写的是三类判断：
 
-写清这三类东西：
-
-1. **判断规则**：出现什么信号该走这条路；出现什么信号说明该换招
-   （例：「发布失败要先分清是产物本身有问题、还是调用偶发失败；前者回去改内容，后者直接重试」）
-2. **坑**：这次踩过或差点踩到的地方，以及是怎么发现的
-   （例：「用相对路径会报找不到文件，动手前先确认工作区根目录」）
-3. **完成标准**：怎么才算真做完，而不是「看起来做完了」
-   （例：「产物必须能被重新读回并核对内容，才算交付完成」）
+1. **判断规则**：出现什么信号走这条路，出现什么信号该换招
+2. **坑**：踩过或差点踩到的地方，以及怎么发现的
+3. **完成标准**：怎么算真做完，而不是"看起来做完了"
 
 用「如果…就…」「先确认…再…」这类句式，200~400 字。
 
+**如果已有档案里已有方法论，你写的是"合并后的完整版"** ——
+上一版仍然成立的部分要保留，不要只写这次新增的那一条。
+
+### 最重要的一个字段：insight
+
+`insight` 不是 method 的摘要，而是**这次真正学到的、光看任务描述推不出来的一点**。
+自检方法：把它删掉，下次遇到同类任务会不会做错或走弯路？会 → 值得写；不会 → 这次没攒到东西。
+
+- ✅「发布失败先看产物能不能被读回，能读回就是调用偶发失败、直接重试；读不回才是内容问题」
+- ✅「这个平台批量上架的限额是按店铺算、不是按账号算，换个店铺要重新探一次」
+- ❌「这次用 python 脚本处理了数据」（这是做了什么，不是学到了什么）
+- ❌「要注意质量，多检查」（谁都会说的空话）
+
+如果你实在想不出这样一句 insight，把 `novelty` 给 `same` 或 `not_worth`，别硬凑。
+
+## 第三步：如果归到了已晋升成技能的档案（has_skill=true）
+
+除 `novelty` 外，还要在 `revision_note` 里写清**这次比上一版多知道了什么**：
+- ✅「上一版说失败就重试；这次发现配额耗尽重试无用，得先去查额度」
+- ❌「又做了一次，流程一样」—— 那就把 `novelty` 给 `same`，不会产出修订
+
 ## 输出
+
 只输出一个 JSON 对象：
 
-{{"worth_keeping": true,
-  "reason": "若 worth_keeping=false，说明这次为什么不值得沉淀",
+{{"novelty": "new",
+  "reason": "novelty=not_worth 时说明为什么这类事不值得沉淀",
+  "capability_key": "short_drama_video_publish",
+  "reuse": true,
+  "revision_note": "仅当 novelty=new 且归到已有技能的档案时填",
   "name": "4~12 字中文名",
   "capability": "一句话说清这套判断能解决什么（不超过 40 字）",
+  "insight": "这次真正学到的、反直觉的一点；想不出就留空并把 novelty 给 same",
   "method": "判断规则 + 坑 + 完成标准，不要出现任何工具名",
   "patterns": ["3~6 个用户会怎么开口的通用说法，不要照抄这次的原话"]}}
-
-**宁缺毋滥**：如果这次做成只是因为任务简单，或者换个场景完全用不上，
-把 `worth_keeping` 给 false —— 一条注水的技能比没有技能更糟。
 """
 
 
 class HarvestResult:
-    """提炼结果（成功/跳过/失败都能说清原因）。"""
+    """提炼结果。
 
-    __slots__ = ("skill", "skipped", "reason", "draft_id")
+    `status` 说清这次到底发生了什么 —— 这比"成功/失败"重要得多，
+    因为"记了一笔但还不够格"是**正常且预期**的结果，不是失败：
+
+    - ``accumulating``：记进能力档案了，同类观察还不够，暂不产出技能
+    - ``drafted``：够格了，产出新技能草稿（等人批准）
+    - ``revision``：该档案已有技能，产出的是**修订**草稿（版本 +1）
+    - ``skipped``：这次没有沉淀价值（任务太简单 / 模型判定无新意）
+    - ``failed``：调用或校验失败
+    """
+
+    __slots__ = ("skill", "skipped", "reason", "draft_id", "status", "competence_key")
 
     def __init__(
         self,
@@ -125,11 +215,22 @@ class HarvestResult:
         skipped: bool = False,
         reason: str = "",
         draft_id: str = "",
+        status: str = "",
+        competence_key: str = "",
     ):
         self.skill = skill
         self.skipped = skipped
         self.reason = reason
         self.draft_id = draft_id
+        self.competence_key = competence_key
+        if status:
+            self.status = status
+        elif skill is not None:
+            self.status = "drafted"
+        elif skipped:
+            self.status = "skipped"
+        else:
+            self.status = "accumulating"
 
     def __bool__(self) -> bool:
         return self.skill is not None
@@ -138,6 +239,8 @@ class HarvestResult:
         return {
             "harvested": self.skill is not None,
             "skipped": self.skipped,
+            "status": self.status,
+            "competence_key": self.competence_key,
             "reason": self.reason,
             "draft_id": self.draft_id,
             "skill": self.skill.name if self.skill else None,
@@ -173,16 +276,38 @@ class SkillDraftStore:
     def _path(self, draft_id: str) -> Path:
         return self.base / f"{draft_id}.json"
 
-    def save(self, skill: Skill, *, origin: str = "") -> str:
+    def save(
+        self,
+        skill: Skill,
+        *,
+        origin: str = "",
+        revision_of: str = "",
+        base_version: str = "",
+        competence_key: str = "",
+    ) -> str:
+        """存草稿。
+
+        `revision_of` 非空表示这是**给已有技能打的修订**，不是新技能 ——
+        批准时走升版本，而不是往库里再加一条。
+        """
         self._ensure()
         path = self._path(skill.id)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             payload: Dict[str, Any] = {"origin": origin, "skill": asdict(skill)}
+            if revision_of:
+                payload["revision_of"] = revision_of
+                payload["base_version"] = base_version
+            if competence_key:
+                payload["competence_key"] = competence_key
             quality = getattr(skill, "quality", None)
             if quality:
                 # 让"为什么这条该改/该丢"跟着草稿走，界面不用重算
                 payload["quality"] = quality
+            value = getattr(skill, "value", None)
+            if value:
+                # "凭什么算有价值"同样跟着草稿走，供人复核
+                payload["value"] = value
             path.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -191,16 +316,22 @@ class SkillDraftStore:
             self.logger.error("SkillDraft", f"保存草稿失败 {path}: {exc}")
         return skill.id
 
-    def get(self, draft_id: str) -> Optional[Skill]:
+    def get_payload(self, draft_id: str) -> Optional[Dict[str, Any]]:
+        """取完整草稿（含 revision_of / competence_key 这些元信息）。"""
         path = self._path(draft_id)
         if not path.exists():
             return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return _skill_from_dict(payload.get("skill") or {})
+            return json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
             self.logger.warning("SkillDraft", f"读取草稿失败 {path}: {exc}")
             return None
+
+    def get(self, draft_id: str) -> Optional[Skill]:
+        payload = self.get_payload(draft_id)
+        if payload is None:
+            return None
+        return _skill_from_dict(payload.get("skill") or {})
 
     def list(self) -> List[Dict[str, Any]]:
         if not self.base.exists():
@@ -224,10 +355,35 @@ class SkillDraftStore:
                     "origin": payload.get("origin") or "",
                     "created_at": raw.get("created_at") or "",
                     "quality": payload.get("quality") or _quality_of(raw, payload.get("origin") or ""),
+                    "value": payload.get("value") or {},
+                    # 修订草稿：改的是哪个技能、基于哪一版
+                    "revision_of": payload.get("revision_of") or "",
+                    "base_version": payload.get("base_version") or "",
+                    "competence_key": payload.get("competence_key") or "",
                 })
             except Exception:
                 continue
         return out
+
+    def find_by_competence(self, key: str) -> Optional[Dict[str, Any]]:
+        """按能力 key 找未审批的草稿 —— 同一类事只留一条待办，别越攒越多。"""
+        if not key or not self.base.exists():
+            return None
+        for path in sorted(self.base.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (payload.get("competence_key") or "") != key:
+                continue
+            raw = payload.get("skill") or {}
+            return {
+                "id": raw.get("id"),
+                "path": str(path),
+                "revision_of": payload.get("revision_of") or "",
+                "base_version": payload.get("base_version") or "",
+            }
+        return None
 
     def delete(self, draft_id: str) -> bool:
         path = self._path(draft_id)
@@ -282,9 +438,16 @@ def reset_draft_store() -> None:
 
 
 def approve_draft(draft_id: str, store=None, drafts=None) -> tuple:
-    """批准一个草稿 → **落盘** + 激活（planner 立刻能看到，重启也不丢）。"""
+    """批准一个草稿 → **落盘** + 激活（planner 立刻能看到，重启也不丢）。
+
+    草稿分两种，批准的含义不同：
+
+    - 新技能：写进 `skills/user/`，同时把能力档案挂上这个技能
+    - 修订（``revision_of`` 非空）：**不新增**，走升版本，旧版保留可回滚
+    """
     if drafts is None:
         drafts = get_draft_store()
+    payload = drafts.get_payload(draft_id) or {}
     skill = drafts.get(draft_id)
     if skill is None:
         return False, f"草稿不存在: {draft_id}"
@@ -293,6 +456,14 @@ def approve_draft(draft_id: str, store=None, drafts=None) -> tuple:
         from skills.manager import get_skill_store
 
         store = get_skill_store()
+
+    revision_of = payload.get("revision_of") or ""
+    competence_key = payload.get("competence_key") or ""
+
+    if revision_of:
+        return _approve_revision(
+            draft_id, skill, payload, store, drafts, revision_of, competence_key
+        )
 
     existing = store.get_by_name(skill.name)
     if existing is not None:
@@ -309,8 +480,78 @@ def approve_draft(draft_id: str, store=None, drafts=None) -> tuple:
     except Exception as exc:
         return False, f"写入技能库失败: {exc}"
 
+    # 档案挂上技能：以后同类证据产的是修订，不是新技能
+    if competence_key:
+        try:
+            get_ledger().bind_skill(
+                competence_key,
+                skill_id=skill.id,
+                skill_name=skill.name,
+                version=skill.version,
+            )
+        except (ValueError, OSError) as exc:
+            drafts.logger.warning("SkillLedger", f"档案挂载失败 {competence_key}: {exc}")
+
     drafts.delete(draft_id)
     return True, f"技能 {skill.name} 已启用"
+
+
+def _approve_revision(
+    draft_id: str,
+    skill: Skill,
+    payload: Dict[str, Any],
+    store,
+    drafts,
+    revision_of: str,
+    competence_key: str,
+) -> tuple:
+    """批准修订：升版本而不是新增一条技能。"""
+    target = None
+    getter = getattr(store, "get", None)
+    if callable(getter):
+        target = getter(revision_of)
+    if target is None:
+        target = store.get_by_name(skill.name)
+    if target is None:
+        return False, "修订目标技能不存在（可能已被删除），请丢弃这条草稿"
+
+    updater = getattr(store, "update_skill", None)
+    if not callable(updater):
+        return False, "当前技能库不支持升版本，无法应用修订"
+
+    updates = {
+        "capability": skill.capability or target.capability,
+        "method": skill.method,
+        "patterns": skill.patterns or target.patterns,
+        "steps": [s.to_dict() for s in skill.steps] if skill.steps else [],
+        "examples": list(target.examples) + [e for e in skill.examples if e not in target.examples][:5],
+    }
+    if not updates["steps"]:
+        updates.pop("steps")
+
+    try:
+        written = updater(target.name, updates)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return False, f"升版本失败: {exc}"
+    if not written:
+        return False, "升版本失败：写盘异常（详见后端日志）"
+
+    version = ""
+    for item in written:
+        match = re.search(r"@([\d.]+)\.ya?ml$", str(item))
+        if match:
+            version = match.group(1)
+            break
+
+    if competence_key:
+        try:
+            get_ledger().bump_revision(competence_key, version=version)
+        except (ValueError, OSError) as exc:
+            drafts.logger.warning("SkillLedger", f"修订计数失败 {competence_key}: {exc}")
+
+    drafts.delete(draft_id)
+    shown = f"v{version}" if version else "新版本"
+    return True, f"技能 {target.name} 已升级到 {shown}"
 
 
 def _tool_sequence(tool_results: Dict[str, Any], task_specs: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -372,6 +613,36 @@ def _build_trajectory(tool_results: Dict[str, Any], task_specs: Optional[Dict[st
     return "\n".join(lines) or "(无工具调用)"
 
 
+def _format_catalog(items: List[Dict[str, Any]], limit: int = 12) -> str:
+    """把已有能力档案压成提示词里的一段清单。
+
+    给清单是为了让模型**归到已有档案**，而不是每次另起一个 key ——
+    「充值完成处理」和「充值后重生成」就是这么变成两条技能的。
+    """
+    if not items:
+        return "（还没有任何能力档案，这次会是第一条）"
+    lines: List[str] = []
+    for i, c in enumerate(items[:limit], 1):
+        parts = [f"{i}. key={c.get('key')}"]
+        if c.get("title"):
+            parts.append(f"「{c['title']}」")
+        if c.get("capability"):
+            parts.append(str(c["capability"])[:40])
+        if c.get("tools"):
+            parts.append("工具=" + ",".join(str(t) for t in c["tools"][:5]))
+        parts.append(f"已记 {c.get('times', 0)} 次")
+        if c.get("has_skill"):
+            parts.append("已成技能")
+        lines.append(" | ".join(parts))
+        if c.get("method"):
+            # 带上已有正文，模型才能写"合并后的完整版"，而不是从零开始重写
+            condensed = re.sub(r"\s+", " ", str(c["method"]))[:180]
+            lines.append(f"   已有方法论：{condensed}")
+    if len(items) > limit:
+        lines.append(f"……另有 {len(items) - limit} 个档案未列出")
+    return "\n".join(lines)
+
+
 def assess_method_quality(
     method: str,
     *,
@@ -425,6 +696,87 @@ def assess_method_quality(
         "steps": steps,
         "judge_hits": judges,
         "tool_idents": idents,
+        "chars": len(text),
+    }
+
+
+def assess_value(
+    method: str,
+    *,
+    insight: str = "",
+    capabilities: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """判断一条方法论**有没有可迁移的价值** —— 回答"凭什么值得成为 skill"。
+
+    这条闸门和 ``assess_method_quality`` 的分工：
+
+    - ``assess_method_quality`` 管**形式**：是不是把工具流水账写成了散文
+    - ``assess_value`` 管**实质**：内容里有没有"下次换场景还用得上"的判断
+
+    判据只有一条，来自用户的产品定义：
+
+        skill 是做事的方法，不是做过的事的流水账。
+        一条 method 值钱，当且仅当它含有 planner 光看任务描述推不出来的信息 ——
+        反直觉的判断、踩过的坑、隐式的完成标准。
+        把这些删掉，剩下"先做 A 再做 B"的部分，planner 每次都能自己推出来，
+        固化它只会用上次的路径覆盖这次的计划，让系统变笨。
+
+    ``insight`` 是让模型显式说出的"这次真正学到的、反直觉的一点"。它和规则
+    检测是**或**的关系：规则命中任一硬信号即算有价值；规则没命中、但模型
+    说清了一句具体的反直觉洞察，也算。两者都拿不出 → 判无价值。
+
+    Returns:
+        ``{"valuable": bool, "signals": [...], "reason": str, ...}``
+        ``signals`` 是命中的硬信号类型，界面可展示"它凭什么算有价值"。
+    """
+    text = (method or "").strip()
+    insight = (insight or "").strip()
+    signals: List[str] = []
+
+    # 硬信号 1：踩过的坑 / 失败模式
+    pit = [w for w in _VALUE_PITFALL_WORDS if w in text]
+    if pit:
+        signals.append("踩坑/失败模式：" + "、".join(pit[:3]))
+
+    # 硬信号 2：反直觉判断
+    counter = [w for w in _VALUE_COUNTER_WORDS if w in text]
+    if counter:
+        signals.append("反直觉判断：" + "、".join(counter[:3]))
+
+    # 硬信号 3：条件分支（触发词 + 动作词同时出现，避免"当…"这种孤词误报）
+    has_trigger = any(w in text for w in _VALUE_BRANCH_TRIGGERS)
+    has_action = any(w in text for w in _VALUE_BRANCH_ACTIONS)
+    if has_trigger and has_action:
+        signals.append("按信号分支处理")
+
+    # 硬信号 4：显式完成标准
+    done = [w for w in _VALUE_DONE_WORDS if w in text]
+    if done:
+        signals.append("完成标准：" + "、".join(done[:3]))
+
+    valuable = bool(signals)
+
+    # 规则没抓到硬信号，但模型说清了一句具体的反直觉洞察 —— 也算。
+    # 要求 ≥15 字，挡住"要注意质量"这种谁都会说的空话。
+    if not valuable and len(insight) >= 15:
+        valuable = True
+        signals.append("模型给出的反直觉洞察：" + insight[:40])
+
+    if valuable:
+        reason = "含可迁移判断：" + "；".join(signals)
+    else:
+        # 说清楚为什么判它没价值 —— 这条理由会展示在草稿面板上，人可复核
+        steps = sum(1 for w in _VALUE_SEQUENCE_WORDS if w in text)
+        if steps >= 2:
+            reason = f"通篇是操作顺序（{steps} 个步骤词），没有踩坑/反直觉/完成标准 —— 这类判断 planner 每次都能自己推"
+        else:
+            reason = "找不到可迁移的判断（无踩坑、无反直觉、无分支、无完成标准），像是一次性经过的记录"
+
+    return {
+        "valuable": valuable,
+        "signals": signals,
+        "reason": reason,
+        "insight_used": bool(signals and not pit and not counter and not (has_trigger and has_action) and not done),
         "chars": len(text),
     }
 
@@ -495,19 +847,16 @@ def _build_skill_from_plan(
     if quality["reject"]:
         return None, "提炼成了执行日志而不是方法论：" + "；".join(quality["issues"])
 
-    # steps 来自**真实执行过的工具**，不是编的
+    # 自动沉淀出来的技能**只带方法论，不带可重放步骤**。
+    #
+    # steps 曾经由工具序列自动生成，但参数是空的（参数值在脱敏时被删掉了）。
+    # planner 一旦选中这种技能，DAGExecutor 会把 `web_search(空)` 一个个跑下去，
+    # 从头失败到尾 —— 技能库反而成了故障源。
+    # 参数完整的 DAG 只能人教（SkillTrainer）或手写，机器攒出来的部分只配当判断。
+    # 回归样例仍然来自这次真实成功，用来记"这类任务长什么样"。
     seq = _tool_sequence(tool_results, task_specs)
-    steps = [
-        SkillStep(
-            id=f"s{i + 1}",
-            name=f"步骤{i + 1}:{t}",
-            description=f"调用 {t}",
-            tool=t,
-        )
-        for i, t in enumerate(seq)
-    ]
+    steps: List[SkillStep] = []
 
-    # 回归样例来自这次真实成功 —— 技能一出生就带验证
     regression: List[Dict[str, Any]] = []
     if seq:
         regression.append({
@@ -532,8 +881,10 @@ def _build_skill_from_plan(
         created_at=datetime.now().isoformat(),
         updated_at=datetime.now().isoformat(),
     )
-    # 质量提示随草稿一起存，界面上让人批准前先看一眼
+    # 质量提示 + 价值判定随草稿一起存，界面上让人批准前先看一眼
     setattr(skill, "quality", quality)
+    insight_for_value = str(payload.get("insight") or "").strip()
+    setattr(skill, "value", assess_value(method, insight=insight_for_value))
     return skill, ""
 
 
@@ -546,11 +897,21 @@ async def harvest(
     store=None,
     drafts: Optional[SkillDraftStore] = None,
     llm=None,
+    ledger=None,
+    session_id: str = "",
 ) -> HarvestResult:
-    """从一次成功的任务里提炼方法论。
+    """一次成功任务结束后调用 —— 但**不一定产出技能**。
+
+    这是和旧实现的根本区别：这里记的是"做了一次这类事"，不是"这个技能第 N 版"。
+    产出与否由能力档案的证据量决定：
+
+        第 1 次 → 只记账，不产草稿
+        第 2 次 → 只记账，不产草稿
+        第 3 次 → 够格，产出技能草稿（等人批准）
+        第 4 次起 → 该技能已存在，产出**修订**草稿（版本 +1）
 
     Returns:
-        HarvestResult —— 明确区分「提炼成功」「不满足条件跳过」「提炼失败」。
+        HarvestResult —— `status` 区分 accumulating / drafted / revision / skipped / failed。
     """
     logger = get_logger()
 
@@ -567,7 +928,10 @@ async def harvest(
     if not any(getattr(r, "success", False) for r in (tool_results or {}).values()):
         return HarvestResult(skipped=True, reason="这次没有成功的工具调用，没有可复用的经验")
 
-    # --- 提炼 ---
+    if ledger is None:
+        ledger = get_ledger()
+
+    # --- 一次 LLM 调用同时干两件事：归到哪个档案 + 这次多知道了什么 ---
     try:
         if llm is None:
             from infra.llm import get_llm_client
@@ -576,6 +940,7 @@ async def harvest(
         prompt = HARVEST_PROMPT.format(
             user_input=(user_input or "")[:800],
             trajectory=_build_trajectory(tool_results, task_specs),
+            existing=_format_catalog(ledger.catalog()),
         )
         raw = await llm.chat_with_retry(
             [{"role": "user", "content": prompt}],
@@ -584,17 +949,134 @@ async def harvest(
         )
     except Exception as exc:
         logger.warning("SkillHarvest", f"提炼调用失败: {exc}")
-        return HarvestResult(reason=f"LLM 调用失败: {exc}")
+        return HarvestResult(status="failed", reason=f"LLM 调用失败: {exc}")
 
     payload = _extract_json(raw or "")
     if not payload:
-        return HarvestResult(reason="模型输出不是合法 JSON")
+        return HarvestResult(status="failed", reason="模型输出不是合法 JSON")
 
-    # 模型自己判断这次不值得沉淀（任务太简单 / 换个场景用不上）
-    if payload.get("worth_keeping") is False:
+    novelty = _novelty_of(payload)
+    comp_key = normalize_key(str(payload.get("capability_key") or ""))
+
+    if not comp_key:
+        # 模型直接说"这类事不值得沉淀"时，key 缺失是正常的 —— 不是失败，只是没东西可记
+        if novelty == "not_worth":
+            return HarvestResult(
+                skipped=True,
+                status="skipped",
+                reason="模型判断这类事不值得沉淀：" + str(payload.get("reason") or "未说明"),
+            )
+        return HarvestResult(
+            status="failed",
+            reason="模型没给出合规的能力 key（需要英文 snake_case），这次无法归类",
+        )
+
+    # 这类事本身不值得沉淀 —— 一条都不记，否则档案表会被一次性任务塞满
+    if novelty == "not_worth":
         return HarvestResult(
             skipped=True,
-            reason="模型判断这次没有可复用价值：" + str(payload.get("reason") or "未说明"),
+            status="skipped",
+            reason="模型判断这类事不值得沉淀：" + str(payload.get("reason") or "未说明"),
+        )
+
+    name = _slug(str(payload.get("name") or ""))
+    capability = str(payload.get("capability") or "").strip()[:120]
+    method = str(payload.get("method") or "").strip()
+    insight = str(payload.get("insight") or "").strip()
+    patterns = [str(p).strip() for p in (payload.get("patterns") or []) if str(p).strip()]
+
+    # --- 价值闸门：这次到底有没有攒下"下次用得上"的东西 ---
+    # 放在记账之前：模型可能嘴上说 new，交上来的却是"先做 A 再做 B"的流水账。
+    # 规则先过一遍硬信号，模型给的 insight 做补充，两者都拿不出就当没学到东西。
+    value = assess_value(method, insight=insight)
+    if novelty == "new" and not value["valuable"]:
+        # 没价值不覆盖档案里已有的好正文 —— 这次的判断不足以推翻上一版
+        method = ""
+        insight = ""
+
+    # --- 记账：无论最后产不产技能，这一笔都要落下 ---
+    # 不落账的话，第 1 次、第 2 次永远不会被记成"同类做了几次"，阈值就永远到不了。
+    try:
+        comp = ledger.record(
+            comp_key,
+            title=name,
+            capability=capability,
+            method=method if novelty == "new" else "",
+            patterns=patterns if novelty == "new" else None,
+            tools=seq,
+            user_input=user_input or "",
+            session_id=session_id,
+            rounds=int(rounds or 0),
+            insight=insight,
+        )
+    except (ValueError, OSError) as exc:
+        return HarvestResult(status="failed", competence_key=comp_key, reason=f"记账失败: {exc}")
+
+    bound_skill = str(comp.get("skill_id") or "")
+    revision_note = str(payload.get("revision_note") or "").strip()
+
+    # 判 same 时模型不重写正文、也不给触发词 —— 全部沿用档案里已经沉淀的那一版。
+    # 否则"稳定"反而会因为"没内容可写"被卡在晋升之前。
+    if not method and comp.get("method"):
+        payload["method"] = str(comp["method"])
+    if not patterns and comp.get("patterns"):
+        payload["patterns"] = list(comp["patterns"])
+    if not name and comp.get("title"):
+        payload["name"] = str(comp["title"])
+    if not capability and comp.get("capability"):
+        payload["capability"] = str(comp["capability"])
+
+    # --- 一个档案已经有技能了 → 产出的是修订，不是新技能 ---
+    if bound_skill:
+        if novelty != "new" or not revision_note:
+            return HarvestResult(
+                skipped=True,
+                status="skipped",
+                competence_key=comp_key,
+                reason="该技能已存在，这次没有新判断 —— 重复不构成修订",
+            )
+        skill, why_bad = _build_skill_from_plan(
+            payload,
+            user_input=user_input,
+            tool_results=tool_results,
+            task_specs=task_specs,
+        )
+        if skill is None:
+            return HarvestResult(status="failed", competence_key=comp_key, reason=why_bad or "")
+        # 沿用原技能名：升版本要靠名字找文件，模型这次可能换了个说法
+        skill.name = str(comp.get("skill_name") or skill.name)
+        try:
+            if drafts is None:
+                drafts = get_draft_store()
+            draft_id = _save_draft(
+                drafts,
+                skill,
+                origin=(user_input or "")[:200],
+                revision_of=bound_skill,
+                base_version=str(comp.get("version") or ""),
+                competence_key=comp_key,
+            )
+        except Exception as exc:
+            logger.warning("SkillHarvest", f"写入修订草稿失败: {exc}")
+            return HarvestResult(status="failed", competence_key=comp_key, reason=f"写入草稿失败: {exc}")
+
+        logger.info("SkillHarvest", f"产出修订草稿: {skill.name} ({revision_note[:40]})")
+        return HarvestResult(
+            skill=skill,
+            status="revision",
+            competence_key=comp_key,
+            draft_id=draft_id,
+            reason=f"技能已有，这次是修订：{revision_note[:80]}",
+        )
+
+    # --- 还没成技能 → 够格才产出 ---
+    ready, why_ready = ledger.readiness(comp)
+    if not ready:
+        return HarvestResult(
+            skipped=True,
+            status="accumulating",
+            competence_key=comp_key,
+            reason=f"已记入能力档案「{comp_key}」：{why_ready}，够格了再产出技能",
         )
 
     skill, why_bad = _build_skill_from_plan(
@@ -604,9 +1086,9 @@ async def harvest(
         task_specs=task_specs,
     )
     if skill is None:
-        return HarvestResult(reason=why_bad or "提炼结果不合格")
+        return HarvestResult(status="failed", competence_key=comp_key, reason=why_bad or "提炼结果不合格")
 
-    # --- 去重：同名技能已存在就不覆盖（人来判断要不要升级） ---
+    # 名字撞了已有技能也不能硬塞（可能是另一条线攒出来的同名）
     try:
         if store is None:
             from skills.manager import get_skill_store
@@ -615,26 +1097,58 @@ async def harvest(
         if store.get_by_name(skill.name) is not None:
             return HarvestResult(
                 skipped=True,
+                status="skipped",
+                competence_key=comp_key,
                 reason=f"已有同名技能 {skill.name}，不自动覆盖（请人工判断是否升级）",
             )
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("SkillHarvest", f"检查同名技能失败: {exc}")
 
-    # --- 存成**草稿**，等人批准才进技能库 ---
-    #
-    # 不直接 `store.add(set_active=False)`：`list_all()` 只返回激活版本，
-    # 那样"待批准的技能"在界面上永远看不到，等于黑盒。
     try:
         if drafts is None:
             drafts = get_draft_store()
-        draft_id = drafts.save(skill, origin=(user_input or "")[:200])
+        draft_id = _save_draft(
+            drafts,
+            skill,
+            origin=(user_input or "")[:200],
+            competence_key=comp_key,
+        )
     except Exception as exc:
         logger.warning("SkillHarvest", f"写入草稿失败: {exc}")
-        return HarvestResult(reason=f"写入草稿失败: {exc}")
+        return HarvestResult(status="failed", competence_key=comp_key, reason=f"写入草稿失败: {exc}")
 
-    logger.info("SkillHarvest", f"提炼出新方法论: {skill.name}（草稿待批准）")
+    logger.info("SkillHarvest", f"够格了，产出技能草稿: {skill.name}（{why_ready}）")
     return HarvestResult(
         skill=skill,
-        reason="已存为草稿，批准后才会被 planner 选中",
+        status="drafted",
+        competence_key=comp_key,
         draft_id=draft_id,
+        reason=f"凑够观察次数（{why_ready}），已存为草稿，批准后生效",
     )
+
+
+def _novelty_of(payload: Dict[str, Any]) -> str:
+    """这次的观察属于哪种：``new`` / ``same`` / ``not_worth``。
+
+    三者混为一谈会出大事 —— 把「老样子」当成「不值得沉淀」，
+    这个档案就永远攒不到晋升阈值：做法越稳定，反而越沉淀不下来。
+    实测里第 3 次就栽在这：模型说"完全同类、没有新判断"，
+    于是一条本来该晋升的技能被永久卡在 2 次。
+    """
+    raw = str(payload.get("novelty") or "").strip().lower()
+    if raw in ("new", "same", "not_worth"):
+        return raw
+    # 旧格式兼容：worth_keeping=false 当时把"重复"和"没价值"混在一起说
+    return "not_worth" if payload.get("worth_keeping") is False else "new"
+
+
+def _save_draft(drafts, skill: Skill, *, origin: str, **meta) -> str:
+    """存草稿；同一能力 key 已有未审批草稿就**覆盖那一条**，不重复堆。
+
+    否则第 4、5、6 次观察会各产一份草稿，库里又是一堆重复。
+    """
+    finder = getattr(drafts, "find_by_competence", None)
+    existing = finder(meta.get("competence_key") or "") if callable(finder) else None
+    if existing and existing.get("id"):
+        skill.id = existing["id"]
+    return drafts.save(skill, origin=origin, **meta)
