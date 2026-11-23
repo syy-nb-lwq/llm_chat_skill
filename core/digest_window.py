@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -48,6 +49,8 @@ class DigestWindow:
     keep: int = 2
     _turns: List[PendingTurn] = field(default_factory=list)
     _next: int = 1
+    #: 最后一次 add 的单调时间，用于"陈旧兜底"（见 take_stale）
+    _last_add_at: float = 0.0
 
     def add(self, user: str, assistant: str = "") -> Optional[List[Dict[str, object]]]:
         """记一轮。
@@ -68,10 +71,38 @@ class DigestWindow:
             )
         )
         self._next += 1
+        self._last_add_at = time.monotonic()
 
         if len(self._turns) < self.size:
             return None
         return self._take()
+
+    def take_stale(self, max_idle_s: float) -> Optional[List[Dict[str, object]]]:
+        """窗口没满、但已经陈旧 → 把攒的轮次交出去归纳（不留尾）。
+
+        ## 为什么需要
+
+        `flush()` 只在用户主动 reset 时调用，`add()` 只在攒满 size 轮时触发。
+        一个只聊了 3 轮就结束的会话，3 轮会永远卡在窗口里：既不满 6 轮，
+        用户也不点重置 —— 于是"聊了出差报销却什么都没沉淀"。实机踩过。
+
+        这里用**空闲时间**判定"这个话题已经告一段落"：距最后一次 add 超过
+        `max_idle_s` 就认为不会再有下一轮接上，直接归纳掉。它不改变 add 的
+        攒批行为（连续对话仍要攒够 size 轮），只兜住"聊几句就走"的短会话。
+
+        Returns:
+            陈旧则交出整批（并清空，不留尾 —— 语义同 flush）；否则 None。
+        """
+        if not self._turns:
+            return None
+        if self._last_add_at and (time.monotonic() - self._last_add_at) < max_idle_s:
+            return None
+        batch = [
+            {"index": t.index, "user": t.user, "assistant": t.assistant}
+            for t in self._turns
+        ]
+        self._turns = []
+        return batch
 
     def flush(self) -> Optional[List[Dict[str, object]]]:
         """把剩下的轮次全部交出去（reset / 切换会话时调用）。

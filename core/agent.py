@@ -540,6 +540,18 @@ class Agent:
         from core.digest_window import window_for
         from core.memory_writer import has_explicit_remember
 
+        # 兜底：上一批轮次如果没攒满窗口、但已经陈旧（用户聊几句就走了），
+        # 先把它们归纳掉，否则短会话的轮次会永远烂在内存窗口里。
+        # 空闲阈值取会话 TTL 的一小部分，避免把"停顿几秒的连续对话"误判成结束。
+        from core.session_config import profile_digest_idle_s
+
+        win = window_for(self.session_id)
+        stale = win.take_stale(profile_digest_idle_s())
+        if stale:
+            self._spawn_memory_task(
+                self.mem.long_term.digest(stale, session_id=self.session_id)
+            )
+
         if has_explicit_remember(user_input):
             self._spawn_memory_task(
                 self.mem.long_term.record_turn(
@@ -551,7 +563,7 @@ class Agent:
             )
             return
 
-        batch = window_for(self.session_id).add(user_input, answer)
+        batch = win.add(user_input, answer)
         if not batch:
             return
         self._spawn_memory_task(

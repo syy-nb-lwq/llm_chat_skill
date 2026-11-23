@@ -16,6 +16,17 @@ SESSION_ROLLUP_KEEP_RECENT = 8
 # 但聊得短就沉淀不下来。6 轮是"三轮反复要求短一点"能被看见的最小值。
 PROFILE_DIGEST_WINDOW = 6
 
+# 归纳窗口的"陈旧兜底"：窗口没满，但距最后一轮超过这么多秒，
+# 下次对话时先把攒的轮次归纳掉。
+# 为什么需要：flush 只在用户主动 reset 时触发，聊 2~3 轮就走的短会话
+# 永远攒不满 6 轮，轮次会烂在内存窗口里（实机：聊了出差报销什么都没沉淀）。
+# 15 分钟能覆盖"聊完就走 / 隔一阵回来"，又不会把连续对话的正常停顿误判。
+PROFILE_DIGEST_IDLE_S = 15 * 60
+
+
+def profile_digest_idle_s() -> int:
+    return PROFILE_DIGEST_IDLE_S
+
 
 def session_restore_limit() -> int:
     return SESSION_RESTORE_LIMIT
