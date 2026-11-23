@@ -3,6 +3,8 @@
 .env.*
 # 任何以 .env 结尾的文件（如 config/minimax.env）—— `.env.*` 挡不住这种命名
 *.env
+# 但模板必须能入库，否则新克隆的人不知道要配哪些键
+!.env.example
 # 其它凭据
 *.pem
 *.key
@@ -31,7 +33,7 @@ outputs/
 vector_store/
 # ACL 审计报告（运行时产物）
 .acl_report/
-# 只忽略项目根的 memory/（运行时数据），不影响 .workbuddy/memory/ 里的项目记忆
+# 只忽略项目根的 memory/（运行时数据）
 /memory/
 # 迁移脚本每次 --apply 生成的备份（memory.bak-<时间戳>/），不忽略会一直挂在 git status 上
 /memory.bak-*/
@@ -61,3 +63,9 @@ dist/
 # pytest 临时输出（本地排查用）
 .pytest_*.txt
 .pytest_tmp/
+.pytest_cache/
+.ruff_cache/
+
+# WorkBuddy 工作记忆：跨会话上下文，只属于本机，不入库
+# （项目里值得长期保留的结论应整理进 docs/ 或 ARCHITECTURE.md）
+.workbuddy/memory/
