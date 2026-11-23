@@ -430,6 +430,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  box-sizing: border-box; /* 让 100vh 含 padding，否则整体超出视口 32px */
   max-width: 1400px;
   margin: 0 auto;
   padding: 16px;
@@ -456,7 +457,9 @@ body {
   background: rgba(255,0,0,0.2);
 }
 .status.connected { background: rgba(0,255,0,0.2); }
-.main-content { display: flex; gap: 16px; flex: 1; }
+/* min-height:0 让 flex 子项能收缩——否则内容撑开父级，内部 overflow 不生效，
+   对话区/侧栏不会被限制在视口内，用户得拖整页滚动条 */
+.main-content { display: flex; gap: 16px; flex: 1; min-height: 0; }
 .sidebar {
   width: 320px;
   background: rgba(255,255,255,0.03);
@@ -490,6 +493,7 @@ body {
 }
 .sidebar-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
 }

@@ -395,12 +395,18 @@ export default {
   display: flex;
   flex-direction: column;
   flex: 1;
+  /* 纵向 flex 子项默认 min-height:auto(=内容高度)，不会收缩。
+     不加这行，.messages 的 overflow-y:auto 永远不生效，
+     内容会把整页撑开，用户得拖网页滚动条才能看完全部对话。 */
+  min-height: 0;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 12px;
   overflow: hidden;
 }
 .messages {
   flex: 1;
+  /* 同理：让它能收缩到容器高度以内，滚动条才起作用 */
+  min-height: 0;
   overflow-y: auto;
   padding: 16px;
 }
