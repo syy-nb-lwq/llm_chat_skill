@@ -409,6 +409,12 @@ export default {
   min-height: 0;
   overflow-y: auto;
   padding: 16px;
+  /* 隐藏滚动条但保留滚动能力（滚轮/触摸/键盘都照常） */
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* 旧 Edge / IE */
+}
+.messages::-webkit-scrollbar { /* Chrome / Safari / 新 Edge */
+  display: none;
 }
 .message {
   margin-bottom: 12px;

@@ -496,5 +496,9 @@ body {
   min-height: 0;
   overflow-y: auto;
   padding: 12px;
+  /* 隐藏滚动条但保留滚动能力 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
+.sidebar-content::-webkit-scrollbar { display: none; }
 </style>
