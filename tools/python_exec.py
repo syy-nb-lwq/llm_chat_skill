@@ -337,20 +337,6 @@ def static_check(code: str) -> List[str]:
     return [f.message for f in check_code(code)]
 
 
-def _call_name(func: ast.AST) -> str:
-    """取调用的名字(只取最后一段,如 `os.system` → `system`)。
-
-    **注意:这个函数只用于提示文案,不能用它做拦截判断。**
-    历史上用它对一切调用做黑名单匹配,结果 `re.compile(...)`
-    被当成"调用了 compile()"直接拦掉 —— 见 `_dotted_name`。
-    """
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return ""
-
-
 #: **裸调用**就危险的内建函数（不带任何模块前缀）
 DANGEROUS_BARE_CALLS = {
     "eval",
@@ -624,11 +610,22 @@ class PythonExecTool(Tool):
                 # 脚本对自身的修改不会污染 workspace 里的原件
                 script = workdir / resolved.name
                 try:
-                    script.write_text(
-                        resolved.read_text(encoding="utf-8"), encoding="utf-8"
-                    )
+                    script_text = resolved.read_text(encoding="utf-8")
                 except Exception as exc:
                     return ToolResult(success=False, error=f"读取脚本失败: {exc}")
+
+                # script_path 分支前面把 code 清空了，跳过了上面的 check_code ——
+                # 这里必须对**脚本实际内容**补做同样的静态检查，否则先 write_script
+                # 写入含 os.system/subprocess 的脚本、再用 script_path 执行，
+                # 就能绕过整个 AST 黑名单。纵深防御的这一层不能留缺口。
+                script_findings = blocking_findings(check_code(script_text))
+                if script_findings:
+                    return ToolResult(
+                        success=False,
+                        error="脚本被安全检查拦截:\n" + format_findings(script_findings),
+                        meta={"blocked": True, "codes": [f.code for f in script_findings]},
+                    )
+                script.write_text(script_text, encoding="utf-8")
             else:
                 script = workdir / _script_name()
                 script.write_text(code, encoding="utf-8")

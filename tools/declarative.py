@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -224,7 +225,10 @@ class DeclarativeHttpTool(Tool):
         def repl(m):
             key = m.group(1)
             if key in values:
-                return str(values[key])
+                # 参数必须 URL 编码后再插入模板 —— 否则 q="a&admin=true"
+                # 会拼出 ?q=a&admin=true，向接口注入额外查询参数。
+                # 模块文档承诺"参数会被 URL 编码，不存在拼接注入"，这里是兑现处。
+                return quote(str(values[key]), safe="")
             return m.group(0)
 
         url = _PLACEHOLDER_RE.sub(repl, template)

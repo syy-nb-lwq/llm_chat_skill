@@ -345,7 +345,9 @@ class LearningAgent:
                         break
                 if deps_ok:
                     # 解析参数变量
-                    resolved = resolve_params(task.params, results)
+                    # 必须传 user_input —— 否则 ${user_input.xxx} 占位符会被
+                    # _resolve_value 当成"无 user_input"解析成空串，工具拿空参数执行。
+                    resolved = resolve_params(task.params, results, user_input)
                     del pending[task_id]
                     if on_event:
                         await on_event(EV_TOOL_CALL, {

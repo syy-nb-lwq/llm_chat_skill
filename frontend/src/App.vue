@@ -76,7 +76,6 @@ import { wsService } from './websocket'
 import { EV } from './events'
 import { sessionApi, skillsApi, toolsApi } from './api/client'
 import ToolList from './components/ToolList.vue'
-import SkillList from './components/SkillList.vue'
 import SkillManager from './components/SkillManager.vue'
 import SkillDrafts from './components/SkillDrafts.vue'
 import FlowPanel from './components/FlowPanel.vue'
@@ -88,7 +87,7 @@ import SessionList from './components/SessionList.vue'
 
 export default {
   name: 'App',
-  components: { ToolList, SkillList, SkillManager, SkillDrafts, FlowPanel, ChatPanel, PatchReview, EvolutionDashboard, MemoryPanel, SessionList },
+  components: { ToolList, SkillManager, SkillDrafts, FlowPanel, ChatPanel, PatchReview, EvolutionDashboard, MemoryPanel, SessionList },
   data() {
     return {
       isConnected: false,
@@ -267,6 +266,15 @@ export default {
     },
 
     handleMessageFinal(payload) {
+      // 后端有些路径只发 message_final、不发任何 message_delta
+      // （教学成功/教学追问/重试无历史/澄清兜底）。这些情况下 pendingIndex 仍是 -1，
+      // 若直接跳过，回答就永远不显示 —— 和 handleMessageDelta 一样先建气泡。
+      if (this.pendingIndex < 0 || this.messages[this.pendingIndex]?.role !== 'assistant') {
+        if (payload.content) {
+          this.messages.push({ role: 'assistant', content: '' })
+          this.pendingIndex = this.messages.length - 1
+        }
+      }
       if (this.pendingIndex >= 0 && payload.content) {
         this.messages[this.pendingIndex].content = payload.content
         // 带上 execution_id —— 前端靠它把 👍/👎 关联到具体那条回答

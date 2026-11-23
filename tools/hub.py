@@ -462,14 +462,25 @@ def get_tool_hub() -> ToolHub:
         _hub = ToolHub()
 
     if not _builtin_tools_added and not _hub._initialized:
+        # 每个工具独立注册：原来三个放在一个 try 里，任一失败就跳过其余且标志不置位；
+        # 下次重试时已注册的那个抛"工具已存在"又被吞，导致后面两个永久缺失。
+        # 现在用 _register_if_absent 做幂等注册，部分失败后重试能补齐。
+        def _register_if_absent(tool_cls):
+            try:
+                inst = tool_cls()
+                if inst.name not in _hub._tools:
+                    _hub.register_python_tool(inst)
+            except Exception as exc:
+                downgrade(exc, where=f'tools/hub.py:register {tool_cls.__name__}')
+
         try:
             from tools.search import SearchTool
             from tools.weather import WeatherTool
             from tools.web_fetch import WebFetchTool
 
-            _hub.register_python_tool(WeatherTool())
-            _hub.register_python_tool(SearchTool())
-            _hub.register_python_tool(WebFetchTool())
+            _register_if_absent(WeatherTool)
+            _register_if_absent(SearchTool)
+            _register_if_absent(WebFetchTool)
             _builtin_tools_added = True
         except Exception as exc:
             downgrade(exc, where='tools/hub.py')

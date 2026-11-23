@@ -1,4 +1,5 @@
 """Skill 加载器 - 从 YAML/MD 文件加载技能"""
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -124,8 +125,10 @@ class SkillLoader:
             regression=_parse_regression(data.get("regression", [])),
             source=data.get("source", "builtin"),
             author=data.get("author"),
-            created_at=data.get("created_at"),
-            updated_at=data.get("updated_at"),
+            # 不能用 data.get() 直接传：YAML 没写时间戳时它会返回 None，
+            # 显式 None 会覆盖 dataclass 的 default_factory，导致落盘写出 null。
+            created_at=data.get("created_at") or datetime.now().isoformat(),
+            updated_at=data.get("updated_at") or datetime.now().isoformat(),
         )
         # M1-04: 把 YAML 的 active 标记挂到 skill 上,Registry 加载时识别
         setattr(skill, "active", bool(data.get("active", False)))

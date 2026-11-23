@@ -23,7 +23,10 @@ _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,63}$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 # 软性问题:只提示,不阻断发布
-_SOFT_ISSUE_MARKERS = ("缺少 examples",)
+_SOFT_ISSUE_MARKERS = (
+    "缺少 examples",
+    "工具表不可用",  # 工具表获取失败时无法校验工具名，提示但不阻断发布
+)
 
 
 def split_issues(issues: Iterable[str]) -> tuple[List[str], List[str]]:
@@ -90,8 +93,16 @@ def validate_skill(skill: Skill, tool_names: Iterable[str] = ()) -> List[str]:
             if dep not in step_ids:
                 issues.append(f"step {st.id} 依赖不存在的 step {dep}")
         if st.tool:
-            if tool_set and st.tool not in tool_set:
-                issues.append(f"step {st.id} 引用未知工具 {st.tool}")
+            if tool_set:
+                if st.tool not in tool_set:
+                    issues.append(f"step {st.id} 引用未知工具 {st.tool}")
+            else:
+                # 工具表为空：可能是 ToolHub 还没初始化 / 获取失败（list_tool_names
+                # 异常时返回 []）。原来这里直接跳过校验，拼错的工具名能蒙混过关。
+                # 报软告警提示"校验未完成"，不阻断发布以免误伤启动早期。
+                issues.append(
+                    f"工具表不可用，无法校验 step {st.id} 引用的工具 {st.tool}"
+                )
 
     if _has_cycle(skill.steps or []):
         issues.append("存在循环依赖")

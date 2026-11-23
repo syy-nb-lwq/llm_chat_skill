@@ -92,8 +92,25 @@ async def test_execute_dag_fallback_allows_downstream():
 
 @pytest.mark.asyncio
 async def test_execute_dag_user_input_passed():
+    """回归：execute_dag 必须把 user_input 透传给 resolve_params。
+
+    以前这里漏传，${user_input.city} 被解析成空串；但旧测试只断言 success，
+    stub 不校验参数值，所以 bug 漏网多年。现在真正断言传给工具的参数。
+    """
+    seen = {}
+
+    class EchoStub(Tool):
+        name = "a"
+        description = ""
+        def schema(self):
+            return ToolSchema(name="a", description="",
+                              params=[ToolParam("x", "string")])
+        async def execute(self, x=""):
+            seen["x"] = x
+            return ToolResult(success=True, data={"city": x})
+
     la = LearningAgent()
-    la.registry.register(_stub("a", ToolResult(success=True, data={"city": "厦门"})))
+    la.registry.register(EchoStub())
 
     tasks = [
         ToolTask(id="a", type="a", params={"x": "${user_input.city}"})
@@ -102,6 +119,7 @@ async def test_execute_dag_user_input_passed():
         tasks, user_input={"city": "厦门"}
     )
     assert results["a"].success
+    assert seen["x"] == "厦门", f"user_input 没透传，解析成了 {seen['x']!r}"
 
 
 @pytest.mark.asyncio

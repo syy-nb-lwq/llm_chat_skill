@@ -77,18 +77,6 @@ class ExecutionCritic:
     def __init__(self, memory_store: Optional[MemoryStore] = None):
         self.memory = memory_store or get_memory_store()
         self.logger = get_logger()
-        self._llm_client = None  # 延迟初始化
-
-    def _get_llm_client(self):
-        """延迟初始化 LLM 客户端"""
-        if self._llm_client is None:
-            try:
-                from infra.llm import get_llm_client
-                self._llm_client = get_llm_client()
-            except Exception as e:
-                self.logger.warning("ExecutionCritic", f"无法初始化 LLM: {e}")
-        return self._llm_client
-
     async def evaluate(
         self,
         context: ExecutionContext,
@@ -432,99 +420,6 @@ class ExecutionCritic:
             f"自动发布通过校验: {patch.target_skill} -> {written} (审计: {audit_path})",
         )
         return True, report, ""
-
-    async def _apply_patch(self, patch: "SkillPatch") -> bool:
-        """尝试将 auto_approved patch 直接应用到 skill YAML"""
-        target_skill = patch.target_skill
-        suggestion = patch.suggestion or {}
-        if not target_skill or not suggestion:
-            return False
-
-        # 构建 updates 字典:从 suggestion 中提取可应用字段
-        updates: Dict[str, object] = {}
-        if "method" in suggestion:
-            updates["method"] = suggestion["method"]
-        if "capability" in suggestion:
-            updates["capability"] = suggestion["capability"]
-        if "patterns" in suggestion:
-            updates["patterns"] = suggestion["patterns"]
-
-        if not updates:
-            return False
-
-        try:
-            from skills.manager import get_skill_store
-            store = get_skill_store()
-            applied = store.update_skill(target_skill, updates)
-            if applied:
-                self.logger.info(
-                    "ExecutionCritic",
-                    f"auto_approved patch {patch.id} 已应用: {target_skill} -> {applied}"
-                )
-                return True
-        except Exception as e:
-            self.logger.warning("ExecutionCritic", f"auto_apply patch 失败: {e}")
-        return False
-
-    async def suggest_improvements(
-        self,
-        context: ExecutionContext,
-    ) -> Optional[Dict]:
-        """可选:对复杂场景调用 LLM 生成改进建议(仅在 confidence < 0.7 时调用)"""
-        llm = self._get_llm_client()
-        if llm is None:
-            return None
-
-        # 构建 prompt
-        prompt = self._build_improvement_prompt(context)
-        if not prompt:
-            return None
-
-        try:
-            response = await llm.chat(
-                messages=[
-                    {"role": "system", "content": "你是一个技能优化专家。根据执行情况,给出改进建议。"},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-            )
-            # 尝试解析 JSON
-            import json
-            import re
-            m = re.search(r"\{[\s\S]*\}", response)
-            if m:
-                return json.loads(m.group())
-        except Exception as e:
-            self.logger.warning("ExecutionCritic", f"LLM 建议生成失败: {e}")
-
-        return None
-
-    def _build_improvement_prompt(self, context: ExecutionContext) -> str:
-        """构建改进建议 prompt"""
-        if context.selected_skill is None:
-            return ""
-
-        lines = [
-            f"场景: {context.scenario}",
-            f"意图: {context.intent}",
-            f"技能: {context.selected_skill}",
-            "执行结果:",
-        ]
-
-        for t in context.tasks:
-            status = "✓" if t.success else "✗"
-            fallback = " (fallback)" if t.used_fallback else ""
-            retry = f" (重试{t.retry_count}次)" if t.retry_count > 0 else ""
-            error = f" - {t.error}" if t.error else ""
-            lines.append(f"  {status} {t.tool}{fallback}{retry}{error}")
-
-        lines.append(f"耗时: {context.latency_ms:.0f}ms")
-        lines.append("")
-        lines.append("请分析失败原因,给出改进建议。输出 JSON 格式:")
-        lines.append('{"diagnosis": "...", "suggestion": {...}, "confidence": 0.0~1.0}')
-
-        return "\n".join(lines)
-
 
 def build_execution_context(
     trace_id: str,

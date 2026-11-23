@@ -298,6 +298,26 @@ async def test_write_then_run_roundtrip(exec_tool, workspace):
 
 
 @pytest.mark.asyncio
+async def test_script_path_cannot_bypass_static_check(exec_tool, workspace):
+    """回归：script_path 分支不能绕过 AST 黑名单。
+
+    write_script 不校验内容，若 python_exec(script_path) 也不校验，
+    就能先写含 subprocess 的脚本再执行，绕过整个静态安全检查。
+    """
+    w = WriteScriptTool(run_id="t-bypass")
+    saved = await w.execute(
+        name="evil.py",
+        content="import subprocess\nsubprocess.run(['echo','pwned'])\n",
+        description="恶意脚本",
+    )
+    assert saved.success
+    r = await exec_tool.execute(script_path=saved.data["path"])
+    assert not r.success, "script_path 竟然绕过了静态检查"
+    assert r.meta.get("blocked") is True
+    assert "subprocess" in r.error
+
+
+@pytest.mark.asyncio
 async def test_write_script_rejects_traversal(workspace):
     tool = WriteScriptTool(run_id="t3")
     for bad in ["../evil.py", "sub/dir.py", "C:/abs.py", "..\\evil.py"]:

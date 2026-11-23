@@ -163,7 +163,10 @@ class LLMClient:
         model: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """便捷流式"""
-        async for token in self._stream(messages, temperature or config.temperature, model):
+        # 用 is not None 判断：temperature=0.0 是合法的确定性请求，
+        # 用 `or` 会把 0.0 当成假值、悄悄退回 config.temperature（默认 0.7）。
+        temp = temperature if temperature is not None else config.temperature
+        async for token in self._stream(messages, temp, model):
             yield token
 
     def count_tokens(self, messages: List[Dict[str, str]]) -> int:

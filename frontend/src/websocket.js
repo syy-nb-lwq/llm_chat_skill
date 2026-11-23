@@ -330,10 +330,6 @@ class WsService {
     this._publish(`chat/${this.clientId}`, { content: message })
   }
 
-  reset() {
-    this._publish(`reset/${this.clientId}`, {})
-  }
-
   /**
    * 切到另一个会话；`sessionId` 留空 = 开一个**新**会话。
    *
@@ -363,9 +359,6 @@ class WsService {
     return this._init(sid)
   }
 
-  ping() {
-    this._publish(`ping/${this.clientId}`, {})
-  }
 
   // 回答反馈(👍/👎):自演化最可靠的质量信号。
   // execution_id 来自 message_final 事件,标识"对哪一条回答"的评价。

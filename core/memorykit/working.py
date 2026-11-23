@@ -156,21 +156,10 @@ class WorkingMemory:
         entry = self._entries.get(key)
         return entry.value if entry is not None else default
 
-    def read_many(self, keys: List[str]) -> Dict[str, Any]:
-        """批量读取（下游只拿自己声明要的，看不到别的）。"""
-        return {
-            k: self._entries[k].value
-            for k in (keys or [])
-            if k in self._entries
-        }
-
     # ===== 约定槽位的便捷读写 =====
 
     def set_plan(self, plan: Any) -> None:
         self.write(SLOT_PLAN, plan, producer="agent", note="本轮计划")
-
-    def get_plan(self, default: Any = None) -> Any:
-        return self.read(SLOT_PLAN, default)
 
     def set_tool_results(self, results: Dict[str, Any]) -> None:
         self.write(SLOT_TOOL_RESULTS, results, producer="agent", note="工具执行结果")
@@ -197,21 +186,6 @@ class WorkingMemory:
 
     def keys(self) -> List[str]:
         return list(self._entries.keys())
-
-    def snapshot(self) -> Dict[str, Any]:
-        """结构化快照（给 trace / 前端流式面板用）。不含值，只有元信息 + 值预览。"""
-        out: Dict[str, Any] = {}
-        for key, entry in self._entries.items():
-            preview = entry.value
-            if not isinstance(preview, (str, int, float, bool, type(None))):
-                try:
-                    preview = json.dumps(preview, ensure_ascii=False)
-                except Exception:
-                    preview = str(preview)
-            if isinstance(preview, str) and len(preview) > 200:
-                preview = preview[:200] + "…"
-            out[key] = {**entry.to_dict(), "preview": preview}
-        return out
 
     def stats(self) -> Dict[str, Any]:
         return {

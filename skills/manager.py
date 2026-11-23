@@ -46,7 +46,6 @@ class SkillStore:
     def reload(self):
         skills = self._loader.load_all()
         self._registry.reload(skills)
-        self._skills = self._registry._by_name
 
     def add(self, skill: Skill, *, set_active: bool = False) -> str:
         """新增一个技能版本。
@@ -57,7 +56,6 @@ class SkillStore:
         self._registry.add(skill)
         if set_active:
             self._registry.set_active(skill.name, skill.version)
-        self._skills = self._registry._by_name
         return skill.id
 
     def persist(self, skill: Skill) -> Optional[Path]:

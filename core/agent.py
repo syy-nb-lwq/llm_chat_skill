@@ -1519,16 +1519,6 @@ class Agent:
             self.logger.error("Agent", f"交互式教导失败: {e}")
             return "好的，请继续告诉我更多信息。"
 
-    async def _finish_teaching(self, user_input: str) -> str:
-        """完成教导: 根据收集的信息创建技能"""
-        self.logger.info("Agent", "尝试完成教导")
-        
-        # 使用完整上下文创建技能
-        ok, msg, skill = await self.trainer.teach(user_input)
-        if ok and skill:
-            return msg
-        return msg  # 返回询问或其他消息
-
     def _extract_entities(self, text: str) -> Dict[str, Any]:
         """轻量实体提取。
 

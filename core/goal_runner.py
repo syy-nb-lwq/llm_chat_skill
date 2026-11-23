@@ -270,7 +270,11 @@ async def run_goal_loop(
         merge_results(result.tool_results, results)
         round_findings = summarize_results(results)
 
-        # 无进展检测：动作相同 + 没有新结果 → 停下
+        # 无进展检测：动作相同 **且** 没有新结果 → 停下。
+        # `and not round_findings` 是刻意的：同样的动作若每轮产生不同结果
+        # （如同一查询返回不同数据、同一脚本产出不同文件），是合法的多轮进展，
+        # 不能因为动作签名相同就提前停。只有动作相同、结果也为空才是真打转。
+        # 见 tests/test_goal_and_subagents.py 里依赖多轮的同动作场景。
         sig = action_signature(getattr(plan, "tool_tasks", []) or [])
         if sig and sig == last_sig and not round_findings:
             result.stop_reason = STOP_NO_PROGRESS

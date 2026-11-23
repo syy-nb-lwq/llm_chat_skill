@@ -21,6 +21,28 @@ class SkillConflictError(Exception):
     pass
 
 
+def _version_key(version: str) -> tuple:
+    """把 semver 字符串转成可比较的元组，避免字典序把 1.10.0 排在 1.9.0 前面。
+
+    非数字段（如 ``1.0.0-beta``）退化成字符串比较，保证不抛异常。
+    """
+    parts = []
+    for seg in str(version).split("."):
+        if seg.isdigit():
+            parts.append((1, int(seg)))   # 数字段：数值比较
+        else:
+            parts.append((0, seg))        # 非数字段：字典序，且排在数字前
+    return tuple(parts)
+
+
+def _max_version(versions) -> Optional[str]:
+    """返回数值语义上最大的版本号。空集合返回 None。"""
+    items = list(versions)
+    if not items:
+        return None
+    return max(items, key=_version_key)
+
+
 class SkillRegistry:
     """技能注册表(支持多版本 + active 指针)"""
 
@@ -74,7 +96,7 @@ class SkillRegistry:
             versions = list(self._by_version.get(name, {}).keys())
             if not versions:
                 return None
-            v = max(versions)
+            v = _max_version(versions)
         return self._by_version.get(name, {}).get(v)
 
     def get_version(self, name: str, version: str) -> Optional[Skill]:
@@ -98,7 +120,7 @@ class SkillRegistry:
         for name, versions in self._by_version.items():
             v = self._active_versions.get(name)
             if v is None:
-                v = max(versions.keys())
+                v = _max_version(versions.keys())
             s = versions.get(v)
             if s is not None:
                 out.append(s)
@@ -122,7 +144,7 @@ class SkillRegistry:
         # 自动选择每个 name 的最新 version 作 active(若 YAML 未声明)
         for name, versions in self._by_version.items():
             if name not in self._active_versions:
-                self._active_versions[name] = max(versions.keys())
+                self._active_versions[name] = _max_version(versions.keys())
 
     def match(self, user_input: str, top_k: int = 3) -> List[Skill]:
         text = user_input.lower().strip()

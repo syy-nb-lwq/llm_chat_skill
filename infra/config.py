@@ -156,6 +156,11 @@ class Config(BaseSettings):
                 )
             return
 
+        # 纯本地部署（Ollama / LocalProvider）不需要任何云 key ——
+        # local provider 在 registry.py 无条件注册，validate 不该硬性要求 OPENAI_API_KEY，
+        # 否则 DEFAULT_PROVIDER=local 的离线部署根本起不来。
+        if getattr(self, "default_provider", "") == "local":
+            return
         if not self.openai_api_key:
             raise ConfigError(
                 "OPENAI_API_KEY is not configured. Set it in .env or copy from .env.example."

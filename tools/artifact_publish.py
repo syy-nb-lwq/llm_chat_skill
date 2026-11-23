@@ -195,7 +195,7 @@ class PublishArtifactTool(Tool):
         except Exception as exc:
             return ToolResult(success=False, error=f"取产物目录失败：{exc}")
 
-        rel = self._dest_rel(name or src.name, dest_root)
+        rel = self._dest_rel(name or src.name)
         if rel is None:
             return ToolResult(
                 success=False,
@@ -231,8 +231,11 @@ class PublishArtifactTool(Tool):
         )
 
     @staticmethod
-    def _dest_rel(name: str, dest_root: Path) -> Optional[Path]:
-        """算出产物区里的相对路径，默认放 output/ 下。"""
+    def _dest_rel(name: str) -> Optional[Path]:
+        """算出产物区里的相对路径，默认放 output/ 下。
+
+        返回的是相对路径，由调用方拼到 dest_root 上；函数内不需要 dest_root。
+        """
         raw = (name or "").strip().replace("\\", "/")
         if not raw:
             return None
